@@ -117,9 +117,7 @@ void testRejectsBadInput() {
   std::cout << "[Test] malformed input\n";
   auto rejects = [](std::span<const std::byte> bytes) {
     aw::registerCraftingGraph(bytes);
-    bool bad = aw::getCraftingError() != nullptr;
-    aw::clearCraftingError();
-    return bad;
+    return aw::getCraftingError() != nullptr;
   };
 
   expect(rejects({}), "empty blob");
@@ -136,8 +134,26 @@ void testRejectsBadInput() {
   expect(rejects(trailing), "trailing byte");
 
   auto zeroDelta = buildSample();
-  zeroDelta[6] = std::byte{0};  // first output delta -> handle stays 0
+  // This is the first output delta. Handle stays 0.
+  zeroDelta[6] = std::byte{0};
   expect(rejects(zeroDelta), "handle 0 output");
+
+  // A rejected blob must leave the last good graph in place: testSample()
+  // installed the sample dump and every call above bailed out early.
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+  expect(graph.nReal == 2 && graph.nItem == 3 && graph.nRecipe == 3,
+         "rejected blob leaves the previous graph in place");
+  const auto itemTargets = graph.i2r.targetsOf(0);
+  expect(itemTargets.size() == 2 && itemTargets[0] == 3 && itemTargets[1] == 4,
+         "previous graph is still coherent after a rejected blob");
+
+  // A failure must not poison the next attempt with a stale error.
+  const std::vector<std::byte> bad = {std::byte{'X'}};
+  aw::registerCraftingGraph(bad);
+  expect(aw::getCraftingError() != nullptr, "bad blob reports an error");
+  aw::registerCraftingGraph(buildSample());
+  expect(aw::getCraftingError() == nullptr, "good blob after a bad one succeeds");
+  aw::clearCraftingError();
 }
 
 }  // namespace

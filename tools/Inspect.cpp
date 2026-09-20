@@ -202,6 +202,10 @@ int main(int argc, char** argv) {
 
   const std::vector<std::byte> bytes = readFile(path);
   aw::registerCraftingGraph(bytes);
+  if (const char *error = aw::getCraftingError()) {
+    std::cout << "malformed graph: " << error << "\n";
+    return EXIT_SUCCESS;
+  }
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
 
   std::cout << "parsed " << bytes.size() << " bytes from " << path << '\n';

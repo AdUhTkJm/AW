@@ -1,12 +1,11 @@
 #include "aw/CraftingGraph.h"
 
 #include <array>
-#include <iostream>
 
 namespace aw {
 CraftingGraph graph;
-// We choose to first parse with errors and use default nodes.
-// When there's an error at the end (which should be rare), we then hand it to Java.
+// Last parse error, or nullptr when the last registerCraftingGraph succeeded.
+// The Java side reads this to turn a malformed blob into an exception.
 const char *error;
 
 namespace {
@@ -162,14 +161,19 @@ Layout scan(std::span<const std::byte> bytes) noexcept {
 
 void prefixSum(std::vector<uint> &v) noexcept {
   v.insert(v.begin(), 0);
-  for (uint i = 0; i < v.size(); i++)
+  for (size_t i = 0; i + 1 < v.size(); i++)
     v[i + 1] += v[i];
 }
 
 }  // namespace
 
 void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
+  clearCraftingError();
+
+  // No need to go on to pass 2 if we already found an error.
   Layout layout = scan(bytes);
+  if (error != nullptr)
+    return;
 
   uint nRecipe = layout.ipr.size();
   graph.nReal = layout.nReal;
