@@ -14,7 +14,6 @@
 #include <jni.h>
 
 #include <cstddef>
-#include <exception>
 #include <span>
 #include <string>
 

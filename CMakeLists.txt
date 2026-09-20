@@ -18,7 +18,7 @@ add_library(aw_crafting STATIC src/CraftingGraph.cpp)
 target_include_directories(aw_crafting PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(aw_crafting PUBLIC cxx_std_20)
 # Deliberately applied globally.
-add_compile_options(-Wall -fno-exceptions -fno-rtti)
+add_compile_options(-Wall -fno-exceptions -fno-rtti -g)
 
 if(AW_BUILD_TOOLS)
    add_executable(awr_inspect tools/Inspect.cpp)

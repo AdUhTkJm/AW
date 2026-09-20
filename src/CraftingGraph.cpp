@@ -1,6 +1,7 @@
 #include "aw/CraftingGraph.h"
 
 #include <array>
+#include <iostream>
 
 namespace aw {
 CraftingGraph graph;
@@ -28,26 +29,14 @@ public:
     return pos >= bytes.size();
   }
 
-  [[nodiscard]]
-  size_t position() const noexcept {
-    return pos;
-  }
-
-  uint8_t readByte() {
+  uint8_t readByte() noexcept {
     if (atEnd())
-      return 0;
+      fail("unexpected EOF", 0);
 
     return std::to_integer<uint8_t>(bytes[pos++]);
   }
 
-  void skip(size_t count) {
-    if (count > bytes.size() - pos)
-      return;
-
-    pos += count;
-  }
-
-  uint readVarInt() {
+  uint readVarInt() noexcept {
     uint value = 0;
     for (size_t i = 0; i < 5; ++i) {
       uint8_t next = readByte();
@@ -58,7 +47,7 @@ public:
     fail("varint longer than 5 bytes", 0);
   }
 
-  ulong readVarLong() {
+  ulong readVarLong() noexcept {
     ulong value = 0;
     for (size_t i = 0; i < 10; ++i) {
       uint8_t next = readByte();
@@ -72,7 +61,7 @@ public:
     fail("varlong longer than 10 bytes", 0);
   }
 
-  uint readHandle() {
+  uint readHandle() noexcept {
     uint handle = readVarInt();
     if (handle == 0)
       fail("resource handle 0 is invalid", 0);
@@ -80,19 +69,14 @@ public:
   }
 };
 
-void checkMagic(ByteReader& in) {
+void checkMagic(ByteReader& in) noexcept {
   for (std::uint8_t expected : kMagic) {
     if (in.readByte() != expected)
       fail("invalid magic bits");
   }
 }
 
-void readHeader(ByteReader& in, uint& realResourceCount, uint& outputCount) {
-  realResourceCount = in.readVarInt();
-  outputCount = in.readVarInt();
-}
-
-void skipWorkstations(ByteReader& in) {
+void skipWorkstations(ByteReader& in) noexcept {
   uint count = in.readVarInt();
   if (count == 0)
     return;
@@ -112,7 +96,7 @@ struct Layout {
   // Maps `recipe` to its number of items (items per recipe).
   std::vector<uint> ipr;
 
-  void noteHandle(uint handle) {
+  void noteHandle(uint handle) noexcept {
     if (handle <= maxHandle)
       return;
 
@@ -124,7 +108,7 @@ struct Layout {
 
 // We do a 2-pass parsing.
 // Here we need to confirm some parameters that shapes the graph.
-Layout scan(std::span<const std::byte> bytes) {
+Layout scan(std::span<const std::byte> bytes) noexcept {
   ByteReader in(bytes);
   Layout layout;
 
@@ -176,8 +160,8 @@ Layout scan(std::span<const std::byte> bytes) {
   return layout;
 }
 
-void prefixSum(std::vector<uint> &v) {
-  v.push_back(0);
+void prefixSum(std::vector<uint> &v) noexcept {
+  v.insert(v.begin(), 0);
   for (uint i = 0; i < v.size(); i++)
     v[i + 1] += v[i];
 }
@@ -235,14 +219,14 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
       graph.i2r.targets[itemSlot] = graph.recipeNode(recipe);
       graph.i2r.weights[itemSlot] = outputAmt;
 
-      uint inputSlot = recipeCursor[recipe];
+      uint slot = recipeCursor[recipe];
       uint input = 0;
       for (uint j = 0; j < nInput; j++) {
-        Amount inputAmount = in.readVarLong();
+        Amount inputAmt = in.readVarLong();
         input += in.readVarInt();
-        graph.r2i.targets[inputSlot] = input - 1;
-        graph.r2i.weights[inputSlot] = inputAmount;
-        inputSlot++;
+        graph.r2i.targets[slot] = input - 1;
+        graph.r2i.weights[slot] = inputAmt;
+        slot++;
       }
 
       recipe++;

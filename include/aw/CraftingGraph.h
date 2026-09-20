@@ -71,7 +71,7 @@ struct CraftingGraph {
   }
 
   [[nodiscard]]
-  NodeId recipeNode(std::uint32_t recipe) const noexcept {
+  NodeId recipeNode(uint32_t recipe) const noexcept {
     return nItem + recipe;
   }
 

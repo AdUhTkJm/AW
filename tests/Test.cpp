@@ -11,12 +11,12 @@
 
 namespace {
 
-int g_failures = 0;
+int failures = 0;
 
 void expect(bool condition, const char* what) {
   if (!condition) {
     std::cout << "  [FAIL] " << what << '\n';
-    ++g_failures;
+    ++failures;
   }
 }
 
@@ -54,8 +54,7 @@ std::vector<std::byte> buildSample() {
   {
     emitVarInt(out, 1);  // r1 output amount
     emitVarInt(out, 2);  // two workstations
-    emitVarInt(out, 2);  // absolute first id (writer quirk)
-    emitVarInt(out, 0);  // leading zero delta
+    emitVarInt(out, 2);  // absolute first id
     emitVarInt(out, 2);  // +2 -> 4
     emitVarInt(out, 1);  // one input
     emitVarInt(out, 5);
@@ -77,7 +76,7 @@ std::vector<std::byte> buildSample() {
 }
 
 void testSample() {
-  std::cout << "sample dump\n";
+  std::cout << "[Test] sample dump\n";
   const std::vector<std::byte> bytes = buildSample();
   aw::registerCraftingGraph(bytes);
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
@@ -115,7 +114,7 @@ void testSample() {
 }
 
 void testRejectsBadInput() {
-  std::cout << "malformed input\n";
+  std::cout << "[Test] malformed input\n";
   auto rejects = [](std::span<const std::byte> bytes) {
     aw::registerCraftingGraph(bytes);
     bool bad = aw::getCraftingError() != nullptr;
@@ -147,10 +146,10 @@ int main() {
   testSample();
   testRejectsBadInput();
 
-  if (g_failures == 0) {
+  if (failures == 0) {
     std::cout << "all tests passed\n";
     return 0;
   }
-  std::cout << g_failures << " check(s) failed\n";
+  std::cout << failures << " check(s) failed\n";
   return 1;
 }
