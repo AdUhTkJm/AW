@@ -4,3 +4,4 @@ compile_commands.json
 temp/
 java-ref/
 .clangd
+AGENTS.md

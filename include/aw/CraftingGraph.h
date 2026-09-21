@@ -15,13 +15,11 @@ using Handle = uint32_t;
 using NodeId = uint32_t;
 using Amount = uint64_t;
 
-// A compressed sparse row matrix.
+// A compressed sparse row matrix, unweighted.
 // Row `r` owns targets[offsets[r] .. offsets[r+1]).
-// In all comments, we denote the number of nodes as V and edges as E.
-struct SparseGraph {
+struct BaseSparseSets {
   std::vector<NodeId> offsets;  // V + 1
   std::vector<NodeId> targets;  // E
-  std::vector<Amount> weights;  // E
 
   [[nodiscard]]
   size_t numVertices() const noexcept {
@@ -37,6 +35,16 @@ struct SparseGraph {
   std::span<const NodeId> targetsOf(size_t row) const noexcept {
     return {targets.data() + offsets[row], targets.data() + offsets[row + 1]};
   }
+};
+
+// Add weights to SparseSets.
+struct SparseGraph : BaseSparseSets {
+  std::vector<Amount> weights;  // E
+
+  [[nodiscard]]
+  size_t numEdges() const noexcept {
+    return targets.size();
+  }
 
   [[nodiscard]]
   std::span<const Amount> weightsOf(size_t row) const noexcept {
@@ -44,11 +52,12 @@ struct SparseGraph {
   }
 };
 
-struct CraftingGraph {
+struct BaseCraftingGraph {
   // See Java side. This is the number of real resources.
   uint32_t nReal = 0;
 
-  // Number of item nodes is set to the highest handle referenced as an output or input.
+  // Number of item nodes: the highest handle referenced as an output, input or
+  // workstation.
   uint32_t nItem = 0;
   uint32_t nRecipe = 0;
 
@@ -59,16 +68,6 @@ struct CraftingGraph {
 
   std::vector<NodeId> output;
   std::vector<Amount> outputAmt;
-
-  [[nodiscard]]
-  static NodeId itemNode(Handle handle) noexcept {
-    return handle - 1;
-  }
-
-  [[nodiscard]]
-  static Handle itemHandle(NodeId node) noexcept {
-    return node + 1;
-  }
 
   [[nodiscard]]
   NodeId recipeNode(uint32_t recipe) const noexcept {
@@ -85,6 +84,39 @@ struct CraftingGraph {
     return node < nItem && node < nReal;
   }
 };
+
+// Add workstation to base crafting graphs.
+struct CraftingGraph : BaseCraftingGraph {
+  // Maps recipes to workstations on which it can be executed.
+  BaseSparseSets workstations;
+
+  [[nodiscard]]
+  static NodeId itemNode(Handle handle) noexcept {
+    return handle - 1;
+  }
+
+  [[nodiscard]]
+  static Handle itemHandle(NodeId node) noexcept {
+    return node + 1;
+  }
+};
+
+struct Subgraph {
+  // No need to care about workstations for planning on this subgraph.
+  BaseCraftingGraph graph;
+
+  // Remappers.
+  // graph item node -> source item node, ascending.
+  std::vector<NodeId> itemOrigin;
+  // graph recipe id -> source recipe id, ascending.
+  std::vector<NodeId> recipeOrigin;
+};
+
+// Computes a subgraph reachable from `output` with available `workstations`.
+//
+// `output` must be a real resource, and an invalid one means an empty subgrap.
+// Handles in `workstations` outside the item range are ignored.
+Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations) noexcept;
 
 void registerCraftingGraph(std::span<const std::byte> bytes) noexcept;
 const char *getCraftingError() noexcept;

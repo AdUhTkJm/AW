@@ -36,6 +36,39 @@ std::vector<std::byte> readFile(const std::string &path) {
   return bytes;
 }
 
+// The tool is built without exceptions, so parse by hand rather than std::stoi.
+bool parseHandle(const std::string &text, aw::Handle &out) {
+  if (text.empty())
+    return false;
+  uint64_t value = 0;
+  for (char c : text) {
+    if (c < '0' || c > '9')
+      return false;
+    value = value * 10 + (uint64_t) (c - '0');
+    if (value > UINT32_MAX)
+      return false;
+  }
+  out = (aw::Handle) value;
+  return true;
+}
+
+bool parseHandleList(const std::string &text, std::vector<aw::Handle> &out) {
+  size_t start = 0;
+  while (true) {
+    const size_t comma = text.find(',', start);
+    const std::string piece = text.substr(
+        start, comma == std::string::npos ? std::string::npos : comma - start);
+    aw::Handle handle = 0;
+    if (!parseHandle(piece, handle))
+      return false;
+    out.push_back(handle);
+    if (comma == std::string::npos)
+      break;
+    start = comma + 1;
+  }
+  return true;
+}
+
 void printSummary(const aw::CraftingGraph& graph) {
   const size_t itemEdges = graph.i2r.numEdges();
   const size_t inputEdges = graph.r2i.numEdges();
@@ -50,8 +83,14 @@ void printSummary(const aw::CraftingGraph& graph) {
         << " produced, " << (graph.nItem - producedItems) << " leaf-only)\n";
   std::cout << "  pseudo-items   : " << (graph.nItem - graph.nReal) << '\n';
   std::cout << "recipe nodes   : " << graph.nRecipe << '\n';
-  std::cout << "item -> recipe   : " << itemEdges << " edges\n";
-  std::cout << "recipe -> item   : " << inputEdges << " edges\n";
+  std::cout << "item -> recipe  : " << itemEdges << " edges\n";
+  std::cout << "recipe -> item  : " << inputEdges << " edges\n";
+  size_t withWorkstations = 0;
+  for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
+    if (!graph.workstations.targetsOf(recipe).empty()) ++withWorkstations;
+  }
+  std::cout << "workstations   : " << graph.workstations.numEdges()
+        << " edges (" << withWorkstations << " recipes have one)\n";
   if (graph.nItem != 0) {
     std::cout << "recipes per item : " << ((double) itemEdges / graph.nItem)
           << " average\n";
@@ -107,6 +146,50 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
 
   check(graph.i2r, graph.nItem, graph.nItem + graph.nRecipe, "itemToRecipe");
   check(graph.r2i, graph.nRecipe, graph.nItem, "recipeToItem");
+
+  // The workstation sets have one row per recipe and only ever name real
+  // resources, which is what makes the intersection test in reachableSubgraph
+  // safe to do with a plain array over the item range.
+  const aw::BaseSparseSets &ws = graph.workstations;
+  if (ws.offsets.size() != graph.nRecipe + 1) {
+    report("workstations: offsets size does not match the recipe count");
+  } else {
+    if (ws.offsets.front() != 0)
+      report("workstations: offsets[0] != 0");
+    if (ws.offsets.back() != ws.targets.size())
+      report("workstations: offsets.back() != edge count");
+    for (size_t i = 0; i + 1 < ws.offsets.size(); ++i) {
+      if (ws.offsets[i] > ws.offsets[i + 1]) {
+        report("workstations: offsets are not monotone");
+        break;
+      }
+    }
+    for (size_t i = 0; i < ws.targets.size(); ++i) {
+      if (ws.targets[i] >= graph.nReal) {
+        report("workstations: node is not a real resource");
+        break;
+      }
+    }
+    for (size_t row = 0; row + 1 < ws.offsets.size(); ++row) {
+      bool ascending = true;
+      for (size_t i = ws.offsets[row] + 1; i < ws.offsets[row + 1]; ++i) {
+        if (ws.targets[i] <= ws.targets[i - 1]) {
+          ascending = false;
+          break;
+        }
+      }
+      if (!ascending) {
+        report("workstations: row is not ascending");
+        break;
+      }
+    }
+  }
+  for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
+    if (graph.output[recipe] >= graph.nReal)
+      continue;  // Synthetic; it needs no workstation.
+    if (graph.workstations.targetsOf(recipe).empty())
+      report("a recipe that outputs a real resource has no workstation");
+  }
 
   if (graph.output.size() != graph.nRecipe ||
     graph.outputAmt.size() != graph.nRecipe) {
@@ -177,6 +260,9 @@ int main(int argc, char** argv) {
   std::string path;
   bool check = false;
   bool dump = false;
+  bool doReach = false;
+  aw::Handle reach = 0;
+  std::vector<aw::Handle> workstations;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -184,8 +270,19 @@ int main(int argc, char** argv) {
       check = true;
     } else if (arg == "--dump") {
       dump = true;
+    } else if (arg == "--reach") {
+      if (i + 1 >= argc || !parseHandle(argv[++i], reach) || reach == 0) {
+        std::cerr << "--reach needs a resource handle\n";
+        return EXIT_FAILURE;
+      }
+      doReach = true;
+    } else if (arg == "--ws") {
+      if (i + 1 >= argc || !parseHandleList(argv[++i], workstations)) {
+        std::cerr << "--ws needs a comma-separated list of resource handles\n";
+        return EXIT_FAILURE;
+      }
     } else if (arg == "-h" || arg == "--help") {
-      std::cout << "usage: awr_inspect [--check] [--dump] <recipes.awr>\n";
+      std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>] <recipes.awr>\n";
       return EXIT_SUCCESS;
     } else if (path.empty()) {
       path = arg;
@@ -196,7 +293,7 @@ int main(int argc, char** argv) {
   }
 
   if (path.empty()) {
-    std::cerr << "usage: awr_inspect [--check] [--dump] <recipes.awr>\n";
+    std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>] <recipes.awr>\n";
     return EXIT_FAILURE;
   }
 
@@ -210,6 +307,17 @@ int main(int argc, char** argv) {
 
   std::cout << "parsed " << bytes.size() << " bytes from " << path << '\n';
   printSummary(graph);
+  if (doReach) {
+    aw::Subgraph sub = aw::reachableSubgraph(reach, workstations);
+    if (sub.graph.nItem == 0) {
+      std::cout << "reachable from handle " << reach << ": invalid output handle\n";
+    } else {
+      std::cout << "reachable from handle " << reach << " with " << workstations.size()
+            << " workstation(s):\n";
+      std::cout << "  item nodes : " << sub.graph.nItem << '\n';
+      std::cout << "  recipes    : " << sub.graph.nRecipe << '\n';
+    }
+  }
   if (dump)
     dumpGraph(graph);
   if (check) {
