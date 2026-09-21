@@ -1,6 +1,11 @@
 // awr_inspect -- decodes a .awr dump, prints a summary, and optionally
-// validates the CSR invariants or dump every adjacency row. Built for
-// the WSL side, where running Minecraft is inconvenient.
+// validates the CSR invariants, dumps every adjacency row, or expands the
+// whole subgraph reachable from one item with all workstations present.
+// Built for the WSL side, where running Minecraft is inconvenient.
+//
+// The optional --subgraph mode also reads the sidecar name table
+// (recipes-*.names.tsv) so real items print by name and pseudo-resources
+// print as #handle.
 //
 // Note that -fno-exception is also enabled for this file.
 
@@ -11,6 +16,8 @@
 #include <iostream>
 #include <span>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "aw/CraftingGraph.h"
@@ -67,6 +74,92 @@ bool parseHandleList(const std::string &text, std::vector<aw::Handle> &out) {
     start = comma + 1;
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Name table
+// ---------------------------------------------------------------------------
+// RecipeReader.writeNameTable emits one line per node:
+//
+//   <handle> \t <kind> \t <name>
+//
+// where kind is "resource" (name is the item id) or "ingredient" (name is the
+// comma-separated member list of a pseudo-resource). Only resource names are
+// used for display; pseudo-resources print as #handle because their member
+// lists are too long to read in a listing.
+struct NameTable {
+  // Indexed by handle - 1. Empty when the image has no entry for it.
+  std::vector<std::string> names;
+  // Resource name -> handle. When a name is not unique the first handle wins.
+  std::unordered_map<std::string, aw::Handle> byName;
+  std::unordered_set<std::string> ambiguous;
+};
+
+bool loadNames(const std::string &path, aw::Handle nReal, NameTable &out) {
+  std::ifstream in(path);
+  if (!in)
+    return false;
+
+  std::string line;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    if (line.empty() || line[0] == '#')
+      continue;
+
+    const size_t first = line.find('\t');
+    if (first == std::string::npos)
+      continue;
+    const size_t second = line.find('\t', first + 1);
+    if (second == std::string::npos)
+      continue;
+
+    aw::Handle handle = 0;
+    if (!parseHandle(line.substr(0, first), handle) || handle == 0)
+      continue;
+
+    const std::string name = line.substr(second + 1);
+    if (name.empty())
+      continue;
+
+    if (out.names.size() < handle)
+      out.names.resize(handle);
+    out.names[handle - 1] = name;
+
+    // Ingredients are pseudo-resources; only real resources are addressable.
+    if (handle <= nReal) {
+      auto [it, inserted] = out.byName.emplace(name, handle);
+      if (!inserted && it->second != handle)
+        out.ambiguous.insert(name);
+    }
+  }
+  return true;
+}
+
+std::string defaultNamesPath(const std::string &awr) {
+  const std::string suffix = ".awr";
+  if (awr.size() >= suffix.size() &&
+      awr.compare(awr.size() - suffix.size(), suffix.size(), suffix) == 0)
+    return awr.substr(0, awr.size() - suffix.size()) + ".names.tsv";
+  return awr + ".names.tsv";
+}
+
+std::string itemLabel(const aw::CraftingGraph &graph, const NameTable &names,
+                      aw::NodeId node) {
+  const aw::Handle handle = graph.itemHandle(node);
+  if (node >= graph.nReal)
+    return "#" + std::to_string(handle);
+  if (handle <= names.names.size() && !names.names[handle - 1].empty())
+    return names.names[handle - 1];
+  return "#" + std::to_string(handle);
+}
+
+aw::Handle resolveTarget(const std::string &text, const NameTable &names) {
+  aw::Handle handle = 0;
+  if (parseHandle(text, handle))
+    return handle;
+  const auto it = names.byName.find(text);
+  return it == names.byName.end() ? 0 : it->second;
 }
 
 void printSummary(const aw::CraftingGraph& graph) {
@@ -254,13 +347,81 @@ void dumpGraph(const aw::CraftingGraph& graph) {
   }
 }
 
+// Prints every recipe of `sub` as "output xN <- input xN, ...", plus a few
+// stats. Pseudo-resources are shown as #handle. Item nodes are renumbered in
+// the subgraph, so they are mapped back through itemOrigin before labelling.
+void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
+                  const NameTable &names) {
+  const aw::BaseCraftingGraph &g = sub.graph;
+
+  auto item = [&](aw::NodeId node) {
+    return itemLabel(graph, names, sub.itemOrigin[node]);
+  };
+
+  size_t leaves = 0;
+  size_t multi = 0;
+  size_t bulk = 0;
+  std::vector<aw::NodeId> leafItems;
+  for (aw::NodeId i = 0; i < g.nItem; i++) {
+    const size_t producers = g.i2r.targetsOf(i).size();
+    if (producers == 0) {
+      leaves++;
+      leafItems.push_back(i);
+    }
+    if (producers > 1)
+      multi++;
+  }
+  for (uint32_t r = 0; r < g.nRecipe; r++) {
+    if (g.outputAmt[r] > 1)
+      bulk++;
+  }
+
+  size_t noWorkstation = 0;
+  for (uint32_t r = 0; r < graph.nRecipe; ++r) {
+    if (graph.output[r] < graph.nReal && graph.workstations.targetsOf(r).empty())
+      noWorkstation++;
+  }
+
+  std::cout << "# subgraph: " << g.nItem << " items (" << g.nReal << " real, "
+            << (g.nItem - g.nReal) << " pseudo), " << g.nRecipe << " recipes\n";
+  std::cout << "# items with >1 recipe : " << multi << '\n';
+  std::cout << "# recipes with amount>1 : " << bulk << '\n';
+  std::cout << "# leaf items (no recipe) : " << leaves << '\n';
+  if (noWorkstation != 0)
+    std::cout << "# note: " << noWorkstation
+              << " real recipes have no workstation and are never reachable\n";
+
+  for (uint32_t r = 0; r < g.nRecipe; r++) {
+    std::cout << item(g.output[r]) << " x" << g.outputAmt[r] << " <- ";
+    const auto targets = g.r2i.targetsOf(r);
+    const auto weights = g.r2i.weightsOf(r);
+    if (targets.empty()) {
+      std::cout << "(nothing)";
+    } else {
+      for (size_t k = 0; k < targets.size(); k++) {
+        if (k != 0)
+          std::cout << ", ";
+        std::cout << item(targets[k]) << " x" << weights[k];
+      }
+    }
+    std::cout << '\n';
+  }
+
+  std::cout << "#\n# leaf items:\n";
+  for (aw::NodeId i : leafItems)
+    std::cout << "#   " << item(i) << '\n';
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   std::string path;
+  std::string namesPath;
+  std::string treeArg;
   bool check = false;
   bool dump = false;
   bool doReach = false;
+  bool doTree = false;
   aw::Handle reach = 0;
   std::vector<aw::Handle> workstations;
 
@@ -270,6 +431,19 @@ int main(int argc, char** argv) {
       check = true;
     } else if (arg == "--dump") {
       dump = true;
+    } else if (arg == "--names") {
+      if (i + 1 >= argc) {
+        std::cerr << "--names needs a path\n";
+        return EXIT_FAILURE;
+      }
+      namesPath = argv[++i];
+    } else if (arg == "--subgraph" || arg == "--tree") {
+      if (i + 1 >= argc) {
+        std::cerr << "--subgraph needs an item name or handle\n";
+        return EXIT_FAILURE;
+      }
+      treeArg = argv[++i];
+      doTree = true;
     } else if (arg == "--reach") {
       if (i + 1 >= argc || !parseHandle(argv[++i], reach) || reach == 0) {
         std::cerr << "--reach needs a resource handle\n";
@@ -282,7 +456,8 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
       }
     } else if (arg == "-h" || arg == "--help") {
-      std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>] <recipes.awr>\n";
+      std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
+                   "                   [--names <table.tsv>] [--subgraph <name|handle>] <recipes.awr>\n";
       return EXIT_SUCCESS;
     } else if (path.empty()) {
       path = arg;
@@ -293,7 +468,8 @@ int main(int argc, char** argv) {
   }
 
   if (path.empty()) {
-    std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>] <recipes.awr>\n";
+    std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
+                 "                   [--names <table.tsv>] [--subgraph <name|handle>] <recipes.awr>\n";
     return EXIT_FAILURE;
   }
 
@@ -307,6 +483,43 @@ int main(int argc, char** argv) {
 
   std::cout << "parsed " << bytes.size() << " bytes from " << path << '\n';
   printSummary(graph);
+  if (doTree) {
+    NameTable names;
+    const std::string tablePath = namesPath.empty() ? defaultNamesPath(path) : namesPath;
+    if (loadNames(tablePath, graph.nReal, names)) {
+      std::cout << "names: " << names.names.size() << " entries from " << tablePath << '\n';
+    } else if (!namesPath.empty()) {
+      std::cerr << "cannot read name table: " << tablePath << '\n';
+      return EXIT_FAILURE;
+    } else {
+      std::cout << "names: none (looked for " << tablePath << "), using handles\n";
+    }
+
+    if (names.ambiguous.count(treeArg) != 0)
+      std::cerr << "warning: '" << treeArg << "' matches multiple handles; using "
+                << names.byName[treeArg] << '\n';
+
+    const aw::Handle target = resolveTarget(treeArg, names);
+    if (target == 0 || target > graph.nItem) {
+      std::cerr << "unknown item: " << treeArg << '\n';
+      return EXIT_FAILURE;
+    }
+
+    // "All workstations present": allow every real resource as a station.
+    std::vector<aw::Handle> all;
+    all.reserve(graph.nReal);
+    for (aw::Handle h = 1; h <= graph.nReal; ++h)
+      all.push_back(h);
+
+    const aw::Subgraph sub = aw::reachableSubgraph(target, all);
+    if (sub.graph.nItem == 0) {
+      std::cerr << "no subgraph reachable from " << treeArg << '\n';
+      return EXIT_FAILURE;
+    }
+    std::cout << "subgraph from " << itemLabel(graph, names, target - 1)
+              << " (all workstations):\n";
+    dumpSubgraph(sub, graph, names);
+  }
   if (doReach) {
     aw::Subgraph sub = aw::reachableSubgraph(reach, workstations);
     if (sub.graph.nItem == 0) {
