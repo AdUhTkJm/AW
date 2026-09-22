@@ -90,6 +90,12 @@ struct CraftingGraph : BaseCraftingGraph {
   // Maps recipes to workstations on which it can be executed.
   BaseSparseSets workstations;
 
+  // Tag-edge pruning. `tagEdgeDominated[r] == 1` means recipe r is a synthetic
+  // tag edge `T <- m` whose member m is cost-dominated by another member of T
+  // (see docs/pruning.typ). Reachability may drop such an edge when the member
+  // has no inventory. Always 0 for a recipe that outputs a real resource.
+  std::vector<uint8_t> tagEdgeDominated;  // nRecipe entries
+
   [[nodiscard]]
   static NodeId itemNode(Handle handle) noexcept {
     return handle - 1;
@@ -123,7 +129,17 @@ struct Subgraph {
 //
 // `output` must be a real resource, and an invalid one means an empty subgrap.
 // Handles in `workstations` outside the item range are ignored.
-Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations) noexcept;
+//
+// `inventory` is indexed by source item node (handle - 1), matching
+// `planCrafting`. A dominated tag edge is only dropped when the player holds
+// none of the member, so existing stock can still be spent on the tag.
+Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
+                           std::span<const Amount> inventory = {}) noexcept;
+
+// Tag-edge dominance pruning is on by default. Turning it off behaves as if no
+// edge were dominated and exists for A/B testing.
+void setTagPruningEnabled(bool enabled) noexcept;
+bool isTagPruningEnabled() noexcept;
 
 void registerCraftingGraph(std::span<const std::byte> bytes) noexcept;
 const char *getCraftingError() noexcept;

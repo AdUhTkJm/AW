@@ -1,221 +1,102 @@
+#import "@preview/cuti:0.4.0"
 #set document(title: "Pruning dominated tag members")
 #set page(paper: "a4", margin: 2.3cm)
-#set text(size: 10.5pt)
+#set text(size: 10.5pt, font: ("Libertinus Serif", "Noto Serif CJK SC"))
 #set heading(numbering: "1.1")
 #set math.equation(numbering: "(1)")
 #show link: underline
 
 #align(center)[
-  #text(size: 17pt, weight: "bold")[Pruning dominated tag members from the crafting graph]
+  #text(size: 17pt, weight: "bold")[基于支配的剪枝]
   #v(0.3em)
-  #text(size: 10pt)[An introduction to the algorithm used by the Applied Wheelchair planner]
+  #text(size: 10pt)[应用轮椅的合成规划器优化]
 ]
 
-= The crafting graph
+// definition for math environment
+#let witness = "witness"
+#let dominate = "dominate"
+#let cnt = "cnt"
+#let valid = "valid"
+#let alive = "alive"
 
-A *crafting graph* has three kinds of nodes.
+= 基于支配的剪枝
 
-- An *item* (a resource, addressed by a handle) is something the player wants or
-  has.
-- A *recipe* produces one item (in some amount) from several input items (in
-  given amounts), and can only be executed at one of a set of workstations.
-- A *tag*, also called a *pseudo-resource*, is a synthetic node that stands for "any one of these items". The planner encodes it with one synthetic recipe $T <- m$ per member $m$, and no workstation. A tag is therefore just an OR-gadget bolted onto the item space. It can also be viewed as a special item.
+== 合成图
 
-The natural way to read the graph is *AND-OR*:
+合成图是一个二分图。物品只能指向配方，而配方只能指向物品。
 
-- an *item* is *OR* over its recipes -- you pick one;
-- a *recipe* is *AND* over its inputs -- you need all of them;
-- a *tag* is *OR* over its members -- you pick one.
+它还是一个 AND-OR 图，同时配方指向物品的边是*超边*（AND 边）：我们熟悉的边（OR 边）是任选一条边即可，而这里的超边则需要同时走完所有边。
 
-That reading is the source of every subtlety below. A control-flow graph, the usual home of dominators, is a plain graph in which every node picks one successor, so it is OR all the way down. A recipe is therefore called a hyperedge.
+== 支配
 
-The planner solves a linear program. With $x_r$ the number of times recipe `r` is executed, it minimizes the total number of executions subject to a balance constraint per item: production minus consumption must cover the target (plus whatever inventory is available). Base items that have no recipe are simply free. The objective is therefore
+我们考虑这样的一个例子：假设我们要合成钢制机壳，它需要 4 个任意种类的玻璃。我们知道 Minecraft 中有 16 种染色玻璃，它们通过普通玻璃和染料合成。注意到在合成任何一种染色玻璃时，我们都需要经过普通玻璃，所以普通玻璃*支配*了所有的合成路径。这时，额外花费物品去合成染色玻璃自然是不划算的。
 
-$ "minimize" sum_(r) x_r, quad x_r >= 0. $
+在编译原理中，我们熟知计算支配关系的算法。然而，那个算法没法直接用在这里，因为它只能处理普通的图，而这是一个 AND-OR 图。
 
-Everything below is about removing columns $x_r$ that can never help, without changing the optimum.
+所以，我们接下来就需要根据我们的使用场景，找出计算*支配*关系的算法，然后基于它进行*剪枝*。
 
-= The redundancy
+我们的直觉可能会 $w$ 支配 $m$ 定义为：合成 $m$ 时，一定绕不开 $w$。然而，这样其实还不够：假设 $8m <- w$ 是 $m$ 唯一的合成方式。这时，合成 $m$ 时确实一定绕不开 $w$，但这能说明我们不需要 $m$、直接用 $w$ 了吗？其实是不可以的，因为如果有一个配方中 $m$, $w$ 可以互换，那么显然用 $m$ 更赚。
 
-Consider `mekanism:steel_casing`, which is made from osmium, steel and four
-units of a tag we will call `#2377`. That tag contains `minecraft:glass` and
-all sixteen stained glasses. Each stained glass is made from glass (and a dye),
-so no plan ever needs to *craft* stained glass in order to serve `#2377`:
-normal glass is available as a member, and it is the cheaper choice. The
-synthetic recipe `#2377 <- <stained glass>` is dead weight.
+然而当前的实现有个问题，线性规划里我们的目标是合成步数最少，所以这时 $m$ 可能确实没有被规划。但总之从合成规划而不是算法实现的角度来看，$m$ 是不能消去的。
 
-So we want a rule of the form: inside a tag $T$, if member $m$ is "dominated" by another member $w$, then the edge $T <- m$ can be dropped. The rest of this note is about what "dominated" has to mean, and why some of the obvious graph answers are wrong.
+所以，我们给出*支配*的定义。这两种情况都算作 $w$ 支配 $m$：
 
-= What does not work
+1. 合成 $m$ 的任何一种方法，至少会消耗*等量*的 $w$。
+2. 合成 $m$ 的任何一种方法，至少会消耗*等量*的某个 tag，而其中所有不是 $w$ 的资源都支配 $w$。
 
-== Plain reachability is far too weak
+我们将这个关系记作 $dominate(m, w)$。
 
-Write `m -> j` when some recipe of `m` takes `j` as an input, and say `w` is
-reachable from `m` if there is a path `m -> ... -> w`. The tempting rule "drop
-`T <- m` when a co-member `w` is reachable from `m`" is unsound. Witness the
-tiny graph
+=== 支配关系的计算
 
-```text
-tag T = {m, w}        tag J = {w, z}
-m x1 <- J x1          z is a free leaf
-w x1 <- a x1 <- b x1 <- base
-P x1 <- T x1
+最直接的计算方式是直接遍历所有的 $(m, w)$，然后根据定义判断。这肯定很慢，所以为了加速，我们只想收集有用的 $(m, w)$，排除一些明显不可能支配 $m$ 的 $w$。
+
+具体怎么算有用呢？对于一个物品 $m$ 与合成 $a$ 个它的配方 $r$ 而言，如果 $r$ 中含有至少 $a$ 个 $w$ 作为输入，那么 $w$ 确实有可能支配 $m$，这时 $(m, w)$ 是有用的。如果 $r$ 中含有的不是某个具体的资源，而是一个 tag $J$，那么 $J$ 的每一种资源都可以当做上述的 $w$，这时所有的 $(m, w)$ 都是有用的。我们将这个集合称作 $witness(r)$.
+
+接下来，将 $m$ 所有配方 $r$ 的 $witness(r)$ 取交集，得到的结果称作 $c_1(m)$。这里取交集是因为根据定义，*每一个*配方都必须用到 $w$。
+
+有了所有的 $(m, w)$，我们又该如何精确判断 $w$ 是否支配 $m$ 呢？
+
+我们的想法是，首先假设所有的 $(m, w)$ 都满足 $dominate(m, w)$，然后逐渐删除明显不正确的那些。我们将算法过程中逐渐缩小的这个关系称作 $alive(m, w)$，在结束时它应当收敛于 $dominate(m, w)$。由于 $dominate$ 的定义是递归的，不动点迭代是常规方法。
+
+我们不妨将支配定义的两个条件记作：$valid(m, w) = forall r in "recipes"(m). exists (j, a) in "input"(r). j = w or "isTag"(j) and w in M(j) and forall z in M(j). "alive"(z, w)$。
+
+注意到，这和 $dominate$ 的定义是一样的，只是将递归检测 $dominate$ 的部分改换为了检测 $alive$。下面的代码实现中我们将用到这个辅助函数。
+
+在删除 $valid(m, w)$ 不成立的节点时，一些节点可能受到影响，不再成立。对于普通的资源倒还好说，但如果遇到的是 tag 就比较麻烦了。将 tag 记作 $J$，它的成员记作 $M$，其中 $w = M[i]$ 是 $M$ 中的第 $i$ 个资源。根据定义，如果 $M$ 里除了 $w$ 以外，使得 $dominate(z, w)$ 成立的 $z$ 数量恰好是 $|M| - 1$，那么 $w$ 就支配 $m$。我们不妨将这个数量称作 $cnt(J, i)$。当且仅当 $cnt(J, i)$ 从 $|M| - 1$ 掉到 $|M| - 2$ 的时候，$alive(m, w)$ 从成立变为不成立，才会产生影响。这就是维护 $cnt$ 的作用。
+
+我们维护一个 worklist，来将 $alive$ 迭代至不动点：
+
+```py
+for (m, w) in universe:
+  worklist.push(m, w)
+
+# 不断删除不可能的节点
+while not empty(worklist):
+  m, w = worklist.pop()
+  if alive(m, w) and not valid(m, w):
+    kill(m, w)
+
+def kill(m, w):
+  dominate(m, w) = 0
+  for (J: tag) in tagsOf(m).intersect(tagsOf(w)):
+    M = members(J)
+    i = lowerBound(M, w)
+    cnt(J, i) -= 1
+    if cnt(J, i) + 1 == len(M) - 1:
+      for m2 in consumers(J):
+        push(m2, w) # may not exist; skip if absent
 ```
 
-The cheapest way to produce `P` is `P <- T <- m <- J <- z`, which never touches
-`w`. Reachability still finds a path `m -> J -> w`, so the rule would drop
-`T <- m` and multiply the cost of `P` by a constant factor.
+== 剪枝
 
-On real data reachability is worse than merely loose. The requirement graph is
-full of conversion cycles, so unrelated items reach each other: `acacia_planks`
-has a recipe from `acacia_fence_gate`, a fence gate can be made from sticks, a
-stick from a torch, a torch from a charcoal tag, charcoal from Mekanism sawdust,
-and sawdust from a general "buttons" tag that contains `bamboo_button`. Hence
-"`acacia_planks` reaches `bamboo_button`", which means nothing.
+对于含有成员 $M$ 的 tag $T$，在 $M$ 中对所有留下的 $alive(m, w)$ 建立一条边 $m -> w$。注意这可能成环，所以我们需要先缩点：计算强连通分量（SCC），然后在所有出度为 0 的 SCC 中挑选一个代表元。这时，其他的所有标签都可以到达这个代表元，将它们替换即可。
 
-== Path post-dominance misses the AND nodes
+== 复杂度
 
-In a control-flow graph one says `d` *post-dominates* `n` when every path from
-`n` to the exit passes through `d`. The equation is a dataflow fixpoint
+最坏是 $O(N^2)$ 的，但一般坏不到这个程度。对于 2000 个资源的 `recipe-small`，最初的 $alive$ 大概有 47000 对，而含有 12000 个资源的 `recipe-nast` 则有 101 万对，不算太多。
 
-$ upright("pdom")(n) = {n} union inter.big_(s in "succ"(n)) upright("pdom")(s), $
+== 效果
 
-and Lengauer-Tarjan computes it in near-linear time using the tree structure of
-a depth-first search. This does *not* transfer here, for two reasons.
+在 `recipe-small` 上，大概可以剪去 16% 的边，减少 10% 的单纯形法变基。
 
-First, a path chooses one input per recipe, but a derivation needs all of them.
-An AND node forces its other children even when a path skips them. Take
-`m x1 <- {w x1, u x1}` with `u` a leaf: the path `m -> u` avoids `w`, so `w` is
-not a path post-dominator, yet *every* derivation of `m` contains `w` because
-the recipe needs both inputs. Path post-dominance is strictly *stronger* than
-unavoidability, so it silently misses cases. The glass family is exactly such a
-case: a stained glass also needs a dye, and the path to that leaf avoids glass,
-so a path-based analysis never notices that glass is in fact unavoidable.
-
-Second, the requirement graph is cyclic, and post-dominance to a set of leaves
-is degenerate for items caught in a cycle (there may be no path to a leaf at
-all). So even setting the quantifier issue aside, the classical algorithm has
-nothing to compute on.
-
-In short: no, Lengauer-Tarjan does not apply, and the reason is the AND nodes
-(the hyperedges), not merely the sizes.
-
-== Unavoidability still is not enough
-
-Suppose $w$ really is in every derivation of $m$. That is not sufficient, because the objective counts executions, not materials. If
-
-```text
-m x8 <- w x1
-```
-
-then every derivation of $m$ contains $w$, yet one execution of $m$ yields 8 units. Dropping $T <- m$ in favour of $w$ might cause more $w$'s to be crafted, increasing total amount of recipes executed. So the rule must compare *quantities*: every recipe of $m$ has to spend at least as much as what $w$ spends to produce $m$.
-
-= The relation we actually want
-
-Define $U(m)$, the set of items that appear in *every* derivation of $m$, by the AND-OR equations:
-
-$ U(X) = {X} union inter.big_(r in R(X)) U(r) $ <eq:item>
-
-$ U(r) = union.big_(j in I(r)) U(j) $ <eq:recipe>
-
-$ U(T) = inter.big_(m in M(T)) U(m), "where" U(ell) = {ell} "for a leaf" ell. $ <eq:tag>
-
-Here $R(X)$ is the recipes producing $X$, $I(r)$ the inputs of $r$, and $M(T)$ the members of tag $T$. The definition is obvious to understand and captures the whole AND-OR interpretation.
-
-We intend to solve it via iteration till fixed point. The fixed point is well defined because the right-hand sides are monotone in $U$; the largest solution is the one we
-want, and it agrees with the semantic reading on obtainable items. Items that are not obtainable at all satisfy the equations vacuously, which is harmless because such an item can never be crafted anyway.
-
-Now add the quantity. We say $m$ requires $w$ when for every recipe $r$ of $m$, there is an input $(j, a)$ with $a >= "out"(r)$ such that either $j = w$, or $j$ is a tag with $w in M(j)$ and every other member of $j$ also requires $w$. This is @eq:recipe and @eq:tag combined with the "at least as much as the output" condition.
-
-== Why that is enough
-
-Let $c(x)$ be the minimum number of executions needed to obtain one unit of $x$, with base items free. Take a recipe $r$ of $m$ whose gating input is a tag $j$ containing $w$. Because every other member of $j$ requires $w$, the cheapest way to satisfy $j$ is $w$ itself, so it costs $c(w)$ per unit; and the recipe consumes $a >= "out"(r)$ of it. That
-route therefore costs at least
-
-$ (1 + a c(w)) / "out"(r) >= c(w) + 1 / "out"(r) > c(w). $
-
-Every route of $m$ is gated this way, and $c(m)$ is the cheapest route, so $c(m) > c(w)$. Serving a tag $T$ through $w$ is thus strictly cheaper than crafting $m$ for $T$.
-
-The only way $m$ could still win is if it were already
-sitting in the player's inventory, where it is free -- which is exactly the case handled separately in @sec:inventory.
-
-= From requirement relation to edge pruning
-
-For each tag $T$ build a directed graph on its members with an edge $m -> w$ whenever $m$ requires $w$. We keep a set $K$ of members and drop $T <- m$ for every $m$ that can reach some $w in K$. The kept set must be chosen so that every dropped member has a kept target, and no kept member is dropped. The clean choice is: condense the graph into strongly connected components (SCCs) and keep one representative from each *sink* component. Then
-
-- every tag keeps at least one member, so no tag ever becomes unsatisfiable;
-- every other member reaches a sink representative along `requires` edges, so it
-  can be replaced by it;
-- mutual-requirement cycles collapse to one surviving representative instead of
-  all members being dropped.
-
-= Inventory
-#label("sec:inventory")
-
-The cost argument assumes nothing is free. Player inventory breaks that assumption for the item being dominated, so the pruning is applied per query and guarded: drop $T <- m$ only when $"inventory"[m] = 0$; keep it when the player actually holds $m$, so the free units can still be spent on the tag.
-
-The member node itself is never removed, and none of its other consumers are touched. This matters: a stained glass is also used for panes and for Mekanism pigments, so
-removing its *production* recipes would be wrong, while removing the *tag edge*
-is fine.
-
-Note also that workstation availability never enters the argument. Filtering
-recipes by workstation only removes options, and removing options cannot create a
-new cheaper route for `m`, so a precomputed `requires` relation stays valid for
-every workstation set.
-
-= The algorithm
-
-The greatest fixpoint of `requires` is computed with a worklist over pairs $(m, w)$.
-
-1. For every real item $m$ with recipes, compute the one-step candidates by intersecting, over its recipes, the set of inputs that carry at least the recipe's output (real inputs directly; tag inputs expand to their members).
-   
-  This is a superset of the pairs worth keeping.
-
-2. Add support pairs $(z, w)$ for members $z, w$ of a common tag, where $z$ is producible. Initialize all pairs as alive.
-
-3. For each tag $J$ and each member $w$, maintain a counter of how many other members $z$ currently have $(z, w)$ alive. The tag may gate through $w$ exactly when that counter reaches $|M(J)| - 1$; a member with no recipe contributes nothing, so a leaf member always blocks the gate.
-
-4. Rip pairs out of the alive set whenever they are no longer justified, and when a pair $(z, w)$ dies, decrement the counters of every tag containing both $z$ and $w$, re-queueing that tag's consumers. Each pair dies at most once.
-
-5. Pick the surviving representatives per tag by SCC condensation, as in the previous section, and mark the corresponding synthetic recipes.
-
-The candidate pairs are bounded by the sum of squared tag sizes plus the one-step candidate sets: about 47 thousand pairs for the small sample corpus and 1.05 million for the large one. With the counters the fixpoint is near-linear in
-that size.
-
-= Results
-
-Reachable subgraph, no inventory, comparing the full graph with the pruned one:
-
-#table(
-  columns: (auto, auto, auto, auto),
-  table.header([*corpus*], [*dominated tag edges*], [*`steel_casing` recipes*], [*items*]),
-  [small], [817 / 3102 (26.3%)], [5075 -> 4230], [1246 -> 1212],
-  [large], [3648 / 11398 (32.0%)], [23304 -> 19664], [5965 -> 5194],
-)
-
-On the small corpus the `mekanism:steel_casing` solve drops from 915 to 154
-simplex iterations, and a 300-target sample showed no objective increase and no
-lost feasibility. Workstation-independent, and the inventory guard keeps the
-dominated members spendable.
-
-= Cheat sheet
-
-#table(
-  columns: (auto, auto, auto),
-  table.header([*Rule*], [*Sound?*], [*Why*]),
-  [some path reaches `w`], [no], [ignores AND: `m <- J <- z` route is missed],
-  [every path reaches `w`], [incomplete], [misses AND-forced inputs such as the dye path],
-  [every derivation contains `w`], [no], [bulk amplification: `m x8 <- w x1`],
-  [`requires(m, w)` with amounts], [yes], [cost argument of §5],
-  [same, plus inventory guard], [yes], [free inventory for the dominated item],
-)
-
-= Further reading
-
-- T. Lengauer and R. E. Tarjan, "A fast algorithm for finding dominators in a
-  flowgraph": the classical path-dominator algorithm that does *not* generalise
-  to the AND nodes here.
-- R. Gupta, "Generalized dominators and post-dominators": a different
-  generalisation (sets of vertices that dominate together).
-- Any standard treatment of monotone dataflow / Kildall iteration for the
-  fixpoint style used above.
+额外耗时倒是没有测量，但既然大头只在预处理时进行一次，应当是赚的。

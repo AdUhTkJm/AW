@@ -294,6 +294,24 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
       }
     }
   }
+  // Only synthetic tag edges may be flagged as dominated.
+  if (graph.tagEdgeDominated.size() != graph.nRecipe) {
+    report("tagEdgeDominated size does not match the recipe count");
+  } else {
+    for (size_t r = 0; r < graph.nRecipe; ++r) {
+      if (!graph.tagEdgeDominated[r])
+        continue;
+      if (graph.output[r] < graph.nReal) {
+        report("a real recipe is marked as a dominated tag edge");
+        break;
+      }
+      if (graph.r2i.targetsOf(r).size() != 1) {
+        report("a dominated tag edge is not a single-input recipe");
+        break;
+      }
+    }
+  }
+
   for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
     if (graph.output[recipe] >= graph.nReal)
       continue;  // Synthetic; it needs no workstation.
@@ -473,6 +491,7 @@ int main(int argc, char** argv) {
   std::string invArg;
   bool check = false;
   bool dump = false;
+  bool noPrune = false;
   bool doReach = false;
   bool doTree = false;
   bool doPlan = false;
@@ -486,6 +505,8 @@ int main(int argc, char** argv) {
       check = true;
     } else if (arg == "--dump") {
       dump = true;
+    } else if (arg == "--no-prune") {
+      noPrune = true;
     } else if (arg == "--names") {
       if (i + 1 >= argc) {
         std::cerr << "--names needs a path\n";
@@ -530,7 +551,7 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "-h" || arg == "--help") {
       std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
-                   "                   [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
+                   "                   [--no-prune] [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
                    "                   [--names <table.tsv>] [--subgraph <name|handle>] <recipes.awr>\n";
       return EXIT_SUCCESS;
     } else if (path.empty()) {
@@ -543,7 +564,7 @@ int main(int argc, char** argv) {
 
   if (path.empty()) {
     std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
-                 "                   [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
+                 "                   [--no-prune] [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
                  "                   [--names <table.tsv>] [--subgraph <name|handle>] <recipes.awr>\n";
     return EXIT_FAILURE;
   }
@@ -555,6 +576,8 @@ int main(int argc, char** argv) {
     return EXIT_SUCCESS;
   }
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
+  if (noPrune)
+    aw::setTagPruningEnabled(false);
 
   std::cout << "parsed " << bytes.size() << " bytes from " << path << '\n';
   printSummary(graph);
@@ -634,13 +657,8 @@ int main(int argc, char** argv) {
         stations.push_back(h);
     }
 
-    const aw::Subgraph sub = aw::reachableSubgraph(target, stations);
-    if (sub.graph.nItem == 0) {
-      std::cerr << "no subgraph reachable from " << planArg << '\n';
-      return EXIT_FAILURE;
-    }
-
-    // Inventory is given per handle and stored per source item node.
+    // Inventory is given per handle and stored per source item node. It is built
+    // before the reachability pass so the dominated tag edges can consult it.
     std::vector<aw::Amount> inventory(graph.nItem, 0);
     if (!invArg.empty()) {
       size_t start = 0;
@@ -662,6 +680,12 @@ int main(int argc, char** argv) {
           break;
         start = comma + 1;
       }
+    }
+
+    const aw::Subgraph sub = aw::reachableSubgraph(target, stations, inventory);
+    if (sub.graph.nItem == 0) {
+      std::cerr << "no subgraph reachable from " << planArg << '\n';
+      return EXIT_FAILURE;
     }
 
     std::cout << "plan for " << itemLabel(graph, names, target - 1) << " x" << planAmount;

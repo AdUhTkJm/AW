@@ -236,6 +236,216 @@ std::vector<std::byte> buildDuplicateSample() {
   return out;
 }
 
+// T = {glass, stained}. Stained glass is gated by glass (stained x8 <- glass
+// x8 + dye x1), so the synthetic edge `T <- stained` is dominated while
+// `T <- glass` is not.
+//
+//   handle 1 glass   <- r0 (x1, ws [3], sand x1)
+//   handle 2 stained <- r1 (x8, ws [3], glass x8 + dye x1)
+//   handle 5 P       <- r2 (x1, ws [4], T x1)
+//   handle 6 T       <- r3 (x1, no ws, stained x1)   (synthetic)
+//                    <- r4 (x1, no ws, glass x1)     (synthetic)
+std::vector<std::byte> buildGlassSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 5);  // realResourceCount
+  emitVarInt(out, 4);  // entries: handles 1, 2, 5, 6
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (glass)
+  emitVarInt(out, 1);  // one recipe
+  {
+    emitVarInt(out, 1);  // output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 3);
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);  // amount
+    emitVarInt(out, 4);  // -> handle 4 (sand)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (stained glass)
+  emitVarInt(out, 1);  // one recipe
+  {
+    emitVarInt(out, 8);  // output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 3);
+    emitVarInt(out, 2);  // two inputs
+    emitVarInt(out, 8);  // glass amount
+    emitVarInt(out, 1);  // -> handle 1
+    emitVarInt(out, 1);  // dye amount
+    emitVarInt(out, 2);  // -> handle 3
+  }
+
+  emitVarInt(out, 3);  // output delta -> handle 5 (P)
+  emitVarInt(out, 1);  // one recipe
+  {
+    emitVarInt(out, 1);  // output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 4);
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);  // amount
+    emitVarInt(out, 6);  // -> pseudo handle 6 (T)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 6 (T)
+  emitVarInt(out, 2);  // two synthetic recipes
+  {
+    emitVarInt(out, 1);  // T <- stained
+    emitVarInt(out, 0);  // no workstations
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2
+  }
+  {
+    emitVarInt(out, 1);  // T <- glass
+    emitVarInt(out, 0);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // -> handle 1
+  }
+  return out;
+}
+
+// The counterexample from docs/pruning.typ: plain reachability would call m
+// dominated by w, but z is a free leaf, so `T <- m` must survive.
+//
+//   handle 3 w <- a x1 <- b x1 <- base x1
+//   handle 6 m <- J x1
+//   handle 8 T = {m, w}, handle 9 J = {w, z}, z is a leaf
+std::vector<std::byte> buildCounterSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 7);  // realResourceCount
+  emitVarInt(out, 7);  // entries: handles 3, 4, 5, 6, 7, 8, 9
+
+  emitVarInt(out, 3);  // output delta -> handle 3 (w)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // -> handle 4 (a)
+  }
+
+  emitVarInt(out, 1);  // -> handle 4 (a)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 5);  // -> handle 5 (b)
+  }
+
+  emitVarInt(out, 1);  // -> handle 5 (b)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // -> handle 1 (base)
+  }
+
+  emitVarInt(out, 1);  // -> handle 6 (m)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 9);  // -> pseudo handle 9 (J)
+  }
+
+  emitVarInt(out, 1);  // -> handle 7 (P)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 8);  // -> pseudo handle 8 (T)
+  }
+
+  emitVarInt(out, 1);  // -> handle 8 (T)
+  emitVarInt(out, 2);  // T <- m, T <- w
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 0);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 6);  // -> handle 6 (m)
+  }
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 0);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (w)
+  }
+
+  emitVarInt(out, 1);  // -> handle 9 (J)
+  emitVarInt(out, 2);  // J <- w, J <- z
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 0);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (w)
+  }
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 0);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (z), a leaf
+  }
+  return out;
+}
+
+// T = {m, w} with `m x8 <- w x1`. The amount condition forbids pruning.
+//
+//   handle 1 m <- r0 (x8, ws [2], w x1)
+//   handle 3 T <- r1 (x1, no ws, m x1)
+//              <- r2 (x1, no ws, w x1)
+std::vector<std::byte> buildBulkSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 2);  // realResourceCount
+  emitVarInt(out, 2);  // entries: handles 1, 3
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (m)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 8);  // output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // workstation handle 2
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (w)
+  }
+
+  emitVarInt(out, 2);  // output delta -> handle 3 (T)
+  emitVarInt(out, 2);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 0);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // -> handle 1 (m)
+  }
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 0);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (w)
+  }
+  return out;
+}
+
 aw::lp::Matrix makeMatrix(
     uint32_t rows, uint32_t cols,
     const std::vector<std::vector<std::pair<uint32_t, double>>> &columns) {
@@ -559,6 +769,106 @@ void testRejectsBadInput() {
   aw::clearCraftingError();
 }
 
+void testTagPruning() {
+  std::cout << "[Test] tag-edge dominance pruning\n";
+
+  aw::registerCraftingGraph(buildGlassSample());
+  expect(aw::getCraftingError() == nullptr, "glass sample parses");
+  {
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    expect(graph.nReal == 5 && graph.nItem == 6 && graph.nRecipe == 5,
+           "glass sample shape");
+    expect(graph.tagEdgeDominated.size() == graph.nRecipe,
+           "one pruning flag per recipe");
+    expect(graph.tagEdgeDominated[3] == 1, "the stained tag edge is dominated");
+    expect(graph.tagEdgeDominated[4] == 0, "the glass tag edge survives");
+    expect(graph.tagEdgeDominated[0] == 0 && graph.tagEdgeDominated[1] == 0 &&
+               graph.tagEdgeDominated[2] == 0,
+           "real recipes are never flagged");
+  }
+
+  const aw::Handle all[] = {1, 2, 3, 4, 5};
+  const uint32_t nItem = aw::getCraftingGraph().nItem;
+  auto keepsStainedEdge = [](const aw::Subgraph &sub) {
+    for (aw::NodeId recipe : sub.recipeOrigin)
+      if (recipe == 3)
+        return true;
+    return false;
+  };
+
+  {
+    const aw::Subgraph sub = aw::reachableSubgraph(5, all);
+    expect(!keepsStainedEdge(sub),
+           "the dominated tag edge is dropped with no inventory");
+  }
+  {
+    // Stocking the dominated member keeps its tag edge usable.
+    std::vector<aw::Amount> inventory(nItem, 0);
+    inventory[1] = 10;  // handle 2 (stained glass)
+    const aw::Subgraph sub = aw::reachableSubgraph(5, all, inventory);
+    expect(keepsStainedEdge(sub), "inventory keeps the dominated tag edge");
+  }
+  {
+    // The A/B switch turns the drop off entirely.
+    aw::setTagPruningEnabled(false);
+    const aw::Subgraph sub = aw::reachableSubgraph(5, all);
+    aw::setTagPruningEnabled(true);
+    expect(keepsStainedEdge(sub), "disabling pruning keeps every tag edge");
+  }
+
+  // The counterexample from docs/pruning.typ: a free co-member of an input tag
+  // blocks the tag rule, so neither edge of T may be dropped.
+  aw::registerCraftingGraph(buildCounterSample());
+  expect(aw::getCraftingError() == nullptr, "counter sample parses");
+  {
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    expect(graph.nRecipe == 9, "counter sample shape");
+    expect(graph.tagEdgeDominated[5] == 0 && graph.tagEdgeDominated[6] == 0,
+           "a free co-member blocks the tag rule");
+  }
+
+  // Bulk amplification: m x8 <- w x1 must survive the amount condition.
+  aw::registerCraftingGraph(buildBulkSample());
+  expect(aw::getCraftingError() == nullptr, "bulk sample parses");
+  {
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    expect(graph.nRecipe == 3, "bulk sample shape");
+    expect(graph.tagEdgeDominated[1] == 0, "bulk amplification is not dominated");
+  }
+}
+
+void testTagPruningParity() {
+  std::cout << "[Test] tag pruning preserves the optimum\n";
+  aw::registerCraftingGraph(buildGlassSample());
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+  const aw::Handle all[] = {1, 2, 3, 4, 5};
+
+  // Leaves are free only via inventory, so stock every item with no recipe.
+  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  for (aw::NodeId m = 0; m < graph.nReal; m++)
+    if (graph.i2r.targetsOf(m).empty())
+      inventory[m] = 1000000000ULL;
+
+  auto plan = [&](bool prune) {
+    aw::setTagPruningEnabled(prune);
+    const aw::Subgraph sub = aw::reachableSubgraph(5, all, inventory);
+    const aw::NodeId target = sub.translate(4);
+    const aw::PlanResult r = aw::planCrafting(sub, target, 16, inventory);
+    double total = 0;
+    for (double x : r.exec)
+      total += x;
+    return std::pair<aw::PlanStatus, double>(r.status, total);
+  };
+
+  const auto full = plan(false);
+  const auto pruned = plan(true);
+  aw::setTagPruningEnabled(true);
+  expect(full.first == aw::PlanStatus::OK && pruned.first == aw::PlanStatus::OK,
+         "both plan variants are feasible");
+  expect(std::fabs(full.second - pruned.second) < 1e-9,
+         "pruning does not change the optimum");
+}
+
 }  // namespace
 
 int main() {
@@ -569,6 +879,8 @@ int main() {
   testPlan();
   testPlanInfeasible();
   testDuplicateRecipes();
+  testTagPruning();
+  testTagPruningParity();
 
   if (failures == 0) {
     std::cout << "all tests passed\n";
