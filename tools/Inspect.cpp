@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "aw/CraftingGraph.h"
+#include "aw/Plan.h"
 
 namespace {
 
@@ -44,17 +45,26 @@ std::vector<std::byte> readFile(const std::string &path) {
 }
 
 // The tool is built without exceptions, so parse by hand rather than std::stoi.
-bool parseHandle(const std::string &text, aw::Handle &out) {
+bool parseU64(const std::string &text, uint64_t &out) {
   if (text.empty())
     return false;
   uint64_t value = 0;
   for (char c : text) {
     if (c < '0' || c > '9')
       return false;
-    value = value * 10 + (uint64_t) (c - '0');
-    if (value > UINT32_MAX)
+    const uint64_t digit = (uint64_t) (c - '0');
+    if (value > (UINT64_MAX - digit) / 10)
       return false;
+    value = value * 10 + digit;
   }
+  out = value;
+  return true;
+}
+
+bool parseHandle(const std::string &text, aw::Handle &out) {
+  uint64_t value = 0;
+  if (!parseU64(text, value) || value > UINT32_MAX)
+    return false;
   out = (aw::Handle) value;
   return true;
 }
@@ -418,10 +428,14 @@ int main(int argc, char** argv) {
   std::string path;
   std::string namesPath;
   std::string treeArg;
+  std::string planArg;
+  std::string invArg;
   bool check = false;
   bool dump = false;
   bool doReach = false;
   bool doTree = false;
+  bool doPlan = false;
+  uint64_t planAmount = 1;
   aw::Handle reach = 0;
   std::vector<aw::Handle> workstations;
 
@@ -450,6 +464,24 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
       }
       doReach = true;
+    } else if (arg == "--plan") {
+      if (i + 1 >= argc) {
+        std::cerr << "--plan needs an item name or handle\n";
+        return EXIT_FAILURE;
+      }
+      planArg = argv[++i];
+      doPlan = true;
+    } else if (arg == "--amount") {
+      if (i + 1 >= argc || !parseU64(argv[++i], planAmount)) {
+        std::cerr << "--amount needs a non-negative integer\n";
+        return EXIT_FAILURE;
+      }
+    } else if (arg == "--inv") {
+      if (i + 1 >= argc) {
+        std::cerr << "--inv needs a comma-separated list of handle=amount\n";
+        return EXIT_FAILURE;
+      }
+      invArg = argv[++i];
     } else if (arg == "--ws") {
       if (i + 1 >= argc || !parseHandleList(argv[++i], workstations)) {
         std::cerr << "--ws needs a comma-separated list of resource handles\n";
@@ -457,6 +489,7 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "-h" || arg == "--help") {
       std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
+                   "                   [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
                    "                   [--names <table.tsv>] [--subgraph <name|handle>] <recipes.awr>\n";
       return EXIT_SUCCESS;
     } else if (path.empty()) {
@@ -469,6 +502,7 @@ int main(int argc, char** argv) {
 
   if (path.empty()) {
     std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
+                 "                   [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
                  "                   [--names <table.tsv>] [--subgraph <name|handle>] <recipes.awr>\n";
     return EXIT_FAILURE;
   }
@@ -529,6 +563,113 @@ int main(int argc, char** argv) {
             << " workstation(s):\n";
       std::cout << "  item nodes : " << sub.graph.nItem << '\n';
       std::cout << "  recipes    : " << sub.graph.nRecipe << '\n';
+    }
+  }
+  if (doPlan) {
+    NameTable names;
+    const std::string tablePath = namesPath.empty() ? defaultNamesPath(path) : namesPath;
+    if (loadNames(tablePath, graph.nReal, names)) {
+      std::cout << "names: " << names.names.size() << " entries from " << tablePath << '\n';
+    } else if (!namesPath.empty()) {
+      std::cerr << "cannot read name table: " << tablePath << '\n';
+      return EXIT_FAILURE;
+    }
+
+    if (names.ambiguous.count(planArg) != 0)
+      std::cerr << "warning: '" << planArg << "' matches multiple handles; using "
+                << names.byName[planArg] << '\n';
+
+    const aw::Handle target = resolveTarget(planArg, names);
+    if (target == 0 || target > graph.nItem) {
+      std::cerr << "unknown item: " << planArg << '\n';
+      return EXIT_FAILURE;
+    }
+
+    std::vector<aw::Handle> stations = workstations;
+    const bool allStations = stations.empty();
+    if (allStations) {
+      stations.reserve(graph.nReal);
+      for (aw::Handle h = 1; h <= graph.nReal; ++h)
+        stations.push_back(h);
+    }
+
+    const aw::Subgraph sub = aw::reachableSubgraph(target, stations);
+    if (sub.graph.nItem == 0) {
+      std::cerr << "no subgraph reachable from " << planArg << '\n';
+      return EXIT_FAILURE;
+    }
+
+    // Inventory is given per handle and stored per source item node.
+    std::vector<aw::Amount> inventory(graph.nItem, 0);
+    if (!invArg.empty()) {
+      size_t start = 0;
+      while (true) {
+        const size_t comma = invArg.find(',', start);
+        const std::string piece = invArg.substr(
+            start, comma == std::string::npos ? std::string::npos : comma - start);
+        const size_t equal = piece.find('=');
+        aw::Handle handle = 0;
+        uint64_t amount = 0;
+        if (equal == std::string::npos || !parseHandle(piece.substr(0, equal), handle) ||
+            !parseU64(piece.substr(equal + 1), amount) || handle == 0 ||
+            handle > graph.nItem) {
+          std::cerr << "bad --inv entry: " << piece << '\n';
+          return EXIT_FAILURE;
+        }
+        inventory[aw::CraftingGraph::itemNode(handle)] += (aw::Amount) amount;
+        if (comma == std::string::npos)
+          break;
+        start = comma + 1;
+      }
+    }
+
+    std::cout << "plan for " << itemLabel(graph, names, target - 1) << " x" << planAmount;
+    std::cout << (allStations ? " (all workstations)"
+                              : " (" + std::to_string(stations.size()) + " workstations)");
+    std::cout << ":\n";
+    std::cout << "  subgraph: " << sub.graph.nItem << " items, " << sub.graph.nRecipe
+              << " recipes\n";
+
+    const aw::NodeId targetNode = sub.translate(aw::CraftingGraph::itemNode(target));
+    const aw::PlanResult plan = aw::planCrafting(sub, targetNode, planAmount, inventory);
+
+    const char *statusName = "?";
+    switch (plan.status) {
+      case aw::PlanStatus::OK: statusName = "ok"; break;
+      case aw::PlanStatus::INFEASIBLE: statusName = "infeasible"; break;
+      case aw::PlanStatus::NUMERICAL_FAIL: statusName = "numerical failure"; break;
+      case aw::PlanStatus::ITER_LIMIT: statusName = "iteration limit"; break;
+      case aw::PlanStatus::INVALID_INPUT: statusName = "invalid input"; break;
+    }
+    std::cout << "  status: " << statusName << " (" << plan.iterations << " iterations)\n";
+
+    if (plan.status == aw::PlanStatus::OK) {
+      double totalExec = 0;
+      for (auto x : plan.exec)
+        totalExec += x;
+      
+      std::cout << "  total executions: " << totalExec << '\n';
+      for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
+        const double count = plan.exec[r];
+        if (count <= 1e-9)
+          continue;
+        std::cout << "  " << count << " x "
+                  << itemLabel(graph, names, sub.itemOrigin[sub.graph.output[r]]) << " x"
+                  << sub.graph.outputAmt[r] << " <- ";
+        const auto inputs = sub.graph.r2i.targetsOf(r);
+        const auto weights = sub.graph.r2i.weightsOf(r);
+        if (inputs.empty()) {
+          std::cout << "(nothing)";
+        } else {
+          for (size_t k = 0; k < inputs.size(); k++) {
+            if (k != 0)
+              std::cout << ", ";
+            std::cout << itemLabel(graph, names, sub.itemOrigin[inputs[k]]) << " x"
+                      << weights[k];
+          }
+        }
+        std::cout << '\n';
+      }
     }
   }
   if (dump)

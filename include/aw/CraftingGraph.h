@@ -110,6 +110,10 @@ struct Subgraph {
   std::vector<NodeId> itemOrigin;
   // graph recipe id -> source recipe id, ascending.
   std::vector<NodeId> recipeOrigin;
+
+  // Translates source-graph item id to id in this subgraph.
+  // UINT32_MAX on failure.
+  NodeId translate(NodeId source) const noexcept;
 };
 
 // Computes a subgraph reachable from `output` with available `workstations`.

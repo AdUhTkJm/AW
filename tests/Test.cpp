@@ -1,13 +1,17 @@
 // Unit tests for the .awr decoder and CSR construction. No test framework: a
 // tiny assertion helper keeps the WSL build dependency-free.
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "aw/CraftingGraph.h"
+#include "aw/Plan.h"
+#include "aw/LpSolver.h"
 
 namespace {
 
@@ -125,6 +129,172 @@ std::vector<std::byte> buildReachSample() {
     emitVarInt(out, 2);  // -> item handle 2
   }
   return out;
+}
+
+// A two item cycle that only balances when the second recipe produces twice
+// what it eats. With no inventory the only feasible plan is 2*a of r0 and a of
+// r1, for 3*a total executions.
+//
+//   item 1 <- r0 (x1, workstation [1], input item 2 x1)
+//   item 2 <- r1 (x2, workstation [2], input item 1 x1)
+std::vector<std::byte> buildPlanSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 2);  // realResourceCount
+  emitVarInt(out, 2);  // entries: handles 1 and 2
+
+  emitVarInt(out, 1);  // output delta -> handle 1
+  emitVarInt(out, 1);  // one recipe
+  {
+    emitVarInt(out, 1);  // output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);  // handle 1
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> item 2
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2
+  emitVarInt(out, 1);  // one recipe
+  {
+    emitVarInt(out, 2);  // output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 2);  // handle 2
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // -> item 1
+  }
+  return out;
+}
+
+// item 1 <- r0 consumes item 2, which has no recipe at all.
+std::vector<std::byte> buildPlanLeafSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 2);  // realResourceCount
+  emitVarInt(out, 1);  // entries: handle 1
+  emitVarInt(out, 1);  // output delta -> handle 1
+  emitVarInt(out, 1);  // one recipe
+  {
+    emitVarInt(out, 1);  // output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);  // handle 1
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> item 2, a leaf
+  }
+  return out;
+}
+
+aw::lp::Matrix makeMatrix(
+    uint32_t rows, uint32_t cols,
+    const std::vector<std::vector<std::pair<uint32_t, double>>> &columns) {
+  aw::lp::Matrix A;
+  A.rows = rows;
+  A.cols = cols;
+  A.colStart.push_back(0);
+  for (uint32_t j = 0; j < cols; j++) {
+    for (const auto &entry : columns[j]) {
+      A.rowIndex.push_back(entry.first);
+      A.value.push_back(entry.second);
+    }
+    A.colStart.push_back((uint32_t) A.rowIndex.size());
+  }
+  return A;
+}
+
+void testLpSolver() {
+  std::cout << "[Test] sparse LP solver\n";
+
+  // min x0 + x1  s.t.  x0 + 2 x1 >= 4, x0 >= 1.  Optimum 2.5 at (1, 1.5).
+  {
+    const aw::lp::Matrix A = makeMatrix(2, 2, {{{0, 1.0}, {1, 1.0}}, {{0, 2.0}}});
+    const std::vector<double> b = {4.0, 1.0};
+    const std::vector<double> c = {1.0, 1.0};
+    const aw::lp::Result r = aw::lp::solve(A, b, c);
+    expect(r.status == aw::PlanStatus::OK, "simple LP is optimal");
+    expect(std::fabs(r.objective - 2.5) < 1e-9, "simple LP objective");
+    expect(std::fabs(r.x[0] - 1.0) < 1e-9 && std::fabs(r.x[1] - 1.5) < 1e-9,
+           "simple LP solution");
+
+    // Refactoring after every pivot must not change the answer.
+    aw::lp::Options eager;
+    eager.refactorIntv = 1;
+    const aw::lp::Result r2 = aw::lp::solve(A, b, c, eager);
+    expect(r2.status == aw::PlanStatus::OK &&
+               std::fabs(r2.objective - 2.5) < 1e-9,
+           "eager refactorization keeps the optimum");
+  }
+
+  // 0 >= 1 cannot be satisfied.
+  {
+    const aw::lp::Matrix A = makeMatrix(2, 1, {{{0, 1.0}}});
+    const std::vector<double> b = {1.0, 1.0};
+    const std::vector<double> c = {1.0};
+    const aw::lp::Result r = aw::lp::solve(A, b, c);
+    expect(r.status == aw::PlanStatus::INFEASIBLE, "infeasible LP is detected");
+  }
+
+  // A degenerate optimum: every point with x0 + x1 = 1 is optimal.
+  {
+    const aw::lp::Matrix A = makeMatrix(1, 2, {{{0, 1.0}}, {{0, 1.0}}});
+    const std::vector<double> b = {1.0};
+    const std::vector<double> c = {1.0, 1.0};
+    const aw::lp::Result r = aw::lp::solve(A, b, c);
+    expect(r.status == aw::PlanStatus::OK, "degenerate LP is optimal");
+    expect(std::fabs(r.objective - 1.0) < 1e-9, "degenerate LP objective");
+  }
+
+  // A negative right hand side must act as free starting stock.
+  {
+    const aw::lp::Matrix A = makeMatrix(1, 1, {{{0, 1.0}}});
+    const std::vector<double> b = {-5.0};
+    const std::vector<double> c = {1.0};
+    const aw::lp::Result r = aw::lp::solve(A, b, c);
+    expect(r.status == aw::PlanStatus::OK && std::fabs(r.objective) < 1e-9,
+           "negative rhs needs no production");
+  }
+}
+
+void testPlan() {
+  std::cout << "[Test] crafting plan\n";
+  aw::registerCraftingGraph(buildPlanSample());
+  expect(aw::getCraftingError() == nullptr, "plan sample parses");
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+
+  const aw::Handle all[] = {1, 2};
+  aw::Subgraph sub = aw::reachableSubgraph(1, all);
+  expect(sub.graph.nItem == 2 && sub.graph.nRecipe == 2, "plan subgraph shape");
+
+  const aw::NodeId target = sub.translate(0);
+  expect(target == 0, "target is found in the subgraph");
+  expect(sub.translate(99) == UINT32_MAX, "missing item reports no index");
+
+  const aw::PlanResult none = aw::planCrafting(sub, target, 4, {});
+  expect(none.status == aw::PlanStatus::OK, "plan without inventory is optimal");
+  expect(none.exec.size() == 2, "plan has one count per recipe");
+  expect(std::fabs(none.exec[0] - 8.0) < 1e-9, "r0 count");
+  expect(std::fabs(none.exec[1] - 4.0) < 1e-9, "r1 count");
+
+  // 100 spare item 2 units cover the cycle losses, so r0 alone suffices.
+  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  inventory[1] = 100;
+  const aw::PlanResult stocked = aw::planCrafting(sub, target, 4, inventory);
+  expect(stocked.status == aw::PlanStatus::OK, "plan with inventory is optimal");
+  expect(std::fabs(stocked.exec[0] - 4.0) < 1e-9, "stocked r0 count");
+  expect(std::fabs(stocked.exec[1] - 0.0) < 1e-9, "stocked r1 count");
+}
+
+void testPlanInfeasible() {
+  std::cout << "[Test] infeasible plan\n";
+  aw::registerCraftingGraph(buildPlanLeafSample());
+  expect(aw::getCraftingError() == nullptr, "leaf sample parses");
+
+  const aw::Handle all[] = {1};
+  const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+  expect(sub.graph.nItem == 2 && sub.graph.nRecipe == 1, "leaf subgraph shape");
+
+  const aw::NodeId target = sub.translate(0);
+  const aw::PlanResult r = aw::planCrafting(sub, target, 4, {});
+  expect(r.status == aw::PlanStatus::INFEASIBLE, "missing leaf makes the plan infeasible");
 }
 
 void testSample() {
@@ -309,6 +479,9 @@ int main() {
   testSample();
   testRejectsBadInput();
   testReachability();
+  testLpSolver();
+  testPlan();
+  testPlanInfeasible();
 
   if (failures == 0) {
     std::cout << "all tests passed\n";

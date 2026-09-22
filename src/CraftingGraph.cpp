@@ -417,4 +417,14 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations) 
   return result;
 }
 
+// Just a basic binary search.
+NodeId Subgraph::translate(NodeId sourceNode) const noexcept {
+  const auto begin = itemOrigin.begin();
+  const auto end = itemOrigin.end();
+  const auto it = std::lower_bound(begin, end, sourceNode);
+  if (it == end || *it != sourceNode)
+    return UINT32_MAX;
+  return it - begin;
+}
+
 } // namespace aw

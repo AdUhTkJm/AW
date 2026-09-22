@@ -14,8 +14,9 @@ option(AW_BUILD_JNI "Build the JNI bridge shared library" ON)
 option(AW_BUILD_TOOLS "Build the awr_inspect command line tool" ON)
 option(AW_BUILD_TESTS "Build the unit tests" ON)
 
-add_library(aw_crafting STATIC src/CraftingGraph.cpp)
+add_library(aw_crafting STATIC src/CraftingGraph.cpp src/LpSolver.cpp src/Plan.cpp)
 target_include_directories(aw_crafting PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(aw_crafting PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(aw_crafting PUBLIC cxx_std_20)
 # Deliberately applied globally.
 add_compile_options(-Wall -fno-exceptions -fno-rtti -g)
@@ -29,6 +30,8 @@ if(AW_BUILD_TESTS)
    enable_testing()
    add_executable(aw_tests tests/Test.cpp)
    target_link_libraries(aw_tests PRIVATE aw_crafting)
+   # The LP solver is internal, but its unit tests live next to the graph tests.
+   target_include_directories(aw_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
    add_test(NAME crafting_graph COMMAND aw_tests)
 endif()
 
