@@ -44,161 +44,12 @@ struct SparseLu {
 
   void factorize(uint32_t size, const std::vector<uint32_t> &bp,
                  const std::vector<uint32_t> &bRow,
-                 const std::vector<double> &bVal, double tol) {
-    n = size;
-    pinv.assign(n, kNoIndex);
-    pstep.assign(n, kNoIndex);
-    diag.assign(n, 0.0);
-    lRow.clear();
-    lRow.resize(n);
-    lVal.clear();
-    lVal.resize(n);
-    uRowCol.clear();
-    uRowCol.resize(n);
-    uRowVal.clear();
-    uRowVal.resize(n);
-    uColRow.clear();
-    uColRow.resize(n);
-    uColVal.clear();
-    uColVal.resize(n);
-    work.assign(n, 0.0);
-    mark.assign(n, 0);
-    touched.clear();
-    singular = false;
-
-    for (uint32_t k = 0; k < n; k++) {
-      touched.clear();
-      for (uint32_t e = bp[k]; e < bp[k + 1]; e++) {
-        const uint32_t r = bRow[e];
-        if (!mark[r]) {
-          mark[r] = 1;
-          touched.push_back(r);
-        }
-        work[r] += bVal[e];
-      }
-
-      // Forward substitution against the already computed L columns.
-      for (uint32_t j = 0; j < k; j++) {
-        const uint32_t row = pstep[j];
-        const double multiplier = work[row];
-        if (multiplier == 0.0)
-          continue;
-        work[row] = 0.0;
-        uRowCol[j].push_back(k);
-        uRowVal[j].push_back(multiplier);
-        uColRow[k].push_back(j);
-        uColVal[k].push_back(multiplier);
-        const auto &rows = lRow[j];
-        const auto &vals = lVal[j];
-        for (size_t e = 0; e < rows.size(); e++) {
-          const uint32_t r = rows[e];
-          if (!mark[r]) {
-            mark[r] = 1;
-            touched.push_back(r);
-          }
-          work[r] -= vals[e] * multiplier;
-        }
-      }
-
-      uint32_t pivot = kNoIndex;
-      double best = 0.0;
-      for (uint32_t r : touched) {
-        if (pinv[r] != kNoIndex)
-          continue;
-        const double value = std::fabs(work[r]);
-        if (value > best) {
-          best = value;
-          pivot = r;
-        }
-      }
-      if (!(best > tol)) {
-        for (uint32_t r : touched) {
-          mark[r] = 0;
-          work[r] = 0.0;
-        }
-        singular = true;
-        return;
-      }
-
-      pinv[pivot] = k;
-      pstep[k] = pivot;
-      const double diagonal = work[pivot];
-      diag[k] = diagonal;
-      uRowCol[k].push_back(k);
-      uRowVal[k].push_back(diagonal);
-      uColRow[k].push_back(k);
-      uColVal[k].push_back(diagonal);
-
-      for (uint32_t r : touched) {
-        if (pinv[r] != kNoIndex)
-          continue;
-        const double value = work[r];
-        if (value == 0.0)
-          continue;
-        lRow[k].push_back(r);
-        lVal[k].push_back(value / diagonal);
-      }
-      for (uint32_t r : touched) {
-        mark[r] = 0;
-        work[r] = 0.0;
-      }
-    }
-  }
+                 const std::vector<double> &bVal, double tol);
 
   // v := B^{-1} v
-  void ftran(std::vector<double> &v) {
-    work.resize(n);
-    for (uint32_t k = 0; k < n; k++)
-      work[k] = v[pstep[k]];
-    for (uint32_t k = 0; k < n; k++) {
-      const double yk = work[k];
-      if (yk == 0.0)
-        continue;
-      const auto &rows = lRow[k];
-      const auto &vals = lVal[k];
-      for (size_t e = 0; e < rows.size(); e++)
-        work[pinv[rows[e]]] -= vals[e] * yk;
-    }
-    for (uint32_t k = n; k-- > 0;) {
-      double sum = work[k];
-      const auto &cols = uRowCol[k];
-      const auto &vals = uRowVal[k];
-      for (size_t e = 0; e < cols.size(); e++) {
-        if (cols[e] == k)
-          continue;
-        sum -= vals[e] * work[cols[e]];
-      }
-      work[k] = sum / diag[k];
-    }
-    v.swap(work);
-  }
-
+  void ftran(std::vector<double> &v);
   // v := B^{-T} v
-  void btran(std::vector<double> &v) {
-    for (uint32_t k = 0; k < n; k++) {
-      double sum = v[k];
-      const auto &rows = uColRow[k];
-      const auto &vals = uColVal[k];
-      for (size_t e = 0; e < rows.size(); e++) {
-        if (rows[e] == k)
-          continue;
-        sum -= vals[e] * v[rows[e]];
-      }
-      v[k] = sum / diag[k];
-    }
-    for (uint32_t k = n; k-- > 0;) {
-      double sum = v[k];
-      const auto &rows = lRow[k];
-      const auto &vals = lVal[k];
-      for (size_t e = 0; e < rows.size(); e++)
-        sum -= vals[e] * v[pinv[rows[e]]];
-      v[k] = sum;
-    }
-    work.resize(n);
-    for (uint32_t k = 0; k < n; k++)
-      work[pstep[k]] = v[k];
-    v.swap(work);
-  }
+  void btran(std::vector<double> &v);
 };
 
 // One product form eta column: E = I with column p replaced by d. The entries
@@ -650,12 +501,172 @@ struct Simplex {
   }
 };
 
+void SparseLu::factorize(uint32_t size, const std::vector<uint32_t> &bp,
+                const std::vector<uint32_t> &bRow,
+                const std::vector<double> &bVal, double tol) {
+  n = size;
+  pinv.assign(n, kNoIndex);
+  pstep.assign(n, kNoIndex);
+  diag.assign(n, 0.0);
+  lRow.clear();
+  lRow.resize(n);
+  lVal.clear();
+  lVal.resize(n);
+  uRowCol.clear();
+  uRowCol.resize(n);
+  uRowVal.clear();
+  uRowVal.resize(n);
+  uColRow.clear();
+  uColRow.resize(n);
+  uColVal.clear();
+  uColVal.resize(n);
+  work.assign(n, 0.0);
+  mark.assign(n, 0);
+  touched.clear();
+  singular = false;
+
+  for (uint32_t k = 0; k < n; k++) {
+    touched.clear();
+    for (uint32_t e = bp[k]; e < bp[k + 1]; e++) {
+      const uint32_t r = bRow[e];
+      if (!mark[r]) {
+        mark[r] = 1;
+        touched.push_back(r);
+      }
+      work[r] += bVal[e];
+    }
+
+    // Forward substitution against the already computed L columns.
+    for (uint32_t j = 0; j < k; j++) {
+      const uint32_t row = pstep[j];
+      const double multiplier = work[row];
+      if (multiplier == 0.0)
+        continue;
+      work[row] = 0.0;
+      uRowCol[j].push_back(k);
+      uRowVal[j].push_back(multiplier);
+      uColRow[k].push_back(j);
+      uColVal[k].push_back(multiplier);
+      const auto &rows = lRow[j];
+      const auto &vals = lVal[j];
+      for (size_t e = 0; e < rows.size(); e++) {
+        const uint32_t r = rows[e];
+        if (!mark[r]) {
+          mark[r] = 1;
+          touched.push_back(r);
+        }
+        work[r] -= vals[e] * multiplier;
+      }
+    }
+
+    uint32_t pivot = kNoIndex;
+    double best = 0.0;
+    for (uint32_t r : touched) {
+      if (pinv[r] != kNoIndex)
+        continue;
+      const double value = std::fabs(work[r]);
+      if (value > best) {
+        best = value;
+        pivot = r;
+      }
+    }
+    if (!(best > tol)) {
+      for (uint32_t r : touched) {
+        mark[r] = 0;
+        work[r] = 0.0;
+      }
+      singular = true;
+      return;
+    }
+
+    pinv[pivot] = k;
+    pstep[k] = pivot;
+    const double diagonal = work[pivot];
+    diag[k] = diagonal;
+    uRowCol[k].push_back(k);
+    uRowVal[k].push_back(diagonal);
+    uColRow[k].push_back(k);
+    uColVal[k].push_back(diagonal);
+
+    for (uint32_t r : touched) {
+      if (pinv[r] != kNoIndex)
+        continue;
+      const double value = work[r];
+      if (value == 0.0)
+        continue;
+      lRow[k].push_back(r);
+      lVal[k].push_back(value / diagonal);
+    }
+    for (uint32_t r : touched) {
+      mark[r] = 0;
+      work[r] = 0.0;
+    }
+  }
+}
+
+void SparseLu::ftran(std::vector<double> &v) {
+  work.resize(n);
+  for (uint32_t k = 0; k < n; k++)
+    work[k] = v[pstep[k]];
+  for (uint32_t k = 0; k < n; k++) {
+    const double yk = work[k];
+    if (yk == 0.0)
+      continue;
+    const auto &rows = lRow[k];
+    const auto &vals = lVal[k];
+    for (size_t e = 0; e < rows.size(); e++)
+      work[pinv[rows[e]]] -= vals[e] * yk;
+  }
+  for (uint32_t k = n; k-- > 0;) {
+    double sum = work[k];
+    const auto &cols = uRowCol[k];
+    const auto &vals = uRowVal[k];
+    for (size_t e = 0; e < cols.size(); e++) {
+      if (cols[e] == k)
+        continue;
+      sum -= vals[e] * work[cols[e]];
+    }
+    work[k] = sum / diag[k];
+  }
+  v.swap(work);
+}
+
+void SparseLu::btran(std::vector<double> &v) {
+  for (uint32_t k = 0; k < n; k++) {
+    double sum = v[k];
+    const auto &rows = uColRow[k];
+    const auto &vals = uColVal[k];
+    for (size_t e = 0; e < rows.size(); e++) {
+      if (rows[e] == k)
+        continue;
+      sum -= vals[e] * v[rows[e]];
+    }
+    v[k] = sum / diag[k];
+  }
+  for (uint32_t k = n; k-- > 0;) {
+    double sum = v[k];
+    const auto &rows = lRow[k];
+    const auto &vals = lVal[k];
+    for (size_t e = 0; e < rows.size(); e++)
+      sum -= vals[e] * v[pinv[rows[e]]];
+    v[k] = sum;
+  }
+  work.resize(n);
+  for (uint32_t k = 0; k < n; k++)
+    work[pstep[k]] = v[k];
+  v.swap(work);
+}
+
+
+
 }  // namespace
 
 Result solve(const Matrix &A, const std::vector<double> &b,
              const std::vector<double> &c, const Options &options) {
   Result result;
 
+  // Check validity.
+  // TODO: do we really need this? `solve()` seems to be called only from trusted places.
   if (A.colStart.size() != (size_t) A.cols + 1 || A.colStart.empty() ||
       A.colStart[0] != 0 || A.colStart.back() != A.rowIndex.size() ||
       A.rowIndex.size() != A.value.size() || b.size() != A.rows ||

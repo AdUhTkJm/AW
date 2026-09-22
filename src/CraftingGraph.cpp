@@ -417,7 +417,6 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations) 
   return result;
 }
 
-// Just a basic binary search.
 NodeId Subgraph::translate(NodeId sourceNode) const noexcept {
   const auto begin = itemOrigin.begin();
   const auto end = itemOrigin.end();
@@ -425,6 +424,16 @@ NodeId Subgraph::translate(NodeId sourceNode) const noexcept {
   if (it == end || *it != sourceNode)
     return UINT32_MAX;
   return it - begin;
+}
+
+std::vector<Amount> Subgraph::translateInv(std::span<const Amount> invSrc) const noexcept {
+  std::vector<Amount> inventory(graph.nItem, 0);
+  for (uint32_t i = 0; i < graph.nItem; i++) {
+    const NodeId source = itemOrigin[i];
+    if (source < invSrc.size())
+      inventory[i] = invSrc[source];
+  }
+  return inventory;
 }
 
 } // namespace aw

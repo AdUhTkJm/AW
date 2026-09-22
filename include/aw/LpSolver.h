@@ -1,7 +1,7 @@
 #ifndef AW_LP_SOLVER_H
 #define AW_LP_SOLVER_H
 
-// Internal sparse LP solver. Not part of the public API.
+// Sparse LP solver.
 //
 // Solves
 //
@@ -10,8 +10,7 @@
 //
 // with a two-phase revised simplex. The constraint matrix is stored sparse
 // (CSC); the basis inverse is kept in product form (eta file) over a dense LU
-// refactorization that is refreshed every `refactorInterval` pivots. All
-// arithmetic is double; 1e9 is the largest magnitude the solver tolerates.
+// refactorization that is refreshed every `refactorInterval` pivots.
 
 #include <cstdint>
 #include <vector>

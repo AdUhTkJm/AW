@@ -114,6 +114,9 @@ struct Subgraph {
   // Translates source-graph item id to id in this subgraph.
   // UINT32_MAX on failure.
   NodeId translate(NodeId source) const noexcept;
+
+  // Translates an entire inventory.
+  std::vector<Amount> translateInv(std::span<const Amount> src) const noexcept;
 };
 
 // Computes a subgraph reachable from `output` with available `workstations`.

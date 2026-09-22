@@ -21,14 +21,9 @@ struct PlanResult {
   uint32_t iterations = 0;
 };
 
-// Gathers inventory from the source item-node space into the subgraph item
-// node space. Entries past the end of `bySourceNode` count as zero.
-std::vector<Amount> subgraphInventory(const Subgraph& sub,
-                                      std::span<const Amount> bySourceNode);
-
 // Plans `amount` new units of the item at subgraph node `target`.
 PlanResult planCrafting(const Subgraph& sub, NodeId target, Amount amount,
-                        std::span<const Amount> inventoryBySourceNode = {});
+                        std::span<const Amount> invSrc);
 
 }  // namespace aw
 
