@@ -184,6 +184,58 @@ std::vector<std::byte> buildPlanLeafSample() {
   return out;
 }
 
+// Recipes that differ only in their workstation set are the same LP column,
+// so registration folds them together.
+//
+//   item 1 <- rA (x1, workstations [1],    input item 2 x1)  \ same key,
+//          <- rB (x1, workstations [2, 3], input item 2 x1)  / merged
+//          <- rC (x2, workstations [1],    input item 2 x1)  different amount
+//          <- rD (x1, workstations [1],    input item 2 x2)  different input
+//
+// item 2 is a leaf, item 3 is an unused real resource.
+std::vector<std::byte> buildDuplicateSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 3);  // realResourceCount; workstations 1..3 are real
+  emitVarInt(out, 1);  // one entry: output handle 1
+
+  emitVarInt(out, 1);  // output delta -> handle 1
+  emitVarInt(out, 4);  // four recipes
+  {
+    emitVarInt(out, 1);  // rA output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);  // handle 1
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);  // amount
+    emitVarInt(out, 2);  // -> item handle 2
+  }
+  {
+    emitVarInt(out, 1);  // rB output amount
+    emitVarInt(out, 2);  // two workstations
+    emitVarInt(out, 2);  // handle 2
+    emitVarInt(out, 1);  // +1 -> handle 3
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);  // amount
+    emitVarInt(out, 2);  // -> item handle 2
+  }
+  {
+    emitVarInt(out, 2);  // rC output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);  // handle 1
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);  // amount
+    emitVarInt(out, 2);  // -> item handle 2
+  }
+  {
+    emitVarInt(out, 1);  // rD output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);  // handle 1
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 2);  // amount 2
+    emitVarInt(out, 2);  // -> item handle 2
+  }
+  return out;
+}
+
 aw::lp::Matrix makeMatrix(
     uint32_t rows, uint32_t cols,
     const std::vector<std::vector<std::pair<uint32_t, double>>> &columns) {
@@ -295,6 +347,40 @@ void testPlanInfeasible() {
   const aw::NodeId target = sub.translate(0);
   const aw::PlanResult r = aw::planCrafting(sub, target, 4, {});
   expect(r.status == aw::PlanStatus::INFEASIBLE, "missing leaf makes the plan infeasible");
+}
+
+void testDuplicateRecipes() {
+  std::cout << "[Test] duplicate recipes\n";
+  aw::registerCraftingGraph(buildDuplicateSample());
+  expect(aw::getCraftingError() == nullptr, "duplicate sample parses");
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+
+  // rA and rB collapse; rC and rD stay because their amounts differ.
+  expect(graph.nRecipe == 3, "recipes that differ only by workstation fold together");
+  expect(graph.nItem == 3 && graph.nReal == 3, "duplicate sample shape");
+
+  // The survivor keeps rA's id (0) and order, and gains rB's workstations.
+  const auto recipes = graph.i2r.targetsOf(0);
+  expect(recipes.size() == 3 && recipes[0] == graph.nItem &&
+         recipes[1] == graph.nItem + 1 && recipes[2] == graph.nItem + 2,
+         "surviving recipes keep their file order");
+  const auto ws = graph.workstations.targetsOf(0);
+  expect(ws.size() == 3 && ws[0] == 0 && ws[1] == 1 && ws[2] == 2,
+         "workstation sets are merged and deduplicated");
+  expect(graph.outputAmt[0] == 1 && graph.outputAmt[1] == 2 &&
+         graph.outputAmt[2] == 1,
+         "output amounts survive the fold");
+  expect(graph.r2i.weightsOf(2).size() == 1 && graph.r2i.weightsOf(2)[0] == 2,
+         "a different input amount is not folded away");
+  expect(graph.i2r.numEdges() == graph.nRecipe,
+         "one item -> recipe edge per surviving recipe");
+
+  // The reachable subgraph inherits the canonicalized graph, so it cannot
+  // contain two identical columns either.
+  const aw::Handle all[] = {1, 2, 3};
+  const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+  expect(sub.graph.nItem == 2, "only the output and its leaf are reachable");
+  expect(sub.graph.nRecipe == 3, "the subgraph keeps every surviving recipe");
 }
 
 void testSample() {
@@ -482,6 +568,7 @@ int main() {
   testLpSolver();
   testPlan();
   testPlanInfeasible();
+  testDuplicateRecipes();
 
   if (failures == 0) {
     std::cout << "all tests passed\n";

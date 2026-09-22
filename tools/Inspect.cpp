@@ -9,6 +9,7 @@
 //
 // Note that -fno-exception is also enabled for this file.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -159,8 +160,14 @@ std::string itemLabel(const aw::CraftingGraph &graph, const NameTable &names,
   const aw::Handle handle = graph.itemHandle(node);
   if (node >= graph.nReal)
     return "#" + std::to_string(handle);
-  if (handle <= names.names.size() && !names.names[handle - 1].empty())
-    return names.names[handle - 1];
+  if (handle <= names.names.size() && !names.names[handle - 1].empty()) {
+    const std::string &name = names.names[handle - 1];
+    // Handles are keyed by (kind, id), so e.g. a fluid and a chemical can share
+    // an id. Suffix the handle so those do not look like the same node.
+    if (names.ambiguous.count(name) != 0)
+      return name + "#" + std::to_string(handle);
+    return name;
+  }
   return "#" + std::to_string(handle);
 }
 
@@ -326,6 +333,40 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
   for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
     if (seen[recipe] == 0)
       report("recipe is not reachable from any item");
+  }
+
+  // Check that there's no duplication.
+  {
+    std::vector<uint32_t> order(graph.nRecipe);
+    for (uint32_t r = 0; r < graph.nRecipe; ++r)
+      order[r] = r;
+
+    auto keyLess = [&graph](uint32_t a, uint32_t b) {
+      if (graph.output[a] != graph.output[b])
+        return graph.output[a] < graph.output[b];
+      if (graph.outputAmt[a] != graph.outputAmt[b])
+        return graph.outputAmt[a] < graph.outputAmt[b];
+      const auto ta = graph.r2i.targetsOf(a);
+      const auto tb = graph.r2i.targetsOf(b);
+      const auto wa = graph.r2i.weightsOf(a);
+      const auto wb = graph.r2i.weightsOf(b);
+      const size_t shared = ta.size() < tb.size() ? ta.size() : tb.size();
+      for (size_t i = 0; i < shared; ++i) {
+        if (ta[i] != tb[i])
+          return ta[i] < tb[i];
+        if (wa[i] != wb[i])
+          return wa[i] < wb[i];
+      }
+      return ta.size() < tb.size();
+    };
+
+    std::sort(order.begin(), order.end(), keyLess);
+    for (size_t i = 1; i < order.size(); ++i) {
+      if (!keyLess(order[i - 1], order[i])) {
+        report("two recipes share the same output, amount and inputs");
+        break;
+      }
+    }
   }
 
   return problems;

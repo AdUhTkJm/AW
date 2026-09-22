@@ -1,5 +1,6 @@
 #include "aw/CraftingGraph.h"
 
+#include <algorithm>
 #include <array>
 
 namespace aw {
@@ -179,6 +180,161 @@ void prefixSum(std::vector<uint> &v) noexcept {
     v[i + 1] += v[i];
 }
 
+// Total order on recipes by the only thing the planner can see: the output
+// item, the output amount and the amounts of every input.
+struct RecipeKeyLess {
+  const BaseCraftingGraph &g;
+
+  bool operator()(uint a, uint b) const noexcept {
+    if (g.output[a] != g.output[b])
+      return g.output[a] < g.output[b];
+    if (g.outputAmt[a] != g.outputAmt[b])
+      return g.outputAmt[a] < g.outputAmt[b];
+
+    const auto ta = g.r2i.targetsOf(a);
+    const auto tb = g.r2i.targetsOf(b);
+    const auto wa = g.r2i.weightsOf(a);
+    const auto wb = g.r2i.weightsOf(b);
+    const size_t shared = ta.size() < tb.size() ? ta.size() : tb.size();
+    for (size_t i = 0; i < shared; i++) {
+      if (ta[i] != tb[i])
+        return ta[i] < tb[i];
+      if (wa[i] != wb[i])
+        return wa[i] < wb[i];
+    }
+    return ta.size() < tb.size();
+  }
+};
+
+// Removes duplicate entries, and unites entries that differ only on workstations.
+void canonicalizeRecipes() noexcept {
+  const uint nRecipe = graph.nRecipe;
+  [[unlikely]]
+  if (nRecipe < 2)
+    return;
+
+  // Sort recipes.
+  std::vector<uint> order(nRecipe);
+  for (uint r = 0; r < nRecipe; r++)
+    order[r] = r;
+  std::sort(order.begin(), order.end(), RecipeKeyLess{graph});
+
+  const RecipeKeyLess less { graph };
+  // Deduplication and grouping.
+  std::vector<uint> rep(nRecipe, UINT32_MAX);
+  for (uint i = 0; i < nRecipe;) {
+    uint j = i + 1;
+    while (j < nRecipe && !less(order[i], order[j]))
+      j++;
+
+    uint survivor = order[i];
+    for (uint k = i; k < j; k++)
+      if (order[k] < survivor)
+        survivor = order[k];
+    for (uint k = i; k < j; k++)
+      rep[order[k]] = survivor;
+    i = j;
+  }
+
+  uint newNRecipe = 0;
+  std::vector<uint> newId(nRecipe, UINT32_MAX);
+  for (uint r = 0; r < nRecipe; r++) {
+    if (rep[r] == r)
+      newId[r] = newNRecipe++;
+  }
+  if (newNRecipe == nRecipe)
+    return;
+
+  // Rebuild workstations.
+  std::vector<uint> wsOffsets(newNRecipe, 0);
+  for (uint r = 0; r < nRecipe; r++)
+    wsOffsets[newId[rep[r]]] += graph.workstations.targetsOf(r).size();
+  prefixSum(wsOffsets);
+
+  std::vector<NodeId> wsTargets(wsOffsets.back());
+  std::vector<uint> wsCursor(wsOffsets.begin(), wsOffsets.end() - 1);
+  for (uint r = 0; r < nRecipe; r++) {
+    const uint dst = newId[rep[r]];
+    for (NodeId station : graph.workstations.targetsOf(r))
+      wsTargets[wsCursor[dst]++] = station;
+  }
+
+  std::vector<uint> newWsOffsets(newNRecipe + 1, 0);
+  std::vector<NodeId> newWsTargets;
+  newWsTargets.reserve(wsTargets.size());
+  for (uint j = 0; j < newNRecipe; j++) {
+    std::sort(wsTargets.begin() + wsOffsets[j], wsTargets.begin() + wsOffsets[j + 1]);
+    for (uint e = wsOffsets[j]; e < wsOffsets[j + 1]; e++) {
+      if (e > wsOffsets[j] && wsTargets[e] == wsTargets[e - 1])
+        continue;
+      newWsTargets.push_back(wsTargets[e]);
+    }
+    newWsOffsets[j + 1] = newWsTargets.size();
+  }
+  graph.workstations.offsets = std::move(newWsOffsets);
+  graph.workstations.targets = std::move(newWsTargets);
+
+  // Rebuild item -> recipe edges.
+  std::vector<uint> itemOffsets(graph.nItem, 0);
+  for (uint r = 0; r < nRecipe; r++) {
+    if (rep[r] == r)
+      itemOffsets[graph.output[r]]++;
+  }
+  prefixSum(itemOffsets);
+
+  std::vector<NodeId> itemTargets(newNRecipe, 0);
+  std::vector<Amount> itemWeights(newNRecipe, 0);
+  std::vector<uint> itemCursor(itemOffsets.begin(), itemOffsets.end() - 1);
+  for (uint r = 0; r < nRecipe; r++) {
+    if (rep[r] != r)
+      continue;
+    const uint slot = itemCursor[graph.output[r]]++;
+    itemTargets[slot] = graph.nItem + newId[r];
+    itemWeights[slot] = graph.outputAmt[r];
+  }
+  graph.i2r.offsets = std::move(itemOffsets);
+  graph.i2r.targets = std::move(itemTargets);
+  graph.i2r.weights = std::move(itemWeights);
+
+  // Rebuild recipe -> item edges.
+  std::vector<uint> inputOffsets(newNRecipe, 0);
+  for (uint r = 0; r < nRecipe; r++) {
+    if (rep[r] == r)
+      inputOffsets[newId[r]] = (uint) graph.r2i.targetsOf(r).size();
+  }
+  prefixSum(inputOffsets);
+
+  std::vector<NodeId> inputTargets(inputOffsets.back(), 0);
+  std::vector<Amount> inputWeights(inputOffsets.back(), 0);
+  for (uint r = 0; r < nRecipe; r++) {
+    if (rep[r] != r)
+      continue;
+    uint slot = inputOffsets[newId[r]];
+    const auto targets = graph.r2i.targetsOf(r);
+    const auto weights = graph.r2i.weightsOf(r);
+    for (size_t k = 0; k < targets.size(); k++) {
+      inputTargets[slot] = targets[k];
+      inputWeights[slot] = weights[k];
+      slot++;
+    }
+  }
+  graph.r2i.offsets = std::move(inputOffsets);
+  graph.r2i.targets = std::move(inputTargets);
+  graph.r2i.weights = std::move(inputWeights);
+
+  std::vector<NodeId> output(newNRecipe, 0);
+  std::vector<Amount> outputAmt(newNRecipe, 0);
+  for (uint r = 0; r < nRecipe; r++) {
+    if (rep[r] != r)
+      continue;
+    output[newId[r]] = graph.output[r];
+    outputAmt[newId[r]] = graph.outputAmt[r];
+  }
+  graph.output = std::move(output);
+  graph.outputAmt = std::move(outputAmt);
+  graph.nRecipe = newNRecipe;
+}
+
 }  // namespace
 
 void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
@@ -262,6 +418,8 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
       recipe++;
     }
   }
+
+  canonicalizeRecipes();
 }
 
 const char *getCraftingError() noexcept {
