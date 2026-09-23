@@ -446,6 +446,298 @@ std::vector<std::byte> buildBulkSample() {
   return out;
 }
 
+// The composite-dominance motivating example from docs/algorithm.typ. Black
+// candle can be made from black dye or from black pigment, and black pigment
+// can be made from black dye (256) or from a black candle (224, a net loss).
+// The 224 route must be dropped by the ceremony, the 256 route kept.
+//
+//   handle 1 black_candle <- r0 (x1, ws [1], black_dye x1 + candle x1)
+//                         <- r1 (x1, ws [1], candle x1 + black x256)
+//   handle 2 black_dye    <- r2 (x1, ws [1], dye_base x1)
+//   handle 3 candle       <- r3 (x1, ws [1], candle_base x1)
+//   handle 4 black        <- r4 (x256, ws [1], black_dye x1)
+//                         <- r5 (x224, ws [1], black_candle x1)
+//   handles 5, 6 are leaves.
+std::vector<std::byte> buildBlackCandleSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 6);  // realResourceCount
+  emitVarInt(out, 4);  // entries: handles 1, 2, 3, 4
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (black_candle)
+  emitVarInt(out, 2);  // two recipes
+  {
+    emitVarInt(out, 1);  // r0 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 2);  // two inputs
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (black_dye)
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // -> handle 3 (candle)
+  }
+  {
+    emitVarInt(out, 1);  // r1 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 2);  // two inputs, ascending handles
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (candle)
+    emitVarInt(out, 256);
+    emitVarInt(out, 1);  // -> handle 4 (black)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (black_dye)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r2 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 5);  // -> handle 5 (dye_base)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 3 (candle)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r3 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 6);  // -> handle 6 (candle_base)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 4 (black)
+  emitVarInt(out, 2);  // two recipes
+  {
+    emitVarInt(out, 256);  // r4 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);   // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);   // -> handle 2 (black_dye)
+  }
+  {
+    emitVarInt(out, 224);  // r5 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);    // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);    // -> handle 1 (black_candle)
+  }
+  return out;
+}
+
+// The right-only-negative regression from plan section 6. S consumes
+// coal_block, which the composite `r + R` never mentions. A one-sided
+// comparison would wrongly call `coal <- torch` dominated.
+//
+//   handle 1 coal       <- r0 (x1, ws [1], torch x4)
+//                       <- r1 (x9, ws [1], coal_block x1)
+//   handle 2 torch      <- r2 (x4, ws [1], stick x1 + J x1)
+//   handle 3 coal_block <- r3 (x1, ws [1], coal x9)
+//   handle 6 J = {stick, leaf}, handles 4 and 5 are leaves.
+std::vector<std::byte> buildCoalRegressionSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 5);  // realResourceCount
+  emitVarInt(out, 4);  // entries: handles 1, 2, 3, 6
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (coal)
+  emitVarInt(out, 2);  // two recipes
+  {
+    emitVarInt(out, 1);  // r0 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // torch x4
+    emitVarInt(out, 2);  // -> handle 2 (torch)
+  }
+  {
+    emitVarInt(out, 9);  // r1 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (coal_block)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (torch)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 4);  // r2 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 2);  // two inputs
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // -> handle 4 (stick)
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 6 (J)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 3 (coal_block)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r3 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 9);
+    emitVarInt(out, 1);  // -> handle 1 (coal)
+  }
+
+  emitVarInt(out, 3);  // output delta -> handle 6 (J)
+  emitVarInt(out, 2);  // two synthetic recipes
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 0);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // J <- stick (handle 4)
+  }
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 0);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 5);  // J <- leaf (handle 5)
+  }
+  return out;
+}
+
+// R is more efficient in Z than S: 5 X from one Z versus 4 X from one Z.
+// R must survive even though S has a larger output.
+//
+//   handle 1 X <- R (x5, ws [1], Y x1)
+//              <- S (x4, ws [1], Z x1)
+//   handle 2 Y <- r (x1, ws [1], Z x1)
+//   handle 3 Z is a leaf.
+std::vector<std::byte> buildAmountRatioSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 3);
+  emitVarInt(out, 2);
+
+  emitVarInt(out, 1);  // -> handle 1 (X)
+  emitVarInt(out, 2);
+  {
+    emitVarInt(out, 5);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // Y x1
+  }
+  {
+    emitVarInt(out, 4);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // Z x1
+  }
+
+  emitVarInt(out, 1);  // -> handle 2 (Y)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // Z x1
+  }
+  return out;
+}
+
+// Y has an independent route to a leaf, so `X <- Y` is not dominated by
+// `X <- Z`.
+//
+//   handle 1 X <- R (x1, ws [1], Y x1)
+//              <- S (x1, ws [1], Z x1)
+//   handle 2 Y <- r (x1, ws [1], K x1)
+//   handles 3 Z and 4 K are leaves.
+std::vector<std::byte> buildIndependentRouteSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 4);
+  emitVarInt(out, 2);
+
+  emitVarInt(out, 1);
+  emitVarInt(out, 2);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // Y x1
+  }
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // Z x1
+  }
+
+  emitVarInt(out, 1);  // -> handle 2 (Y)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // K x1
+  }
+  return out;
+}
+
+// R needs 3 Y, but the only Y recipe makes 2. The ceiling forces alpha = 2, so
+// `2 Y + R` leaves an extra Y and cannot be bounded by S; a rational alpha of
+// 1.5 would have wrongly dominated R.
+//
+//   handle 1 X <- R (x1, ws [1], Y x3)
+//              <- S (x1, ws [1], Z x1)
+//   handle 2 Y <- r (x2, ws [1], Z x1)
+//   handle 3 Z is a leaf.
+std::vector<std::byte> buildIntegerScalingSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 3);
+  emitVarInt(out, 2);
+
+  emitVarInt(out, 1);
+  emitVarInt(out, 2);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);
+    emitVarInt(out, 2);  // Y x3
+  }
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // Z x1
+  }
+
+  emitVarInt(out, 1);  // -> handle 2 (Y)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 2);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // Z x1
+  }
+  return out;
+}
+
 aw::solver::Matrix makeMatrix(
     uint32_t rows, uint32_t cols,
     const std::vector<std::vector<std::pair<uint32_t, int64_t>>> &columns) {
@@ -616,9 +908,13 @@ void testDuplicateRecipes() {
          "one item -> recipe edge per surviving recipe");
 
   // The reachable subgraph inherits the canonicalized graph, so it cannot
-  // contain two identical columns either.
+  // contain two identical columns either. Recipe pruning is disabled here:
+  // item 2 is an unstocked leaf, so it would collapse the three recipes on its
+  // own.
+  aw::setRecipePruningEnabled(false);
   const aw::Handle all[] = {1, 2, 3};
   const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+  aw::setRecipePruningEnabled(true);
   expect(sub.graph.nItem == 2, "only the output and its leaf are reachable");
   expect(sub.graph.nRecipe == 3, "the subgraph keeps every surviving recipe");
 }
@@ -899,6 +1195,121 @@ void testTagPruningParity() {
          "pruning does not change the optimum");
 }
 
+void testRecipePruning() {
+  std::cout << "[Test] composite recipe pruning\n";
+
+  // The motivating example: black x224 <- black_candle is a net loss once the
+  // black candle's producers are inlined, while black x256 <- black_dye is the
+  // route the 224 column loses to.
+  aw::registerCraftingGraph(buildBlackCandleSample());
+  expect(aw::getCraftingError() == nullptr, "black candle sample parses");
+  {
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    expect(graph.nRecipe == 6 && graph.nReal == 6, "black candle sample shape");
+    expect(graph.recipeDominated.size() == graph.nRecipe &&
+               graph.recipeGuardInput.size() == graph.nRecipe,
+           "one recipe pruning flag per recipe");
+    expect(graph.recipeDominated[5] == 1,
+           "black x224 <- black_candle is composite-dominated");
+    expect(graph.recipeGuardInput[5] == 0,
+           "the guard of black x224 <- black_candle is black_candle");
+    expect(graph.recipeDominated[4] == 0, "black x256 <- black_dye survives");
+  }
+  {
+    // Stocking the guard input keeps the dropped recipe reachable.
+    const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
+    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    inventory[0] = 10;  // black_candle
+    const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
+    bool kept = false;
+    for (aw::NodeId r : sub.recipeOrigin)
+      if (r == 5)
+        kept = true;
+    expect(kept, "stocking the guard input keeps the dominated recipe");
+    const aw::NodeId target = sub.translate(3);
+    const aw::PlanResult r = aw::planCrafting(sub, target, 224, inventory);
+    expect(r.status == aw::PlanStatus::OK, "a stocked guard still plans");
+  }
+  {
+    // The A/B switch turns the drop off entirely.
+    const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
+    aw::setRecipePruningEnabled(false);
+    const aw::Subgraph sub = aw::reachableSubgraph(4, all);
+    aw::setRecipePruningEnabled(true);
+    bool kept = false;
+    for (aw::NodeId r : sub.recipeOrigin)
+      if (r == 5)
+        kept = true;
+    expect(kept, "disabling recipe pruning keeps every recipe");
+  }
+
+  // The right-only negative entry regression from plan section 6: S consumes
+  // coal_block, which the composite never mentions, so `coal <- torch` must
+  // not be dominated.
+  aw::registerCraftingGraph(buildCoalRegressionSample());
+  expect(aw::getCraftingError() == nullptr, "coal regression sample parses");
+  {
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    expect(graph.recipeDominated[0] == 0,
+           "a right-only negative entry refutes domination");
+    expect(graph.recipeDominated[1] == 1,
+           "the self-cancelling cycle is dominated");
+  }
+
+  // R is more efficient in Z than S, so it must survive.
+  aw::registerCraftingGraph(buildAmountRatioSample());
+  expect(aw::getCraftingError() == nullptr, "amount ratio sample parses");
+  expect(aw::getCraftingGraph().recipeDominated[0] == 0,
+         "the more Z-efficient recipe is not dominated");
+
+  // Y has a leaf-rooted route of its own, so `X <- Y` survives.
+  aw::registerCraftingGraph(buildIndependentRouteSample());
+  expect(aw::getCraftingError() == nullptr, "independent route sample parses");
+  expect(aw::getCraftingGraph().recipeDominated[0] == 0,
+         "an independent route to Y blocks domination");
+
+  // The producer's output amount does not divide q, so the ceiling decides.
+  aw::registerCraftingGraph(buildIntegerScalingSample());
+  expect(aw::getCraftingError() == nullptr, "integer scaling sample parses");
+  expect(aw::getCraftingGraph().recipeDominated[0] == 0,
+         "the ceiling, not a rational alpha, decides domination");
+}
+
+void testRecipePruningParity() {
+  std::cout << "[Test] composite pruning preserves the optimum\n";
+  aw::registerCraftingGraph(buildBlackCandleSample());
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+  const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
+
+  // Leaves (handles 5 and 6) are free only through inventory.
+  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  for (aw::NodeId m = 0; m < graph.nReal; m++)
+    if (graph.i2r.targetsOf(m).empty())
+      inventory[m] = 1000000000LL;
+
+  auto plan = [&](bool prune, aw::Amount amount) {
+    aw::setRecipePruningEnabled(prune);
+    const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
+    const aw::NodeId target = sub.translate(3);
+    const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
+    int64_t total = 0;
+    for (int64_t x : r.exec)
+      total += x;
+    return std::pair<aw::PlanStatus, int64_t>(r.status, total);
+  };
+
+  const aw::Amount amounts[] = {1, 224, 256, 300};
+  for (aw::Amount amount : amounts) {
+    const auto full = plan(false, amount);
+    const auto pruned = plan(true, amount);
+    expect(full.first == pruned.first,
+           "composite pruning preserves the plan status");
+    expect(full.second == pruned.second,
+           "composite pruning preserves the optimum");
+  }
+  aw::setRecipePruningEnabled(true);
+}
+
 }  // namespace
 
 int main() {
@@ -911,6 +1322,8 @@ int main() {
   testDuplicateRecipes();
   testTagPruning();
   testTagPruningParity();
+  testRecipePruning();
+  testRecipePruningParity();
 
   if (failures == 0) {
     std::cout << "all tests passed\n";

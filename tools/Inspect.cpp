@@ -324,6 +324,46 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
     }
   }
 
+  // Only real recipes may be flagged as composite-dominated, and each keeps a
+  // real guard input that it actually consumes. Every real item must also keep
+  // at least one unflagged recipe, so composite pruning never erases one.
+  if (graph.recipeDominated.size() != graph.nRecipe ||
+      graph.recipeGuardInput.size() != graph.nRecipe) {
+    report("recipe pruning arrays do not match the recipe count");
+  } else {
+    for (size_t r = 0; r < graph.nRecipe; ++r) {
+      if (!graph.recipeDominated[r])
+        continue;
+      if (graph.output[r] >= graph.nReal) {
+        report("a pseudo-resource recipe is marked as composite-dominated");
+        break;
+      }
+      const aw::NodeId guard = graph.recipeGuardInput[r];
+      if (guard >= graph.nReal) {
+        report("a composite-dominated recipe has no real guard input");
+        break;
+      }
+      bool consumed = false;
+      for (aw::NodeId input : graph.r2i.targetsOf(r))
+        if (input == guard)
+          consumed = true;
+      if (!consumed) {
+        report("a composite-dominated recipe's guard is not one of its inputs");
+        break;
+      }
+    }
+    std::vector<uint8_t> kept(graph.nItem, 0);
+    for (size_t r = 0; r < graph.nRecipe; ++r)
+      if (graph.output[r] < graph.nReal && !graph.recipeDominated[r])
+        kept[graph.output[r]] = 1;
+    for (size_t item = 0; item < graph.nReal; ++item) {
+      if (!graph.i2r.targetsOf(item).empty() && !kept[item]) {
+        report("composite pruning removed every recipe of a real item");
+        break;
+      }
+    }
+  }
+
   for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
     if (graph.output[recipe] >= graph.nReal)
       continue;  // Synthetic; it needs no workstation.
@@ -504,6 +544,7 @@ int main(int argc, char** argv) {
   bool check = false;
   bool dump = false;
   bool noPrune = false;
+  bool noRecipePrune = false;
   bool doReach = false;
   bool doTree = false;
   bool doPlan = false;
@@ -520,6 +561,8 @@ int main(int argc, char** argv) {
       dump = true;
     } else if (arg == "--no-prune") {
       noPrune = true;
+    } else if (arg == "--no-recipe-prune") {
+      noRecipePrune = true;
     } else if (arg == "--names") {
       if (i + 1 >= argc) {
         std::cerr << "--names needs a path\n";
@@ -588,7 +631,8 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "-h" || arg == "--help") {
       std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
-                   "                   [--no-prune] [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
+                   "                   [--no-prune] [--no-recipe-prune]\n"
+                   "                   [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
                    "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
                    "                   [--names <table.tsv>] [--subgraph <name|handle>] <recipes.awr>\n";
       return EXIT_SUCCESS;
@@ -602,7 +646,8 @@ int main(int argc, char** argv) {
 
   if (path.empty()) {
     std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
-                 "                   [--no-prune] [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
+                 "                   [--no-prune] [--no-recipe-prune]\n"
+                 "                   [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
                  "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
                  "                   [--names <table.tsv>] [--subgraph <name|handle>] <recipes.awr>\n";
     return EXIT_FAILURE;
@@ -617,6 +662,8 @@ int main(int argc, char** argv) {
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
   if (noPrune)
     aw::setTagPruningEnabled(false);
+  if (noRecipePrune)
+    aw::setRecipePruningEnabled(false);
 
   std::cout << "parsed " << bytes.size() << " bytes from " << path << '\n';
   printSummary(graph);

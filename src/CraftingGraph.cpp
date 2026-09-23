@@ -1,5 +1,7 @@
 #include "aw/CraftingGraph.h"
 
+#include "Prune.h"
+
 #include <algorithm>
 #include <array>
 
@@ -8,8 +10,6 @@ CraftingGraph graph;
 // Last parse error, or nullptr when the last registerCraftingGraph succeeded.
 // The Java side reads this to turn a malformed blob into an exception.
 const char *error;
-// Tag-edge dominance pruning is on by default; see setTagPruningEnabled.
-bool tagPruning = true;
 
 namespace {
 
@@ -180,480 +180,6 @@ void prefixSum(std::vector<uint> &v) noexcept {
   v.insert(v.begin(), 0);
   for (size_t i = 0; i + 1 < v.size(); i++)
     v[i + 1] += v[i];
-}
-
-// ---------------------------------------------------------------------------
-// Tag-member dominance pruning
-// ---------------------------------------------------------------------------
-//
-// A tag (pseudo-resource) T is a set of members, encoded as one synthetic
-// `T <- m` recipe per member. Serving T through a member m is pointless when
-// another member w is strictly cheaper, because then the tag edge `T <- m` can
-// be replaced by `T <- w`. The relation used here is `requires(m, w)`: for
-// every recipe r of m there is an amount-qualified input that is either w
-// itself or a simple tag all of whose other producible members require w. It
-// implies the per-unit cost of m exceeds that of w. See docs/pruning.typ.
-//
-// A tag is "simple" when every one of its recipes is a member edge: exactly one
-// input, no workstation, and a real member. Everything the Java writer emits
-// looks like that. A malformed-but-parseable tag is left unpruned, which is
-// conservative.
-
-using PairKey = uint64_t;
-
-constexpr PairKey packPair(NodeId m, NodeId w) noexcept {
-  return ((PairKey) m << 32) | (PairKey) w;
-}
-
-void intersectSorted(const std::vector<NodeId> &a, const std::vector<NodeId> &b,
-                     std::vector<NodeId> &out) noexcept {
-  out.clear();
-  size_t i = 0, j = 0;
-  while (i < a.size() && j < b.size()) {
-    if (a[i] < b[j]) {
-      i++;
-    } else if (b[j] < a[i]) {
-      j++;
-    } else {
-      out.push_back(a[i]);
-      i++;
-      j++;
-    }
-  }
-}
-
-// Fills graph.tagEdgeDominated from the canonical graph. Never fails; on
-// malformed input it simply prunes less.
-void computeTagPruning() noexcept {
-  graph.tagEdgeDominated.assign(graph.nRecipe, 0);
-
-  const uint nItem = graph.nItem;
-  const uint nReal = graph.nReal;
-  const uint nRecipe = graph.nRecipe;
-  if (nItem == 0 || nReal == 0 || nRecipe == 0)
-    return;
-
-  // ---- Simple tags and their members ------------------------------------
-  std::vector<uint8_t> simpleTag(nItem, 0);
-  std::vector<std::vector<NodeId>> members(nItem);
-  for (NodeId t = nReal; t < nItem; t++) {
-    const auto recipes = graph.i2r.targetsOf(t);
-    if (recipes.empty())
-      continue;
-
-    std::vector<NodeId> ms;
-    ms.reserve(recipes.size());
-    bool simple = true;
-    for (NodeId recipeNode : recipes) {
-      const uint r = recipeNode - nItem;
-      const auto inputs = graph.r2i.targetsOf(r);
-      if (!graph.workstations.targetsOf(r).empty() || inputs.size() != 1 ||
-          inputs[0] >= nReal) {
-        simple = false;
-        break;
-      }
-      ms.push_back(inputs[0]);
-    }
-    if (!simple)
-      continue;
-
-    std::sort(ms.begin(), ms.end());
-    ms.erase(std::unique(ms.begin(), ms.end()), ms.end());
-    simpleTag[t] = 1;
-    members[t] = std::move(ms);
-  }
-
-  std::vector<uint8_t> producible(nItem, 0);
-  for (NodeId m = 0; m < nItem; m++)
-    if (!graph.i2r.targetsOf(m).empty())
-      producible[m] = 1;
-
-  // member -> tags containing it, ascending.
-  std::vector<uint> itemTagOffsets(nReal, 0);
-  for (NodeId t = nReal; t < nItem; t++)
-    if (simpleTag[t])
-      for (NodeId m : members[t])
-        itemTagOffsets[m]++;
-  prefixSum(itemTagOffsets);
-  std::vector<NodeId> itemTagTargets(itemTagOffsets.back());
-  {
-    std::vector<uint> cursor(itemTagOffsets.begin(), itemTagOffsets.end() - 1);
-    for (NodeId t = nReal; t < nItem; t++)
-      if (simpleTag[t])
-        for (NodeId m : members[t])
-          itemTagTargets[cursor[m]++] = t;
-  }
-
-  // tag -> real items that consume it in a real recipe. Duplicates are kept;
-  // the worklist dedups them.
-  std::vector<uint> tagConsumerOffsets(nItem, 0);
-  for (uint r = 0; r < nRecipe; r++) {
-    if (graph.output[r] >= nReal)
-      continue;
-    for (NodeId j : graph.r2i.targetsOf(r))
-      if (j >= nReal && j < nItem && simpleTag[j])
-        tagConsumerOffsets[j]++;
-  }
-  prefixSum(tagConsumerOffsets);
-  std::vector<NodeId> tagConsumerTargets(tagConsumerOffsets.back());
-  {
-    std::vector<uint> cursor(tagConsumerOffsets.begin(), tagConsumerOffsets.end() - 1);
-    for (uint r = 0; r < nRecipe; r++) {
-      if (graph.output[r] >= nReal)
-        continue;
-      const NodeId m = graph.output[r];
-      for (NodeId j : graph.r2i.targetsOf(r))
-        if (j >= nReal && j < nItem && simpleTag[j])
-          tagConsumerTargets[cursor[j]++] = m;
-    }
-  }
-
-  // ---- The universe of candidate pairs ----------------------------------
-  // (a) witnesses for gating: w in the intersection of the amount-qualified
-  //     input sources over every recipe of m.
-  // (b) support pairs (z, w) for members of a common tag, so that the "all
-  //     other members require w" rule has something to count.
-  std::vector<PairKey> pairs;
-  {
-    std::vector<NodeId> acc, next, scratch;
-    for (NodeId m = 0; m < nReal; m++) {
-      const auto recipes = graph.i2r.targetsOf(m);
-      if (recipes.empty())
-        continue;
-
-      bool first = true;
-      acc.clear();
-      for (NodeId recipeNode : recipes) {
-        const uint r = recipeNode - nItem;
-        const Amount out = graph.outputAmt[r];
-        scratch.clear();
-        const auto inputs = graph.r2i.targetsOf(r);
-        const auto weights = graph.r2i.weightsOf(r);
-        for (size_t k = 0; k < inputs.size(); k++) {
-          if (weights[k] < out)
-            continue;
-          const NodeId j = inputs[k];
-          if (j < nReal) {
-            scratch.push_back(j);
-          } else if (j < nItem && simpleTag[j]) {
-            scratch.insert(scratch.end(), members[j].begin(), members[j].end());
-          }
-        }
-        std::sort(scratch.begin(), scratch.end());
-        scratch.erase(std::unique(scratch.begin(), scratch.end()), scratch.end());
-        if (first) {
-          acc.swap(scratch);
-          first = false;
-        } else {
-          intersectSorted(acc, scratch, next);
-          acc.swap(next);
-        }
-        if (acc.empty())
-          break;
-      }
-      for (NodeId w : acc)
-        if (w != m)
-          pairs.push_back(packPair(m, w));
-    }
-  }
-  for (NodeId t = nReal; t < nItem; t++) {
-    if (!simpleTag[t])
-      continue;
-    const std::vector<NodeId> &ms = members[t];
-    for (NodeId z : ms) {
-      if (!producible[z])
-        continue;
-      for (NodeId w : ms)
-        if (z != w)
-          pairs.push_back(packPair(z, w));
-    }
-  }
-
-  std::sort(pairs.begin(), pairs.end());
-  pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
-
-  const uint32_t universe = (uint32_t) pairs.size();
-  if (universe == 0)
-    return;
-
-  // Group the universe by witness. Sorting by (m, w) means a single scan fills
-  // each witness row in ascending m, so idOf can binary search the row.
-  std::vector<uint> byWOffsets(nItem, 0);
-  for (PairKey key : pairs)
-    byWOffsets[(uint32_t) (key & 0xFFFFFFFFu)]++;
-  prefixSum(byWOffsets);
-  std::vector<NodeId> byWTargets(universe);
-  std::vector<NodeId> pairW(universe);
-  {
-    std::vector<uint> cursor(byWOffsets.begin(), byWOffsets.end() - 1);
-    for (PairKey key : pairs) {
-      const NodeId w = (NodeId) (key & 0xFFFFFFFFu);
-      const NodeId m = (NodeId) (key >> 32);
-      const uint slot = cursor[w]++;
-      byWTargets[slot] = m;
-      pairW[slot] = w;
-    }
-  }
-  pairs.clear();
-  pairs.shrink_to_fit();
-
-  auto idOf = [&](NodeId m, NodeId w) -> uint32_t {
-    const uint lo = byWOffsets[w], hi = byWOffsets[w + 1];
-    const auto begin = byWTargets.begin() + lo;
-    const auto end = byWTargets.begin() + hi;
-    const auto it = std::lower_bound(begin, end, m);
-    if (it == end || *it != m)
-      return UINT32_MAX;
-    return (uint32_t) (it - byWTargets.begin());
-  };
-
-  // ---- Counters for the tag rule ----------------------------------------
-  // cnt[t][i] counts members z != M[i] that currently require M[i]. The tag may
-  // gate through M[i] exactly when the counter reaches |M| - 1; a member with
-  // no recipe contributes nothing, so a leaf member always blocks the gate.
-  std::vector<std::vector<uint32_t>> cnt(nItem);
-  std::vector<uint32_t> threshold(nItem, 0);
-  for (NodeId t = nReal; t < nItem; t++) {
-    if (!simpleTag[t])
-      continue;
-    const std::vector<NodeId> &ms = members[t];
-    cnt[t].assign(ms.size(), 0);
-    threshold[t] = (uint32_t) ms.size() - 1;
-    for (size_t idx = 0; idx < ms.size(); idx++) {
-      uint32_t c = 0;
-      for (size_t k = 0; k < ms.size(); k++)
-        if (k != idx && producible[ms[k]])
-          c++;
-      cnt[t][idx] = c;
-    }
-  }
-
-  auto valid = [&](NodeId m, NodeId w) -> bool {
-    for (NodeId recipeNode : graph.i2r.targetsOf(m)) {
-      const uint r = recipeNode - nItem;
-      const Amount out = graph.outputAmt[r];
-      const auto inputs = graph.r2i.targetsOf(r);
-      const auto weights = graph.r2i.weightsOf(r);
-      bool ok = false;
-      for (size_t k = 0; k < inputs.size(); k++) {
-        if (weights[k] < out)
-          continue;
-        const NodeId j = inputs[k];
-        if (j == w) {
-          ok = true;
-          break;
-        }
-        if (j >= nReal && j < nItem && simpleTag[j]) {
-          const std::vector<NodeId> &ms = members[j];
-          const auto it = std::lower_bound(ms.begin(), ms.end(), w);
-          if (it != ms.end() && *it == w) {
-            const size_t idx = (size_t) (it - ms.begin());
-            if (cnt[j][idx] == threshold[j]) {
-              ok = true;
-              break;
-            }
-          }
-        }
-      }
-      if (!ok)
-        return false;
-    }
-    return true;
-  };
-
-  // ---- Greatest fixpoint ------------------------------------------------
-  // Every pair starts alive and is killed once when it loses its justification.
-  // A kill can only invalidate pairs that gate through a shared tag, so those
-  // consumers are re-queued; the result is the greatest fixpoint.
-  std::vector<uint8_t> alive(universe, 1);
-  std::vector<uint32_t> queue(universe);
-  std::vector<uint8_t> queued(universe, 0);
-  size_t head = 0, tail = 0, pending = 0;
-  auto push = [&](uint32_t id) noexcept {
-    if (queued[id])
-      return;
-    queued[id] = 1;
-    queue[tail] = id;
-    tail++;
-    if (tail == universe)
-      tail = 0;
-    pending++;
-  };
-  for (uint32_t id = 0; id < universe; id++)
-    push(id);
-
-  while (pending != 0) {
-    const uint32_t id = queue[head];
-    head++;
-    if (head == universe)
-      head = 0;
-    pending--;
-    queued[id] = 0;
-    if (!alive[id])
-      continue;
-
-    const NodeId m = byWTargets[id];
-    const NodeId w = pairW[id];
-    if (valid(m, w))
-      continue;
-
-    // Kill (m, w). Every tag containing both loses one supporting member.
-    // m and w are always real here: the universe is built from real items.
-    alive[id] = 0;
-    const auto ta = std::span(itemTagTargets.data() + itemTagOffsets[m],
-                              itemTagOffsets[m + 1] - itemTagOffsets[m]);
-    const auto tb = std::span(itemTagTargets.data() + itemTagOffsets[w],
-                              itemTagOffsets[w + 1] - itemTagOffsets[w]);
-    size_t i = 0, j = 0;
-    while (i < ta.size() && j < tb.size()) {
-      if (ta[i] < tb[j]) {
-        i++;
-      } else if (tb[j] < ta[i]) {
-        j++;
-      } else {
-        const NodeId tag = ta[i];
-        const std::vector<NodeId> &ms = members[tag];
-        const auto it = std::lower_bound(ms.begin(), ms.end(), w);
-        const size_t idx = (size_t) (it - ms.begin());
-        const uint32_t c = --cnt[tag][idx];
-        // cnt only ever decreases, so the drop from a full gate (threshold) to
-        // a broken one happens at most once per (tag, witness).
-        if (c + 1 == threshold[tag]) {
-          for (uint e = tagConsumerOffsets[tag]; e < tagConsumerOffsets[tag + 1]; e++) {
-            const uint32_t q = idOf(tagConsumerTargets[e], w);
-            if (q != UINT32_MAX)
-              push(q);
-          }
-        }
-        i++;
-        j++;
-      }
-    }
-  }
-
-  // ---- Keep one representative per sink SCC -----------------------------
-  // On the alive edges inside a tag, every member reaches some sink SCC, and a
-  // sink representative is substitutable for everything that reaches it. This
-  // also keeps at least one member of every tag, including mutual-requirement
-  // cycles, so no tag becomes unsatisfiable.
-  std::vector<int32_t> comp, disc, low;
-  std::vector<uint8_t> onStack;
-  std::vector<uint32_t> tstack, callNode, callEdge;
-  std::vector<uint32_t> adjOffsets, adjTargets, cursor;
-  for (NodeId t = nReal; t < nItem; t++) {
-    if (!simpleTag[t])
-      continue;
-    const std::vector<NodeId> &ms = members[t];
-    const size_t k = ms.size();
-    if (k < 2)
-      continue;
-
-    adjOffsets.assign(k + 1, 0);
-    for (size_t a = 0; a < k; a++) {
-      uint32_t degree = 0;
-      for (size_t b = 0; b < k; b++) {
-        if (a == b)
-          continue;
-        const uint32_t id = idOf(ms[a], ms[b]);
-        if (id != UINT32_MAX && alive[id])
-          degree++;
-      }
-      adjOffsets[a + 1] = degree;
-    }
-    for (size_t a = 0; a + 1 <= k; a++)
-      adjOffsets[a + 1] += adjOffsets[a];
-    adjTargets.assign(adjOffsets[k], 0);
-    cursor.assign(adjOffsets.begin(), adjOffsets.end() - 1);
-    for (size_t a = 0; a < k; a++)
-      for (size_t b = 0; b < k; b++) {
-        if (a == b)
-          continue;
-        const uint32_t id = idOf(ms[a], ms[b]);
-        if (id != UINT32_MAX && alive[id])
-          adjTargets[cursor[a]++] = (uint32_t) b;
-      }
-
-    // Iterative Tarjan, so a deep tag cannot overflow the stack.
-    comp.assign(k, -1);
-    disc.assign(k, -1);
-    low.assign(k, 0);
-    onStack.assign(k, 0);
-    tstack.clear();
-    callNode.clear();
-    callEdge.clear();
-    int32_t timer = 0;
-    uint32_t nComp = 0;
-    for (uint32_t s = 0; s < k; s++) {
-      if (disc[s] != -1)
-        continue;
-      disc[s] = low[s] = timer++;
-      tstack.push_back(s);
-      onStack[s] = 1;
-      callNode.push_back(s);
-      callEdge.push_back(adjOffsets[s]);
-      while (!callNode.empty()) {
-        const uint32_t v = callNode.back();
-        uint32_t &edge = callEdge.back();
-        if (edge < adjOffsets[v + 1]) {
-          const uint32_t u = adjTargets[edge++];
-          if (disc[u] == -1) {
-            disc[u] = low[u] = timer++;
-            tstack.push_back(u);
-            onStack[u] = 1;
-            callNode.push_back(u);
-            callEdge.push_back(adjOffsets[u]);
-          } else if (onStack[u] && disc[u] < low[v]) {
-            low[v] = disc[u];
-          }
-        } else {
-          if (low[v] == disc[v]) {
-            while (true) {
-              const uint32_t u = tstack.back();
-              tstack.pop_back();
-              onStack[u] = 0;
-              comp[u] = (int32_t) nComp;
-              if (u == v)
-                break;
-            }
-            nComp++;
-          }
-          callNode.pop_back();
-          callEdge.pop_back();
-          if (!callNode.empty()) {
-            const uint32_t parent = callNode.back();
-            if (low[v] < low[parent])
-              low[parent] = low[v];
-          }
-        }
-      }
-    }
-
-    std::vector<uint8_t> isSink(nComp, 1);
-    for (uint32_t a = 0; a < k; a++)
-      for (uint32_t e = adjOffsets[a]; e < adjOffsets[a + 1]; e++) {
-        const uint32_t b = adjTargets[e];
-        if (comp[a] != comp[b])
-          isSink[comp[a]] = 0;
-      }
-    std::vector<uint32_t> rep(nComp, UINT32_MAX);
-    for (uint32_t a = 0; a < k; a++) {
-      const uint32_t c = (uint32_t) comp[a];
-      if (isSink[c] && rep[c] == UINT32_MAX)
-        rep[c] = a;
-    }
-
-    for (uint32_t a = 0; a < k; a++) {
-      if (rep[comp[a]] == a)
-        continue;
-      const NodeId m = ms[a];
-      for (NodeId recipeNode : graph.i2r.targetsOf(t)) {
-        const uint r = recipeNode - nItem;
-        const auto inputs = graph.r2i.targetsOf(r);
-        if (inputs.size() == 1 && inputs[0] == m)
-          graph.tagEdgeDominated[r] = 1;
-      }
-    }
-  }
 }
 
 // Total order on recipes by the only thing the planner can see: the output
@@ -846,6 +372,7 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
   // Start filling the grpah.
   ByteReader in(bytes);
   checkMagic(in);
+  [[maybe_unused]]
   const uint nReal = in.readVarInt();
   const uint nOutput = in.readVarInt();
 
@@ -896,7 +423,7 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
   }
 
   canonicalizeRecipes();
-  computeTagPruning();
+  computePruning(graph);
 }
 
 const char *getCraftingError() noexcept {
@@ -909,14 +436,6 @@ void clearCraftingError() noexcept {
 
 const CraftingGraph &getCraftingGraph() noexcept {
   return graph;
-}
-
-void setTagPruningEnabled(bool enabled) noexcept {
-  tagPruning = enabled;
-}
-
-bool isTagPruningEnabled() noexcept {
-  return tagPruning;
 }
 
 Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
@@ -955,12 +474,23 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
 
       // A dominated tag edge is dropped unless the player actually holds the
       // member, in which case the free stock can still be spent on the tag.
-      if (tagPruning && recipe < graph.tagEdgeDominated.size() &&
+      if (isTagPruningEnabled() && recipe < graph.tagEdgeDominated.size() &&
           graph.tagEdgeDominated[recipe]) {
         const auto memberInputs = graph.r2i.targetsOf(recipe);
         const Amount held = !memberInputs.empty() && memberInputs[0] < inventory.size()
                                 ? inventory[memberInputs[0]]
                                 : 0;
+        if (held == 0)
+          continue;
+      }
+
+      // A composite-dominated real recipe is likewise only dropped when the
+      // witness input has no stock, so held stock can still be spent through
+      // it.
+      if (isRecipePruningEnabled() && recipe < graph.recipeDominated.size() &&
+          graph.recipeDominated[recipe]) {
+        const NodeId guard = graph.recipeGuardInput[recipe];
+        const Amount held = guard < inventory.size() ? inventory[guard] : 0;
         if (held == 0)
           continue;
       }

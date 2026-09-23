@@ -91,10 +91,18 @@ struct CraftingGraph : BaseCraftingGraph {
   BaseSparseSets workstations;
 
   // Tag-edge pruning. `tagEdgeDominated[r] == 1` means recipe r is a synthetic
-  // tag edge `T <- m` whose member m is cost-dominated by another member of T
-  // (see docs/pruning.typ). Reachability may drop such an edge when the member
-  // has no inventory. Always 0 for a recipe that outputs a real resource.
+  // tag edge `T <- m` whose member m is cost-dominated by another member of T;
   std::vector<uint8_t> tagEdgeDominated;  // nRecipe entries
+
+  // Real-recipe (composite) pruning. `recipeDominated[r] == 1` means recipe r
+  // outputs a real resource and is dominated by a sibling recipe of the same
+  // output once every producer of the guard input is inlined.
+  std::vector<uint8_t> recipeDominated;  // nRecipe entries
+
+  // For a dominated recipe, the real input Y that the witness inlined. The
+  // recipe is only dropped when inventory[Y] == 0, so stocked Y can still be
+  // spent. UINT32_MAX otherwise.
+  std::vector<NodeId> recipeGuardInput;  // nRecipe entries
 
   [[nodiscard]]
   static NodeId itemNode(Handle handle) noexcept {
@@ -131,15 +139,18 @@ struct Subgraph {
 // Handles in `workstations` outside the item range are ignored.
 //
 // `inventory` is indexed by source item node (handle - 1), matching
-// `planCrafting`. A dominated tag edge is only dropped when the player holds
-// none of the member, so existing stock can still be spent on the tag.
+// `planCrafting`. A dominated tag edge or real recipe is only dropped when the
+// player holds none of the member / guard input, so existing stock can still
+// be spent.
 Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
                            std::span<const Amount> inventory = {}) noexcept;
 
-// Tag-edge dominance pruning is on by default. Turning it off behaves as if no
-// edge were dominated and exists for A/B testing.
+// Dominance pruning is on by default. Turning a pass off behaves as if nothing
+// were dominated and exists for A/B testing.
 void setTagPruningEnabled(bool enabled) noexcept;
 bool isTagPruningEnabled() noexcept;
+void setRecipePruningEnabled(bool enabled) noexcept;
+bool isRecipePruningEnabled() noexcept;
 
 void registerCraftingGraph(std::span<const std::byte> bytes) noexcept;
 const char *getCraftingError() noexcept;
