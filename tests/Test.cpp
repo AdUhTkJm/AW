@@ -11,7 +11,7 @@
 
 #include "aw/CraftingGraph.h"
 #include "aw/Plan.h"
-#include "aw/LpSolver.h"
+#include "aw/Solver.h"
 
 namespace {
 
@@ -446,10 +446,10 @@ std::vector<std::byte> buildBulkSample() {
   return out;
 }
 
-aw::lp::Matrix makeMatrix(
+aw::solver::Matrix makeMatrix(
     uint32_t rows, uint32_t cols,
-    const std::vector<std::vector<std::pair<uint32_t, double>>> &columns) {
-  aw::lp::Matrix A;
+    const std::vector<std::vector<std::pair<uint32_t, int64_t>>> &columns) {
+  aw::solver::Matrix A;
   A.rows = rows;
   A.cols = cols;
   A.colStart.push_back(0);
@@ -463,56 +463,86 @@ aw::lp::Matrix makeMatrix(
   return A;
 }
 
-void testLpSolver() {
-  std::cout << "[Test] sparse LP solver\n";
+void testSolver() {
+  std::cout << "[Test] integer solver\n";
 
-  // min x0 + x1  s.t.  x0 + 2 x1 >= 4, x0 >= 1.  Optimum 2.5 at (1, 1.5).
+  // min x0 + x1  s.t.  x0 + 2 x1 >= 4, x0 >= 1.
+  // The LP relaxation is 2.5 at (1, 1.5); whole executions cost 3.
   {
-    const aw::lp::Matrix A = makeMatrix(2, 2, {{{0, 1.0}, {1, 1.0}}, {{0, 2.0}}});
-    const std::vector<double> b = {4.0, 1.0};
-    const std::vector<double> c = {1.0, 1.0};
-    const aw::lp::Result r = aw::lp::solve(A, b, c);
-    expect(r.status == aw::PlanStatus::OK, "simple LP is optimal");
-    expect(std::fabs(r.objective - 2.5) < 1e-9, "simple LP objective");
-    expect(std::fabs(r.x[0] - 1.0) < 1e-9 && std::fabs(r.x[1] - 1.5) < 1e-9,
-           "simple LP solution");
-
-    // Refactoring after every pivot must not change the answer.
-    aw::lp::Options eager;
-    eager.refactorIntv = 1;
-    const aw::lp::Result r2 = aw::lp::solve(A, b, c, eager);
-    expect(r2.status == aw::PlanStatus::OK &&
-               std::fabs(r2.objective - 2.5) < 1e-9,
-           "eager refactorization keeps the optimum");
+    const aw::solver::Matrix A = makeMatrix(2, 2, {{{0, 1}, {1, 1}}, {{0, 2}}});
+    const std::vector<int64_t> b = {4, 1};
+    const std::vector<int64_t> c = {1, 1};
+    const aw::solver::Result r = aw::solver::solve(A, b, c);
+    expect(r.status == aw::PlanStatus::OK, "simple solve succeeds");
+    expect(r.provenOptimal, "small solve is proven optimal");
+    expect(r.objective == 3, "integer objective rounds the LP optimum up");
+    expect(r.x.size() == 2 && r.x[0] + 2 * r.x[1] >= 4 && r.x[0] >= 1,
+           "integer solution stays feasible");
   }
 
-  // 0 >= 1 cannot be satisfied.
+  // 2 x0 >= 5 has no integer point at 2.5, so the solver must round up.
   {
-    const aw::lp::Matrix A = makeMatrix(2, 1, {{{0, 1.0}}});
-    const std::vector<double> b = {1.0, 1.0};
-    const std::vector<double> c = {1.0};
-    const aw::lp::Result r = aw::lp::solve(A, b, c);
-    expect(r.status == aw::PlanStatus::INFEASIBLE, "infeasible LP is detected");
+    const aw::solver::Matrix A = makeMatrix(1, 1, {{{0, 2}}});
+    const std::vector<int64_t> b = {5};
+    const std::vector<int64_t> c = {1};
+    const aw::solver::Result r = aw::solver::solve(A, b, c);
+    expect(r.status == aw::PlanStatus::OK && r.objective == 3,
+           "integrality rounds a fractional bound up");
   }
 
-  // A degenerate optimum: every point with x0 + x1 = 1 is optimal.
+  // An empty row reads 0 >= b, so a positive requirement is unsatisfiable.
   {
-    const aw::lp::Matrix A = makeMatrix(1, 2, {{{0, 1.0}}, {{0, 1.0}}});
-    const std::vector<double> b = {1.0};
-    const std::vector<double> c = {1.0, 1.0};
-    const aw::lp::Result r = aw::lp::solve(A, b, c);
-    expect(r.status == aw::PlanStatus::OK, "degenerate LP is optimal");
-    expect(std::fabs(r.objective - 1.0) < 1e-9, "degenerate LP objective");
+    const aw::solver::Matrix A = makeMatrix(2, 1, {{{0, 1}}});
+    const std::vector<int64_t> b = {1, 1};
+    const std::vector<int64_t> c = {1};
+    const aw::solver::Result r = aw::solver::solve(A, b, c);
+    expect(r.status == aw::PlanStatus::INFEASIBLE, "infeasible model is detected");
   }
 
-  // A negative right hand side must act as free starting stock.
+  // x0 >= 5 and -x0 >= -1 cannot both hold.
   {
-    const aw::lp::Matrix A = makeMatrix(1, 1, {{{0, 1.0}}});
-    const std::vector<double> b = {-5.0};
-    const std::vector<double> c = {1.0};
-    const aw::lp::Result r = aw::lp::solve(A, b, c);
-    expect(r.status == aw::PlanStatus::OK && std::fabs(r.objective) < 1e-9,
+    const aw::solver::Matrix A = makeMatrix(2, 1, {{{0, 1}, {1, -1}}});
+    const std::vector<int64_t> b = {5, -1};
+    const std::vector<int64_t> c = {1};
+    const aw::solver::Result r = aw::solver::solve(A, b, c);
+    expect(r.status == aw::PlanStatus::INFEASIBLE, "contradictory rows are detected");
+  }
+
+  // A negative right hand side is free starting stock.
+  {
+    const aw::solver::Matrix A = makeMatrix(1, 1, {{{0, 1}}});
+    const std::vector<int64_t> b = {-5};
+    const std::vector<int64_t> c = {1};
+    const aw::solver::Result r = aw::solver::solve(A, b, c);
+    expect(r.status == aw::PlanStatus::OK && r.objective == 0 && r.x[0] == 0,
            "negative rhs needs no production");
+  }
+
+  // A starting cap below the requirement must be grown, not treated as a
+  // hard limit.
+  {
+    const aw::solver::Matrix A = makeMatrix(1, 1, {{{0, 1}}});
+    const std::vector<int64_t> b = {5};
+    const std::vector<int64_t> c = {1};
+    aw::solver::Options tight;
+    tight.objectiveCap = 1;
+    const aw::solver::Result r = aw::solver::solve(A, b, c, tight);
+    expect(r.status == aw::PlanStatus::OK && r.objective == 5,
+           "grows the objective cap until it stops binding");
+  }
+
+  // One worker and a fixed seed must be reproducible.
+  {
+    const aw::solver::Matrix A = makeMatrix(1, 2, {{{0, 1}}, {{0, 1}}});
+    const std::vector<int64_t> b = {7};
+    const std::vector<int64_t> c = {1, 2};
+    aw::solver::Options single;
+    single.numWorkers = 1;
+    const aw::solver::Result first = aw::solver::solve(A, b, c, single);
+    const aw::solver::Result second = aw::solver::solve(A, b, c, single);
+    expect(first.status == aw::PlanStatus::OK && first.objective == 7 &&
+               second.objective == first.objective && second.x == first.x,
+           "single worker search is reproducible");
   }
 }
 
@@ -533,16 +563,16 @@ void testPlan() {
   const aw::PlanResult none = aw::planCrafting(sub, target, 4, {});
   expect(none.status == aw::PlanStatus::OK, "plan without inventory is optimal");
   expect(none.exec.size() == 2, "plan has one count per recipe");
-  expect(std::fabs(none.exec[0] - 8.0) < 1e-9, "r0 count");
-  expect(std::fabs(none.exec[1] - 4.0) < 1e-9, "r1 count");
+  expect(none.exec[0] == 8, "r0 count");
+  expect(none.exec[1] == 4, "r1 count");
 
   // 100 spare item 2 units cover the cycle losses, so r0 alone suffices.
   std::vector<aw::Amount> inventory(graph.nItem, 0);
   inventory[1] = 100;
   const aw::PlanResult stocked = aw::planCrafting(sub, target, 4, inventory);
   expect(stocked.status == aw::PlanStatus::OK, "plan with inventory is optimal");
-  expect(std::fabs(stocked.exec[0] - 4.0) < 1e-9, "stocked r0 count");
-  expect(std::fabs(stocked.exec[1] - 0.0) < 1e-9, "stocked r1 count");
+  expect(stocked.exec[0] == 4, "stocked r0 count");
+  expect(stocked.exec[1] == 0, "stocked r1 count");
 }
 
 void testPlanInfeasible() {
@@ -854,10 +884,10 @@ void testTagPruningParity() {
     const aw::Subgraph sub = aw::reachableSubgraph(5, all, inventory);
     const aw::NodeId target = sub.translate(4);
     const aw::PlanResult r = aw::planCrafting(sub, target, 16, inventory);
-    double total = 0;
-    for (double x : r.exec)
+    int64_t total = 0;
+    for (int64_t x : r.exec)
       total += x;
-    return std::pair<aw::PlanStatus, double>(r.status, total);
+    return std::pair<aw::PlanStatus, int64_t>(r.status, total);
   };
 
   const auto full = plan(false);
@@ -865,7 +895,7 @@ void testTagPruningParity() {
   aw::setTagPruningEnabled(true);
   expect(full.first == aw::PlanStatus::OK && pruned.first == aw::PlanStatus::OK,
          "both plan variants are feasible");
-  expect(std::fabs(full.second - pruned.second) < 1e-9,
+  expect(full.second == pruned.second,
          "pruning does not change the optimum");
 }
 
@@ -875,7 +905,7 @@ int main() {
   testSample();
   testRejectsBadInput();
   testReachability();
-  testLpSolver();
+  testSolver();
   testPlan();
   testPlanInfeasible();
   testDuplicateRecipes();

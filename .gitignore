@@ -5,3 +5,4 @@ temp/
 java-ref/
 .clangd
 AGENTS.md
+third_party/

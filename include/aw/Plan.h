@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "aw/CraftingGraph.h"
+#include "aw/Solver.h"
 #include "aw/Status.h"
 
 namespace aw {
@@ -13,17 +14,32 @@ namespace aw {
 struct PlanResult {
   PlanStatus status = PlanStatus::INVALID_INPUT;
 
-  // Executions per recipe, indexed by subgraph recipe id. 
-  // Empty unless the LP reached optimality.
-  std::vector<double> exec;
+  // Executions per recipe, indexed by subgraph recipe id. Empty unless the
+  // solver found a solution. Counts are whole numbers: a recipe is crafted an
+  // integer number of times.
+  std::vector<int64_t> exec;
 
-  // Number of simplex pivots executed, for profiling usage.
-  uint32_t iterations = 0;
+  // False when the solver stopped on its gap or time budget rather than
+  // proving optimality. The result is still usable; it is just not guaranteed
+  // to be the cheapest plan.
+  bool provenOptimal = false;
+  double gap = 0.0;
+  // Solver's dual bound at the moment it stopped, for diagnostics.
+  double bestBound = 0.0;
+
+  // Profiling counters from CP-SAT.
+  int64_t numConflicts = 0;
+  int64_t numBranches = 0;
 };
 
 // Plans `amount` new units of the item at subgraph node `target`.
+//
+// `options` exposes the solver's budget (relative gap, time limit, workers).
+// The defaults are tuned for an interactive caller and are expected to be
+// overridden from the mod's config.
 PlanResult planCrafting(const Subgraph& sub, NodeId target, Amount amount,
-                        std::span<const Amount> invSrc);
+                        std::span<const Amount> invSrc,
+                        const solver::Options& options = {});
 
 }  // namespace aw
 

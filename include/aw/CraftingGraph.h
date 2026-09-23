@@ -13,7 +13,7 @@ namespace aw {
 using Handle = uint32_t;
 // Indices into the unified node space. Items first, recipes next.
 using NodeId = uint32_t;
-using Amount = uint64_t;
+using Amount = int64_t;
 
 // A compressed sparse row matrix, unweighted.
 // Row `r` owns targets[offsets[r] .. offsets[r+1]).

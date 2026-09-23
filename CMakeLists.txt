@@ -13,25 +13,77 @@ endif()
 option(AW_BUILD_JNI "Build the JNI bridge shared library" ON)
 option(AW_BUILD_TOOLS "Build the awr_inspect command line tool" ON)
 option(AW_BUILD_TESTS "Build the unit tests" ON)
+option(AW_USE_SYSTEM_ORTOOLS "Use OR-Tools from the system/CMAKE_PREFIX_PATH instead of the vendored copy" OFF)
 
-add_library(aw_crafting STATIC src/CraftingGraph.cpp src/LpSolver.cpp src/Plan.cpp)
+if(MSVC)
+   add_compile_options(/W4 /Zi)
+else()
+   add_compile_options(-Wall -g)
+endif()
+
+# The hand-written code is exception- and RTTI-free. OR-Tools, Abseil and
+# protobuf need both, so the flags are applied per source file rather than
+# globally; src/CpSatSolver.cpp is the only file that includes OR-Tools.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+   set(AW_STRICT_FLAGS -fno-exceptions -fno-rtti)
+else()
+   set(AW_STRICT_FLAGS "")
+endif()
+
+# OR-Tools is a hard dependency: the LP fallback it replaced is gone.
+#
+# Either install OR-Tools somewhere CMake can see (set CMAKE_PREFIX_PATH or
+# AW_ORTOOLS_ROOT), or extract a release archive into third_party/ortools and
+# let scripts/fetch-ortools.sh lay it out. The archive ships a CMake package,
+# which is the only supported way to consume the prebuilt libraries: it is what
+# injects OR_PROTO_DLL=, without which the generated protobuf headers do not
+# compile.
+set(AW_ORTOOLS_ROOT "" CACHE PATH "Extracted OR-Tools release (directory containing lib/cmake/ortools)")
+set(AW_ORTOOLS_RESOLVED "")
+
+if(AW_ORTOOLS_ROOT)
+   set(AW_ORTOOLS_RESOLVED "${AW_ORTOOLS_ROOT}")
+   list(PREPEND CMAKE_PREFIX_PATH "${AW_ORTOOLS_ROOT}")
+elseif(NOT AW_USE_SYSTEM_ORTOOLS)
+   if(WIN32)
+      set(AW_ORTOOLS_PLATFORM windows-x86_64)
+   elseif(APPLE)
+      set(AW_ORTOOLS_PLATFORM macos-x86_64)
+   else()
+      set(AW_ORTOOLS_PLATFORM linux-x86_64)
+   endif()
+   set(AW_VENDORED_ORTOOLS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ortools/${AW_ORTOOLS_PLATFORM}")
+   if(EXISTS "${AW_VENDORED_ORTOOLS}/lib/cmake/ortools/ortoolsConfig.cmake")
+      set(AW_ORTOOLS_RESOLVED "${AW_VENDORED_ORTOOLS}")
+      list(PREPEND CMAKE_PREFIX_PATH "${AW_VENDORED_ORTOOLS}")
+      message(STATUS "Using vendored OR-Tools at ${AW_VENDORED_ORTOOLS}")
+   endif()
+endif()
+
+find_package(ortools CONFIG REQUIRED)
+
+add_library(aw_crafting STATIC src/CraftingGraph.cpp src/CpSatSolver.cpp src/Plan.cpp)
 target_include_directories(aw_crafting PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(aw_crafting PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(aw_crafting PUBLIC cxx_std_20)
-# Deliberately applied globally.
-add_compile_options(-Wall -fno-exceptions -fno-rtti -g)
+target_link_libraries(aw_crafting PUBLIC ortools::ortools)
+
+if(AW_STRICT_FLAGS)
+   set_source_files_properties(src/CraftingGraph.cpp src/Plan.cpp
+      PROPERTIES COMPILE_OPTIONS "${AW_STRICT_FLAGS}")
+endif()
 
 if(AW_BUILD_TOOLS)
    add_executable(awr_inspect tools/Inspect.cpp)
    target_link_libraries(awr_inspect PRIVATE aw_crafting)
+   target_compile_options(awr_inspect PRIVATE ${AW_STRICT_FLAGS})
 endif()
 
 if(AW_BUILD_TESTS)
    enable_testing()
    add_executable(aw_tests tests/Test.cpp)
    target_link_libraries(aw_tests PRIVATE aw_crafting)
-   # The LP solver is internal, but its unit tests live next to the graph tests.
-   target_include_directories(aw_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+   target_compile_options(aw_tests PRIVATE ${AW_STRICT_FLAGS})
    add_test(NAME crafting_graph COMMAND aw_tests)
 endif()
 
@@ -42,6 +94,21 @@ if(AW_BUILD_JNI)
       add_library(aw_jni SHARED src/JNIBridge.cpp)
       target_link_libraries(aw_jni PRIVATE aw_crafting)
       target_include_directories(aw_jni PRIVATE ${JNI_INCLUDE_DIRS})
+
+      # A Minecraft mod ships one file. The Windows OR-Tools release is built
+      # as a set of DLLs (ortools.dll plus Abseil, protobuf, re2, zlib, ...),
+      # so stage them next to aw_jni.dll; the mod's native loader must expose
+      # that directory (or the jar's extracted natives directory) on the
+      # library search path.
+      if(WIN32 AND AW_ORTOOLS_RESOLVED)
+         file(GLOB AW_ORTOOLS_DLLS "${AW_ORTOOLS_RESOLVED}/bin/*.dll")
+         if(AW_ORTOOLS_DLLS)
+            add_custom_command(TARGET aw_jni POST_BUILD
+               COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                       ${AW_ORTOOLS_DLLS} "$<TARGET_FILE_DIR:aw_jni>"
+               COMMENT "Staging OR-Tools runtime DLLs next to aw_jni.dll")
+         endif()
+      endif()
    else()
       message(WARNING "JNI not found; skipping aw_jni (set JAVA_HOME and reconfigure)")
    endif()

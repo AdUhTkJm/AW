@@ -40,7 +40,7 @@ public:
 
   uint readVarInt() noexcept {
     uint value = 0;
-    for (size_t i = 0; i < 5; ++i) {
+    for (size_t i = 0; i < 5; i++) {
       uint8_t next = readByte();
       value |= ((uint) (next & 0x7F)) << (7 * i);
       if ((next & 0x80) == 0)
@@ -49,18 +49,18 @@ public:
     fail("varint longer than 5 bytes", 0);
   }
 
-  ulong readVarLong() noexcept {
-    ulong value = 0;
-    for (size_t i = 0; i < 10; ++i) {
+  int64_t readVarLong() noexcept {
+    int64_t value = 0;
+    for (size_t i = 0; i < 9; i++) {
       uint8_t next = readByte();
       if (i == 9 && (next & 0xFE) != 0)
         fail("varlong overflows 64 bits", 0);
 
-      value |= ((ulong) (next & 0x7F)) << (7 * i);
+      value |= ((int64_t) (next & 0x7F)) << (7 * i);
       if ((next & 0x80) == 0)
         return value;
     }
-    fail("varlong longer than 10 bytes", 0);
+    fail("varlong longer than 9 bytes", 0);
   }
 
   uint readHandle() noexcept {

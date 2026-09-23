@@ -62,6 +62,18 @@ bool parseU64(const std::string &text, uint64_t &out) {
   return true;
 }
 
+// The tool is built without exceptions, so parse by hand rather than std::stod.
+bool parseDouble(const std::string &text, double &out) {
+  if (text.empty())
+    return false;
+  char *end = nullptr;
+  const double value = std::strtod(text.c_str(), &end);
+  if (end != text.c_str() + text.size() || !(value >= 0.0))
+    return false;
+  out = value;
+  return true;
+}
+
 bool parseHandle(const std::string &text, aw::Handle &out) {
   uint64_t value = 0;
   if (!parseU64(text, value) || value > UINT32_MAX)
@@ -496,6 +508,7 @@ int main(int argc, char** argv) {
   bool doTree = false;
   bool doPlan = false;
   uint64_t planAmount = 1;
+  aw::solver::Options solverOptions;
   aw::Handle reach = 0;
   std::vector<aw::Handle> workstations;
 
@@ -538,6 +551,30 @@ int main(int argc, char** argv) {
         std::cerr << "--amount needs a non-negative integer\n";
         return EXIT_FAILURE;
       }
+    } else if (arg == "--time-limit") {
+      if (i + 1 >= argc || !parseDouble(argv[++i], solverOptions.maxTimeSeconds)) {
+        std::cerr << "--time-limit needs a number of seconds\n";
+        return EXIT_FAILURE;
+      }
+    } else if (arg == "--gap") {
+      if (i + 1 >= argc || !parseDouble(argv[++i], solverOptions.relativeGap)) {
+        std::cerr << "--gap needs a fraction (0.01 is one percent)\n";
+        return EXIT_FAILURE;
+      }
+    } else if (arg == "--workers") {
+      uint64_t workers = 0;
+      if (i + 1 >= argc || !parseU64(argv[++i], workers) || workers > 1024) {
+        std::cerr << "--workers needs a small non-negative integer\n";
+        return EXIT_FAILURE;
+      }
+      solverOptions.numWorkers = (int) workers;
+    } else if (arg == "--ub") {
+      uint64_t bound = 0;
+      if (i + 1 >= argc || !parseU64(argv[++i], bound)) {
+        std::cerr << "--ub needs a non-negative integer\n";
+        return EXIT_FAILURE;
+      }
+      solverOptions.objectiveCap = (int64_t) bound;
     } else if (arg == "--inv") {
       if (i + 1 >= argc) {
         std::cerr << "--inv needs a comma-separated list of handle=amount\n";
@@ -552,6 +589,7 @@ int main(int argc, char** argv) {
     } else if (arg == "-h" || arg == "--help") {
       std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
                    "                   [--no-prune] [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
+                   "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
                    "                   [--names <table.tsv>] [--subgraph <name|handle>] <recipes.awr>\n";
       return EXIT_SUCCESS;
     } else if (path.empty()) {
@@ -565,6 +603,7 @@ int main(int argc, char** argv) {
   if (path.empty()) {
     std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
                  "                   [--no-prune] [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
+                 "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
                  "                   [--names <table.tsv>] [--subgraph <name|handle>] <recipes.awr>\n";
     return EXIT_FAILURE;
   }
@@ -696,7 +735,8 @@ int main(int argc, char** argv) {
               << " recipes\n";
 
     const aw::NodeId targetNode = sub.translate(aw::CraftingGraph::itemNode(target));
-    const aw::PlanResult plan = aw::planCrafting(sub, targetNode, planAmount, inventory);
+    const aw::PlanResult plan =
+        aw::planCrafting(sub, targetNode, planAmount, inventory, solverOptions);
 
     const char *statusName = "?";
     switch (plan.status) {
@@ -706,17 +746,23 @@ int main(int argc, char** argv) {
       case aw::PlanStatus::ITER_LIMIT: statusName = "iteration limit"; break;
       case aw::PlanStatus::INVALID_INPUT: statusName = "invalid input"; break;
     }
-    std::cout << "  status: " << statusName << " (" << plan.iterations << " iterations)\n";
+    std::cout << "  status: " << statusName;
+    if (plan.status == aw::PlanStatus::OK)
+      std::cout << (plan.provenOptimal ? " (proven optimal)"
+                                       : " (gave up early)")
+                << ", gap=" << plan.gap << ", bound=" << plan.bestBound;
+    std::cout << ", conflicts=" << plan.numConflicts
+              << ", branches=" << plan.numBranches << '\n';
 
     if (plan.status == aw::PlanStatus::OK) {
-      double totalExec = 0;
-      for (auto x : plan.exec)
+      int64_t totalExec = 0;
+      for (int64_t x : plan.exec)
         totalExec += x;
-      
+
       std::cout << "  total executions: " << totalExec << '\n';
       for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
-        const double count = plan.exec[r];
-        if (count <= 1e-9)
+        const int64_t count = plan.exec[r];
+        if (count == 0)
           continue;
         std::cout << "  " << count << " x "
                   << itemLabel(graph, names, sub.itemOrigin[sub.graph.output[r]]) << " x"
