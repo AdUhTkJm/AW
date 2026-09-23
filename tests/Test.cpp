@@ -738,6 +738,72 @@ std::vector<std::byte> buildIntegerScalingSample() {
   return out;
 }
 
+// The workstation counterexample for composite dominance. R and S both produce
+// X, but S needs a workstation R does not; after inlining Y, S still
+// cost-dominates R. Dropping R is only sound when S can run on every
+// workstation R can, otherwise a player holding only R's station loses the
+// only route to X.
+//
+//   handle 1 X <- R (x1, ws [4=A], Y x1)
+//              <- S (x1, ws [5=B] when !sSuperset, [4, 5] when sSuperset, Z x1)
+//   handle 2 Y <- r (x1, ws [4=A], Z x1)
+//   handle 3 Z <- (x1, ws [4=A], BASE x1)
+//   handle 6 BASE is a leaf.
+// Recipe ids in file order: R=0, S=1, r=2, Z's recipe=3.
+std::vector<std::byte> buildWorkstationGuardSample(bool sSuperset) {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 6);  // realResourceCount
+  emitVarInt(out, 3);  // entries: handles 1, 2, 3
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (X)
+  emitVarInt(out, 2);  // R and S
+  {
+    emitVarInt(out, 1);  // R output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // WS_A
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (Y)
+  }
+  {
+    emitVarInt(out, 1);  // S output amount
+    if (sSuperset) {
+      emitVarInt(out, 2);
+      emitVarInt(out, 4);  // absolute WS_A
+      emitVarInt(out, 1);  // +1 -> WS_B
+    } else {
+      emitVarInt(out, 1);
+      emitVarInt(out, 5);  // WS_B only
+    }
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (Z)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (Y)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // WS_A
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (Z)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 3 (Z)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // WS_A
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 6);  // -> handle 6 (BASE)
+  }
+  return out;
+}
+
 aw::solver::Matrix makeMatrix(
     uint32_t rows, uint32_t cols,
     const std::vector<std::vector<std::pair<uint32_t, int64_t>>> &columns) {
@@ -1273,6 +1339,48 @@ void testRecipePruning() {
   expect(aw::getCraftingError() == nullptr, "integer scaling sample parses");
   expect(aw::getCraftingGraph().recipeDominated[0] == 0,
          "the ceiling, not a rational alpha, decides domination");
+
+  // S dominates R after inlining Y, but S runs only on WS_B while R runs on
+  // WS_A. A player holding WS_A must keep R.
+  aw::registerCraftingGraph(buildWorkstationGuardSample(false));
+  expect(aw::getCraftingError() == nullptr, "workstation guard sample parses");
+  expect(aw::getCraftingGraph().recipeDominated[0] == 0,
+         "a disjoint workstation set blocks composite domination");
+
+  // When S can run on everything R can, the drop is still sound.
+  aw::registerCraftingGraph(buildWorkstationGuardSample(true));
+  expect(aw::getCraftingError() == nullptr, "workstation superset sample parses");
+  expect(aw::getCraftingGraph().recipeDominated[0] == 1,
+         "a superset workstation set keeps composite domination");
+}
+
+void testRecipePruningWorkstations() {
+  std::cout << "[Test] composite pruning respects workstations\n";
+  aw::registerCraftingGraph(buildWorkstationGuardSample(false));
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+  const aw::Handle onlyA[] = {4};
+
+  // BASE (handle 6 -> item node 5) is the only leaf; the player holds it.
+  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  inventory[5] = 100;
+
+  auto plan = [&](bool prune) {
+    aw::setRecipePruningEnabled(prune);
+    const aw::Subgraph sub = aw::reachableSubgraph(1, onlyA, inventory);
+    const aw::NodeId target = sub.translate(0);
+    const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
+    int64_t total = 0;
+    for (int64_t x : r.exec)
+      total += x;
+    return std::pair<aw::PlanStatus, int64_t>(r.status, total);
+  };
+
+  const auto full = plan(false);
+  const auto pruned = plan(true);
+  expect(full.first == aw::PlanStatus::OK, "the unpruned route plans on WS_A");
+  expect(pruned.first == full.first, "workstation guard preserves the plan status");
+  expect(pruned.second == full.second, "workstation guard preserves the optimum");
+  aw::setRecipePruningEnabled(true);
 }
 
 void testRecipePruningParity() {
@@ -1323,6 +1431,7 @@ int main() {
   testTagPruning();
   testTagPruningParity();
   testRecipePruning();
+  testRecipePruningWorkstations();
   testRecipePruningParity();
 
   if (failures == 0) {

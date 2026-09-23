@@ -10,6 +10,8 @@
 //      when a sibling recipe S of X is provably at least as good after
 //      inlining every producer of Y into R. The comparison is a sparse column
 //      vector inequality, see docs/algorithm.typ ("基于支配的剪枝：真实配方篇").
+//      S must also be usable on every workstation R can use, since the two
+//      recipes may run in completely different places.
 //
 // Both passes can remove an edge that the player might usefully keep, because
 // a stocked input can always be spent directly. Each pass therefore records
@@ -693,6 +695,34 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
 // graph, exactly as in the tag pass, so every item keeps at least one recipe.
 // A dominated recipe is only dropped by reachability when its witness input has
 // no inventory.
+//
+// Unlike the tag pass, the relation is a pure cost comparison, so R and S may
+// need disjoint workstations. Replacing R by S is only valid when S is usable
+// wherever R is: for every availability set A, A hitting workstations(R) must
+// hit workstations(S), which holds exactly when workstations(R) is a subset of
+// workstations(S). The tag pass does not need this because its `requires(m, w)`
+// relation already says m cannot be crafted without w.
+
+// True when every workstation of `r` is also a workstation of `s`. Both rows
+// are non-decreasing (the reader emits ascending deltas and canonicalize
+// sorts), so a linear merge suffices.
+bool workstationSubset(const CraftingGraph& graph, uint r, uint s) noexcept {
+  const auto a = graph.workstations.targetsOf(r);
+  const auto b = graph.workstations.targetsOf(s);
+  size_t i = 0, j = 0;
+  while (i < a.size() && j < b.size()) {
+    if (a[i] == b[j]) {
+      i++;
+      j++;
+    } else if (a[i] < b[j]) {
+      return false;
+    } else {
+      j++;
+    }
+  }
+  return i == a.size();
+}
+
 void computeRecipePruning(CraftingGraph& graph) noexcept {
   graph.recipeDominated.assign(graph.nRecipe, 0);
   graph.recipeGuardInput.assign(graph.nRecipe, UINT32_MAX);
@@ -739,23 +769,26 @@ void computeRecipePruning(CraftingGraph& graph) noexcept {
         const Amount q = weights[a];
         const auto producers = graph.i2r.targetsOf(Y);
 
+        // Restrict the siblings to those S that can run on every workstation R
+        // can. Otherwise a player who has R's station but not S's would lose the
+        // only route to X. If no sibling qualifies this witness, try the next
+        // input rather than giving up on R.
+        candidates.clear();
+        for (uint j = 0; j < k; j++)
+          if (j != i && workstationSubset(graph, R, recs[j]))
+            candidates.push_back(j);
+        if (candidates.empty())
+          continue;
+
         if (producers.empty()) {
           // Y cannot be produced. Unless the player holds stock (which the
-          // query-time guard checks), R is unusable, so any sibling is at least
-          // as good.
-          for (uint j = 0; j < k; j++)
-            if (j != i)
-              adj[i].push_back(j);
+          // query-time guard checks), R is unusable, so any
+          // workstation-compatible sibling is at least as good.
+          for (uint32_t j : candidates)
+            adj[i].push_back(j);
           guard[i] = Y;
           break;
         }
-
-        // Start from every sibling and eliminate those that some producer of Y
-        // refutes.
-        candidates.clear();
-        for (uint j = 0; j < k; j++)
-          if (j != i)
-            candidates.push_back(j);
 
         for (NodeId producerNode : producers) {
           const uint r = producerNode - graph.nItem;

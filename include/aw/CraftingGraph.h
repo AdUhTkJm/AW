@@ -97,6 +97,9 @@ struct CraftingGraph : BaseCraftingGraph {
   // Real-recipe (composite) pruning. `recipeDominated[r] == 1` means recipe r
   // outputs a real resource and is dominated by a sibling recipe of the same
   // output once every producer of the guard input is inlined.
+  // 
+  // The dominator must also run on every workstation `r` can run on to preserve
+  // reachability. This is taken care already.
   std::vector<uint8_t> recipeDominated;  // nRecipe entries
 
   // For a dominated recipe, the real input Y that the witness inlined. The
