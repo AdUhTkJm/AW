@@ -34,8 +34,8 @@ using operations_research::Domain;
 
 // The objective cap is searched by attempting a small value and then
 // exponentially scale it. This is used to bound CP-SAT.
-constexpr int64_t kCapGrowth = 8;
-constexpr int kMaxAttempts = 8;
+constexpr int64_t CAP_GROWTH = 8;
+constexpr int MAX_ATTEMPTS = 8;
 
 // Set AW_SOLVER_DEBUG to get the cap search traced to stderr.
 bool searchDebug() {
@@ -43,12 +43,12 @@ bool searchDebug() {
   return enabled;
 }
 
-// Avoids the std::abs(INT64_MIN) trap.
+// Same as abs, but avoids the std::abs(INT64_MIN) trap.
 uint64_t magnitude(int64_t value) {
   return value < 0 ? (uint64_t) (-(value + 1)) + 1 : (uint64_t) value;
 }
 
-uint64_t saturatingAdd(uint64_t a, uint64_t b) {
+uint64_t satAdd(uint64_t a, uint64_t b) {
   return a > UINT64_MAX - b ? UINT64_MAX : a + b;
 }
 
@@ -56,30 +56,24 @@ int64_t ceilDiv(int64_t numerator, int64_t denominator) {
   return numerator / denominator + (numerator % denominator != 0 ? 1 : 0);
 }
 
-// The largest value every variable may take while every constraint's and the
-// objective's worst-case activity still fits in int64. Only used as the final
-// ceiling on the growing cap, and as the domain when the costs make the cap
-// argument unsound.
-int64_t activitySafeBound(const Matrix &A, std::span<const int64_t> c) {
-  std::vector<uint64_t> rowAbs((size_t) A.rows, 0);
+// The largest value any variable may take to keep everything in range of int64_t.
+int64_t absoluteCap(const Matrix &A, std::span<const int64_t> c) {
+  std::vector<uint64_t> rowAbs(A.rows, 0);
   for (size_t k = 0; k < A.rowIndex.size(); k++)
-    rowAbs[A.rowIndex[k]] = saturatingAdd(rowAbs[A.rowIndex[k]], magnitude(A.value[k]));
+    rowAbs[A.rowIndex[k]] = satAdd(rowAbs[A.rowIndex[k]], magnitude(A.value[k]));
 
-  uint64_t maxRow = 0;
-  for (uint64_t value : rowAbs)
-    maxRow = std::max(maxRow, value);
-
-  uint64_t objectiveAbs = 0;
+  uint64_t maxRow = *std::ranges::max_element(rowAbs);
+  uint64_t goal = 0;
   for (int64_t value : c)
-    objectiveAbs = saturatingAdd(objectiveAbs, magnitude(value));
+    goal = satAdd(goal, magnitude(value));
 
   // Leave some room for arithmetic in presolver.
-  const uint64_t limit = (uint64_t) INT64_MAX / 2;
+  const uint64_t limit = INT64_MAX / 2;
   uint64_t bound = limit;
   if (maxRow != 0)
     bound = std::min(bound, limit / maxRow);
-  if (objectiveAbs != 0)
-    bound = std::min(bound, limit / objectiveAbs);
+  if (goal != 0)
+    bound = std::min(bound, limit / goal);
   return (int64_t) std::max<uint64_t>(bound, 1);
 }
 
@@ -105,16 +99,6 @@ int64_t lowerBoundOnTotal(const Matrix &A, std::span<const int64_t> b) {
       bound = std::max(bound, ceilDiv(b[i], maxPositive[i]));
   }
   return bound;
-}
-
-// The cap is a cap on sum(c_r x_r), which only bounds x_r when every cost is
-// at least 1. The planner always passes all-ones, so the general case just
-// falls back to a single uncapped solve.
-bool costsBoundVariables(std::span<const int64_t> c) {
-  for (int64_t value : c)
-    if (value < 1)
-      return false;
-  return true;
 }
 
 void fillStatus(const sat::CpSolverResponse &response, Result &result) {
@@ -169,11 +153,6 @@ RowMajor transpose(const Matrix &A) {
   return rows;
 }
 
-// The LP relaxation's optimum, used only to seed the objective cap. It is a
-// lower bound on the integer optimum, so a cap derived from it is normally
-// just below the answer, and one growth step past it lands close. Returns 0
-// when GLOP cannot solve the relaxation, in which case the cap starts from the
-// trivial lower bound and grows instead.
 double relaxationValue(const Matrix &A, const RowMajor &rows,
                        std::span<const int64_t> b, std::span<const int64_t> c) {
   operations_research::MPSolver solver("relaxation",
@@ -191,10 +170,7 @@ double relaxationValue(const Matrix &A, const RowMajor &rows,
       objective->SetCoefficient(variables[r], (double) c[r]);
   objective->SetMinimization();
 
-  // GLOP does not like a model whose coefficients span many orders of
-  // magnitude, and a target of 1e9 against a coefficient of 1e5 is exactly
-  // that. Scaling a row by a positive factor leaves the feasible set alone, so
-  // normalise everything into roughly [0, 1].
+  // Normalize everything into roughly [0, 1] for numerical stability.
   double largest = 0.0;
   for (uint32_t k = 0; k < A.rowIndex.size(); k++)
     largest = std::max(largest, std::fabs((double) A.value[k]));
@@ -324,58 +300,59 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
 
 }  // namespace
 
+// `c` is always all-ones currently, kept for possible later refactoring.
+// TODO: Remove it when the design stabilizes.
 Result solve(const Matrix &A, std::span<const int64_t> b,
              std::span<const int64_t> c, const Options &options) {
+  // Check validity of A.
+  // Should be alright so let's not include this in release mode.
   Result result;
+#ifndef NDEBUG
   if (A.rows != b.size() || A.cols != c.size() ||
       A.colStart.size() != (size_t) A.cols + 1 ||
       A.rowIndex.size() != A.value.size())
     return result;
 
-  for (uint32_t k = 0; k < A.rowIndex.size(); k++)
+  for (uint32_t k = 0; k < A.rowIndex.size(); k++) {
     if (A.rowIndex[k] >= A.rows)
       return result;
+  }
+#endif
 
   // A row that demands something but has no way to produce it is infeasible no
-  // matter what the cap is. Catching it here keeps the answer exact instead of
-  // depending on how far the cap grew.
-  {
-    std::vector<uint8_t> hasProducer((size_t) A.rows, 0);
-    for (uint32_t k = 0; k < A.rowIndex.size(); k++)
-      if (A.value[k] > 0)
-        hasProducer[A.rowIndex[k]] = 1;
-    for (uint32_t i = 0; i < A.rows; i++)
-      if (b[i] > 0 && !hasProducer[i]) {
-        result.status = PlanStatus::INFEASIBLE;
-        return result;
-      }
+  // matter what the cap is. Prune them away first.
+  std::vector<uint8_t> hasProducer((size_t) A.rows, 0);
+  for (uint32_t k = 0; k < A.rowIndex.size(); k++) {
+    if (A.value[k] > 0)
+      hasProducer[A.rowIndex[k]] = 1;
   }
+  for (uint32_t i = 0; i < A.rows; i++)
+    if (b[i] > 0 && !hasProducer[i]) {
+      result.status = PlanStatus::INFEASIBLE;
+      return result;
+    }
 
-  // The cap argument needs every cost to be at least 1. When it is not, fall
-  // back to the widest representable domain and a single solve.
-  const bool capped = costsBoundVariables(c);
-  const int64_t ceiling = activitySafeBound(A, c);
+  const int64_t ceiling = absoluteCap(A, c);
   const RowMajor rows = transpose(A);
 
   int64_t cap = ceiling;
-  if (capped) {
-    if (options.objectiveCap > 0) {
-      cap = options.objectiveCap;
-    } else {
-      // Seed from the LP relaxation: it is cheap, it tolerates the amplifying
-      // cycles that make a per-item cost estimate useless, and being a lower
-      // bound it is at worst one growth step away from a usable cap.
-      const double relaxation = relaxationValue(A, rows, b, c);
-      if (searchDebug())
-        std::fprintf(stderr, "[solver] relaxation=%.6g\n", relaxation);
-      if (std::isfinite(relaxation) && relaxation >= 0.0)
-        cap = (int64_t) std::ceil(relaxation) + std::max<int64_t>(64, (int64_t) relaxation / 8);
-      else
-        cap = lowerBoundOnTotal(A, b);
-    }
-    cap = std::min(std::max<int64_t>(cap, 1), ceiling);
-  }
+  if (options.objectiveCap > 0) {
+    cap = options.objectiveCap;
+  } else {
+    // Seed from the LP relaxation. Cheap enough, just a few milliseconds.
+    // LP gives a lower bound, so our first cap attempt can be just a bit above it,
+    // hence the `+ max(64, relaxation/8)`.
+    const double relaxation = relaxationValue(A, rows, b, c);
+    if (searchDebug())
+      fprintf(stderr, "[solver] relaxation=%.6g\n", relaxation);
 
+    if (std::isfinite(relaxation) && relaxation >= 0.0)
+      cap = (int64_t) std::ceil(relaxation) + std::max<int64_t>(64, (int64_t) relaxation / 8);
+    else
+      cap = lowerBoundOnTotal(A, b);
+  }
+  cap = std::clamp<int64_t>(cap, 1, ceiling);
+  
   const bool limited = options.maxTimeSeconds > 0;
   const auto started = std::chrono::steady_clock::now();
   const auto elapsedSeconds = [&started] {
@@ -388,7 +365,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   int attempts = 0;
   int infeasibleAttempts = 0;
   int attempt = 0;
-  for (; attempt < (capped ? kMaxAttempts : 1); attempt++) {
+  for (; attempt < MAX_ATTEMPTS; attempt++) {
     double budget = -1.0;
     if (limited) {
       const double remaining = options.maxTimeSeconds - elapsedSeconds();
@@ -424,16 +401,15 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
     }
 
     attempts = attempt + 1;
-    if (!capped || cap >= ceiling)
+    if (cap >= ceiling)
       break;
-    cap = std::min(cap * kCapGrowth, ceiling);
+    cap = std::min(cap * CAP_GROWTH, ceiling);
   }
 
   if (haveBest)
     return best;
 
-  const bool everyAttemptInfeasible = infeasibleAttempts == attempts && attempts > 0;
-  if (everyAttemptInfeasible && (!capped || cap >= ceiling)) {
+  if (infeasibleAttempts == attempts && attempts > 0 && cap >= ceiling) {
     result.status = PlanStatus::INFEASIBLE;
     return result;
   }
