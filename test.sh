@@ -19,7 +19,6 @@ fi
 # Run tests
 build/aw_tests
 
-# Sanity check the sample corpus, including a plan through CP-SAT.
-if [ -f temp/recipes-small.awr ]; then
-  build/awr_inspect --check temp/recipes-small.awr
-fi
+# Run a performance test
+build/awr_inspect temp/recipes-nast.awr --plan 'mekanism:purification_chamber' --profile temp/a.prof --time-limit 20 --workers 1
+scripts/flamegraph.sh temp/a.prof build/awr_inspect

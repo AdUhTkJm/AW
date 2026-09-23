@@ -77,6 +77,26 @@ if(AW_BUILD_TOOLS)
    add_executable(awr_inspect tools/Inspect.cpp)
    target_link_libraries(awr_inspect PRIVATE aw_crafting)
    target_compile_options(awr_inspect PRIVATE ${AW_STRICT_FLAGS})
+
+   # Development-only CPU profiling (gperftools). It is linked in whenever the
+   # library is installed, but only into awr_inspect, and it only does anything
+   # when the tool is run with --profile. aw_crafting, aw_jni and the Windows
+   # build never see it: the JNI path has no profiling code and Windows is
+   # excluded here. Without gperftools the tool still builds; --profile then
+   # reports that profiling is unavailable.
+   if(NOT WIN32)
+      find_path(AW_PROFILER_INCLUDE_DIR NAMES gperftools/profiler.h)
+      find_library(AW_PROFILER_LIBRARY NAMES profiler)
+      if(AW_PROFILER_INCLUDE_DIR AND AW_PROFILER_LIBRARY)
+         target_compile_definitions(awr_inspect PRIVATE AW_HAVE_PROFILER=1)
+         target_include_directories(awr_inspect PRIVATE "${AW_PROFILER_INCLUDE_DIR}")
+         target_link_libraries(awr_inspect PRIVATE "${AW_PROFILER_LIBRARY}")
+         message(STATUS "awr_inspect: CPU profiling enabled (${AW_PROFILER_LIBRARY})")
+      else()
+         message(STATUS "awr_inspect: gperftools not found; --profile will report an "
+                        "error (install libgoogle-perftools-dev to enable it)")
+      endif()
+   endif()
 endif()
 
 if(AW_BUILD_TESTS)

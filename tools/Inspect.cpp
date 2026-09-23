@@ -23,10 +23,26 @@
 
 #include "aw/CraftingGraph.h"
 #include "aw/Plan.h"
+#include "aw/Profiler.h"
 
 namespace {
 
 #define fail(msg, ...) { std::cerr << (msg) << "\n"; return __VA_ARGS__; }
+
+// Owns the profiling session for the whole run. It stops the profiler however
+// main returns and reports the sample count, which makes a run that was too
+// short for a useful flamegraph obvious. `path` stays empty until profiling
+// has actually started, so failures and non-profiling runs stay quiet.
+struct ProfileGuard {
+  aw::profiler::ScopedProfile profiler;
+  std::string path;
+
+  ~ProfileGuard() {
+    const int64_t gathered = profiler.end();
+    if (!path.empty())
+      std::cerr << "profile: " << gathered << " sample(s) -> " << path << '\n';
+  }
+};
 
 std::vector<std::byte> readFile(const std::string &path) {
   std::ifstream in(path, std::ios::binary | std::ios::ate);
@@ -541,6 +557,8 @@ int main(int argc, char** argv) {
   std::string treeArg;
   std::string planArg;
   std::string invArg;
+  std::string profilePath;
+  ProfileGuard profileGuard;
   bool check = false;
   bool dump = false;
   bool noPrune = false;
@@ -563,6 +581,12 @@ int main(int argc, char** argv) {
       noPrune = true;
     } else if (arg == "--no-recipe-prune") {
       noRecipePrune = true;
+    } else if (arg == "--profile") {
+      if (i + 1 >= argc) {
+        std::cerr << "--profile needs an output path\n";
+        return EXIT_FAILURE;
+      }
+      profilePath = argv[++i];
     } else if (arg == "--names") {
       if (i + 1 >= argc) {
         std::cerr << "--names needs a path\n";
@@ -632,9 +656,10 @@ int main(int argc, char** argv) {
     } else if (arg == "-h" || arg == "--help") {
       std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
                    "                   [--no-prune] [--no-recipe-prune]\n"
-                   "                   [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
+                   "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                    "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
-                   "                   [--names <table.tsv>] [--subgraph <name|handle>] <recipes.awr>\n";
+                   "                   [--names <table.tsv>] [--subgraph <name|handle>]\n"
+                   "                   [--profile <out.prof>] <recipes.awr>\n";
       return EXIT_SUCCESS;
     } else if (path.empty()) {
       path = arg;
@@ -647,13 +672,34 @@ int main(int argc, char** argv) {
   if (path.empty()) {
     std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
                  "                   [--no-prune] [--no-recipe-prune]\n"
-                 "                   [--plan <name|handle> [--amount <n>] [--inv <h=a,...>]]\n"
+                 "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                  "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
-                 "                   [--names <table.tsv>] [--subgraph <name|handle>] <recipes.awr>\n";
+                 "                   [--names <table.tsv>] [--subgraph <name|handle>]\n"
+                 "                   [--profile <out.prof>] <recipes.awr>\n";
+    return EXIT_FAILURE;
+  }
+
+  // The profiler is a build-time optional, runtime opt-in. Fail loudly rather
+  // than silently producing no file.
+  if (!profilePath.empty() && !aw::profiler::available()) {
+    std::cerr << "--profile: this build has no CPU profiler; install "
+                 "libgoogle-perftools-dev and rebuild awr_inspect\n";
     return EXIT_FAILURE;
   }
 
   const std::vector<std::byte> bytes = readFile(path);
+
+  // Profile the whole run: decode + canonicalize + prune precompute, the
+  // reachability pass, the LP/CP-SAT solve, and the report. Started before the
+  // graph is registered and stopped by ProfileGuard on the way out.
+  if (!profilePath.empty()) {
+    if (!profileGuard.profiler.begin(profilePath)) {
+      std::cerr << "--profile: cannot write " << profilePath << '\n';
+      return EXIT_FAILURE;
+    }
+    profileGuard.path = profilePath;
+  }
+
   aw::registerCraftingGraph(bytes);
   if (const char *error = aw::getCraftingError()) {
     std::cout << "malformed graph: " << error << "\n";

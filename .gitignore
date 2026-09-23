@@ -6,3 +6,7 @@ java-ref/
 .clangd
 AGENTS.md
 third_party/
+
+# CPU profiles from --profile and their folded stacks / renderings
+*.prof
+*.folded
