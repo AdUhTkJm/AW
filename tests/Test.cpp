@@ -904,6 +904,35 @@ void testSolver() {
   }
 }
 
+void testReducedCostFixing() {
+  std::cout << "[Test] reduced-cost fixing\n";
+
+  // min x0 + x1  s.t.  2 x0 >= 7.  The LP is 3.5 while the integer optimum is
+  // 4, and x1 is pure overhead, so x1's reduced cost (1) exceeds the 0.5 gap.
+  const aw::solver::Matrix A = makeMatrix(1, 2, {{{0, 2}}, {}});
+  const std::vector<int64_t> b = {7};
+  const std::vector<int64_t> c = {1, 1};
+
+  {
+    aw::solver::Options options;
+    options.reducedCostGap = 0.5;
+    const aw::solver::Result r = aw::solver::solve(A, b, c, options);
+    expect(r.status == aw::PlanStatus::OK && r.provenOptimal,
+           "reduced-cost fixing still proves optimality");
+    expect(r.objective == 4, "reduced-cost fixing keeps the optimum");
+    expect(r.fixedColumns == 1, "the dominated column is fixed");
+    expect(r.x.size() == 2 && r.x[0] == 4 && r.x[1] == 0,
+           "a fixed column is reported as zero in the full solution");
+  }
+  {
+    aw::solver::Options options;
+    options.reducedCostGap = 0.0;
+    const aw::solver::Result r = aw::solver::solve(A, b, c, options);
+    expect(r.status == aw::PlanStatus::OK && r.objective == 4 && r.fixedColumns == 0,
+           "a zero gap disables the fixing");
+  }
+}
+
 void testPlan() {
   std::cout << "[Test] crafting plan\n";
   aw::registerCraftingGraph(buildPlanSample());
@@ -1418,6 +1447,41 @@ void testRecipePruningParity() {
   aw::setRecipePruningEnabled(true);
 }
 
+void testReducedCostParity() {
+  std::cout << "[Test] reduced-cost fixing preserves the plan optimum\n";
+  aw::registerCraftingGraph(buildBlackCandleSample());
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+  const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
+
+  // Leaves are free only through inventory.
+  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  for (aw::NodeId m = 0; m < graph.nReal; m++)
+    if (graph.i2r.targetsOf(m).empty())
+      inventory[m] = 1000000000LL;
+
+  auto plan = [&](double gap, aw::Amount amount) {
+    aw::solver::Options options;
+    options.reducedCostGap = gap;
+    const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
+    const aw::NodeId target = sub.translate(3);
+    const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory, options);
+    int64_t total = 0;
+    for (int64_t x : r.exec)
+      total += x;
+    return std::pair<aw::PlanStatus, int64_t>(r.status, total);
+  };
+
+  const aw::Amount amounts[] = {1, 224, 256, 300};
+  for (aw::Amount amount : amounts) {
+    const auto off = plan(0.0, amount);
+    const auto on = plan(10.0, amount);
+    expect(off.first == on.first,
+           "reduced-cost fixing preserves the plan status");
+    expect(off.second == on.second,
+           "reduced-cost fixing preserves the plan optimum");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1425,6 +1489,7 @@ int main() {
   testRejectsBadInput();
   testReachability();
   testSolver();
+  testReducedCostFixing();
   testPlan();
   testPlanInfeasible();
   testDuplicateRecipes();
@@ -1433,6 +1498,7 @@ int main() {
   testRecipePruning();
   testRecipePruningWorkstations();
   testRecipePruningParity();
+  testReducedCostParity();
 
   if (failures == 0) {
     std::cout << "all tests passed\n";

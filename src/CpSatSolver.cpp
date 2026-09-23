@@ -14,7 +14,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <limits>
 #include <span>
 #include <vector>
 
@@ -36,6 +35,10 @@ using operations_research::Domain;
 // exponentially scale it. This is used to bound CP-SAT.
 constexpr int64_t CAP_GROWTH = 8;
 constexpr int MAX_ATTEMPTS = 8;
+
+// Slack on the reduced-cost test, so LP numerical noise never fixes a column
+// that could still appear in the optimum.
+constexpr double REDUCED_COST_EPSILON = 1e-6;
 
 // Set AW_SOLVER_DEBUG to get the cap search traced to stderr.
 bool searchDebug() {
@@ -153,8 +156,20 @@ RowMajor transpose(const Matrix &A) {
   return rows;
 }
 
-double relaxationValue(const Matrix &A, const RowMajor &rows,
-                       std::span<const int64_t> b, std::span<const int64_t> c) {
+// One LP relaxation of the balance problem. It serves two purposes: the
+// objective value seeds the first objective cap, and the reduced costs feed the
+// fixing pass in `solve`.
+struct LpResult {
+  bool ok = false;
+  double value = 0.0;
+  std::vector<double> reducedCost;  // A.cols entries
+};
+
+LpResult lpRelaxation(const Matrix &A, const RowMajor &rows,
+                      std::span<const int64_t> b, std::span<const int64_t> c) {
+  LpResult out;
+  out.reducedCost.assign(A.cols, 0.0);
+
   operations_research::MPSolver solver("relaxation",
                                        operations_research::MPSolver::GLOP_LINEAR_PROGRAMMING);
   solver.SuppressOutput();
@@ -170,7 +185,8 @@ double relaxationValue(const Matrix &A, const RowMajor &rows,
       objective->SetCoefficient(variables[r], (double) c[r]);
   objective->SetMinimization();
 
-  // Normalize everything into roughly [0, 1] for numerical stability.
+  // Normalize everything into roughly [0, 1] for numerical stability. Row
+  // scaling leaves the reduced costs unchanged: the dual absorbs the factor.
   double largest = 0.0;
   for (uint32_t k = 0; k < A.rowIndex.size(); k++)
     largest = std::max(largest, std::fabs((double) A.value[k]));
@@ -188,8 +204,45 @@ double relaxationValue(const Matrix &A, const RowMajor &rows,
   }
 
   if (solver.Solve() != operations_research::MPSolver::OPTIMAL)
-    return std::numeric_limits<double>::quiet_NaN();
-  return objective->Value();
+    return out;
+
+  out.value = objective->Value();
+  for (uint32_t r = 0; r < A.cols; r++)
+    out.reducedCost[r] = variables[r]->reduced_cost();
+  out.ok = true;
+  return out;
+}
+
+// A copy of `A` that keeps only the columns in `keep` (ascending), together
+// with the matching objective coefficients.
+Matrix selectColumns(const Matrix &A, std::span<const int64_t> c,
+                     const std::vector<uint32_t> &keep, std::vector<int64_t> &outC) {
+  Matrix out;
+  out.rows = A.rows;
+  out.cols = (uint32_t) keep.size();
+  out.colStart.reserve(keep.size() + 1);
+  out.colStart.push_back(0);
+  outC.clear();
+  outC.reserve(keep.size());
+  for (uint32_t r : keep) {
+    for (uint32_t k = A.colStart[r]; k < A.colStart[r + 1]; k++) {
+      out.rowIndex.push_back(A.rowIndex[k]);
+      out.value.push_back(A.value[k]);
+    }
+    out.colStart.push_back((uint32_t) out.rowIndex.size());
+    outC.push_back(c[r]);
+  }
+  return out;
+}
+
+// Re-expands a solution over the kept columns into the full column space, so
+// callers always see one count per recipe with zeros at the fixed columns.
+std::vector<int64_t> expandSolution(std::span<const int64_t> reduced,
+                                    const std::vector<uint32_t> &keep, uint32_t cols) {
+  std::vector<int64_t> full(cols, 0);
+  for (size_t k = 0; k < keep.size(); k++)
+    full[keep[k]] = reduced[k];
+  return full;
 }
 
 // One solve with x in [0, cap] and sum(c_r x_r) <= cap. `timeLimitSeconds`
@@ -332,36 +385,111 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
       return result;
     }
 
-  const int64_t ceiling = absoluteCap(A, c);
   const RowMajor rows = transpose(A);
+
+  // One LP relaxation serves two purposes: the objective cap (as before) and
+  // the reduced costs used by the fixing pass below.
+  const bool needRelaxation = options.objectiveCap == 0 || options.reducedCostGap > 0.0;
+  const LpResult lp = needRelaxation ? lpRelaxation(A, rows, b, c) : LpResult{};
+  if (searchDebug())
+    fprintf(stderr, "[solver] relaxation=%.6g ok=%d\n", lp.value, (int) lp.ok);
+
+  const int64_t ceiling = absoluteCap(A, c);
 
   int64_t cap = ceiling;
   if (options.objectiveCap > 0) {
     cap = options.objectiveCap;
+  } else if (lp.ok && std::isfinite(lp.value) && lp.value >= 0.0) {
+    // LP gives a lower bound, so our first cap attempt can be just a bit above
+    // it, hence the `+ max(64, lp/8)`.
+    cap = (int64_t) std::ceil(lp.value) + std::max<int64_t>(64, (int64_t) lp.value / 8);
   } else {
-    // Seed from the LP relaxation. Cheap enough, just a few milliseconds.
-    // LP gives a lower bound, so our first cap attempt can be just a bit above it,
-    // hence the `+ max(64, relaxation/8)`.
-    const double relaxation = relaxationValue(A, rows, b, c);
-    if (searchDebug())
-      fprintf(stderr, "[solver] relaxation=%.6g\n", relaxation);
-
-    if (std::isfinite(relaxation) && relaxation >= 0.0)
-      cap = (int64_t) std::ceil(relaxation) + std::max<int64_t>(64, (int64_t) relaxation / 8);
-    else
-      cap = lowerBoundOnTotal(A, b);
+    cap = lowerBoundOnTotal(A, b);
   }
   cap = std::clamp<int64_t>(cap, 1, ceiling);
-  
+
   const bool limited = options.maxTimeSeconds > 0;
   const auto started = std::chrono::steady_clock::now();
   const auto elapsedSeconds = [&started] {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
   };
+  const bool debug = searchDebug();
+
+  // Reduced-cost fixing. Probe for any plan within `reducedCostGap` of the LP
+  // bound: a feasible answer gives an incumbent tight enough for the reduced
+  // costs to fix columns, while an infeasible answer proves the integrality
+  // gap is too wide to bother. See docs/algorithm.typ.
+  if (options.reducedCostGap > 0.0 && lp.ok && std::isfinite(lp.value) &&
+      lp.value >= 0.0 && A.cols > 0) {
+    const int64_t probeCap = std::clamp<int64_t>(
+        (int64_t) std::ceil(lp.value + options.reducedCostGap), 1, ceiling);
+    if (probeCap < cap) {
+      double probeBudget = -1.0;
+      if (limited) {
+        const double left = options.maxTimeSeconds - elapsedSeconds();
+        if (left > 0.0)
+          probeBudget = std::min(left, std::max(0.005, left * 0.25));
+      }
+      if (!limited || probeBudget > 0.0) {
+        const Result probe = solveWithCap(A, rows, b, c, options, probeCap, probeBudget);
+        if (debug)
+          std::fprintf(stderr, "[solver] probe cap=%lld budget=%.2f status=%d obj=%lld\n",
+                       (long long) probeCap, probeBudget, (int) probe.status,
+                       (long long) probe.objective);
+        if (probe.status == PlanStatus::NUMERICAL_FAIL)
+          return probe;
+        // A plan strictly below the probe cap means the cap did not bind, so it
+        // is already optimal for the uncapped problem.
+        if (probe.status == PlanStatus::OK && probe.provenOptimal &&
+            probe.objective < probeCap)
+          return probe;
+        if (probe.status == PlanStatus::OK &&
+            (double) probe.objective >= lp.value) {
+          // At an LP optimum `c^T x = LP + sum_r d_r x_r` for every feasible
+          // x, so a column with `d_r > incumbent - LP` cannot appear in any
+          // plan at least as good as the incumbent. The guard above keeps a
+          // numerical overshoot of the LP bound from making this too eager.
+          const double threshold = (double) probe.objective - lp.value;
+          std::vector<uint32_t> keep;
+          keep.reserve(A.cols);
+          for (uint32_t r = 0; r < A.cols; r++)
+            if (!(lp.reducedCost[r] > threshold + REDUCED_COST_EPSILON))
+              keep.push_back(r);
+          const uint32_t fixed = A.cols - (uint32_t) keep.size();
+          if (fixed > 0) {
+            std::vector<int64_t> reducedC;
+            const Matrix reduced = selectColumns(A, c, keep, reducedC);
+            const RowMajor reducedRows = transpose(reduced);
+            double budget = -1.0;
+            if (limited)
+              budget = options.maxTimeSeconds - elapsedSeconds();
+            if (!limited || budget > 0.0) {
+              Result out = solveWithCap(reduced, reducedRows, b, reducedC, options,
+                                        probe.objective, budget);
+              if (debug)
+                std::fprintf(stderr,
+                             "[solver] reduced cols=%u fixed=%u status=%d obj=%lld\n",
+                             reduced.cols, fixed, (int) out.status,
+                             (long long) out.objective);
+              if (out.status == PlanStatus::OK) {
+                out.x = expandSolution(out.x, keep, A.cols);
+                out.fixedColumns = fixed;
+                return out;
+              }
+              if (out.status == PlanStatus::NUMERICAL_FAIL)
+                return out;
+            }
+            // Out of time, or the reduced solve found nothing usable: the probe
+            // is still a valid plan.
+            return probe;
+          }
+        }
+      }
+    }
+  }
 
   Result best;
   bool haveBest = false;
-  const bool debug = searchDebug();
   int attempts = 0;
   int infeasibleAttempts = 0;
   int attempt = 0;

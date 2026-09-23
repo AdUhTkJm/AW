@@ -49,6 +49,12 @@ struct Options {
   // Starting cap on the total objective, and therefore on every variable.
   // 0 derives one from a lower bound on the optimum. See implementation details.
   int64_t objectiveCap = 0;
+
+  // Reduced-cost fixing. The solver probes for any plan within this much of
+  // the LP relaxation; if one exists, every column whose LP reduced cost
+  // exceeds the LP/integer gap is dropped before the final solve. 0 disables
+  // the pass. Values much above 10 are not worth the extra probe.
+  double reducedCostGap = 10.0;
 };
 
 struct Result {
@@ -65,6 +71,11 @@ struct Result {
   // Profiling counters.
   int64_t numConflicts = 0;
   int64_t numBranches = 0;
+
+  // Columns removed by reduced-cost fixing before the final solve. 0 when the
+  // pass did not run or removed nothing. The returned `x` is always full
+  // length, with zeros at the fixed columns.
+  uint32_t fixedColumns = 0;
 };
 
 // `b` has `A.rows` entries, `c` has `A.cols` entries. Negative entries in `b`

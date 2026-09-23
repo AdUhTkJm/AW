@@ -799,7 +799,8 @@ int main(int argc, char** argv) {
                                        : " (gave up early)")
                 << ", gap=" << plan.gap << ", bound=" << plan.bestBound;
     std::cout << ", conflicts=" << plan.numConflicts
-              << ", branches=" << plan.numBranches << '\n';
+              << ", branches=" << plan.numBranches
+              << ", fixed=" << plan.fixedColumns << '\n';
 
     if (plan.status == aw::PlanStatus::OK) {
       int64_t totalExec = 0;

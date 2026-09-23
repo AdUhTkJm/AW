@@ -110,6 +110,7 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
   result.bestBound = solved.bestBound;
   result.numConflicts = solved.numConflicts;
   result.numBranches = solved.numBranches;
+  result.fixedColumns = solved.fixedColumns;
   if (solved.status == PlanStatus::OK)
     result.exec = solved.x;
 

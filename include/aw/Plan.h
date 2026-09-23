@@ -30,6 +30,10 @@ struct PlanResult {
   // Profiling counters from CP-SAT.
   int64_t numConflicts = 0;
   int64_t numBranches = 0;
+
+  // Columns the solver dropped with reduced-cost fixing before its final
+  // solve. Diagnostics only; 0 when the pass did not run.
+  uint32_t fixedColumns = 0;
 };
 
 // Plans `amount` new units of the item at subgraph node `target`.
