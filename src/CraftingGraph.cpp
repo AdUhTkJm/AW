@@ -463,6 +463,9 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   itemSeen[start] = 1;
   queue.push_back(start);
 
+  const bool pruneTag = isTagPruningEnabled();
+  const bool pruneRecipe = isRecipePruningEnabled();
+
   for (size_t q = 0; q < queue.size(); q++) {
     const NodeId item = queue[q];
     const bool real = graph.isRealItem(item);
@@ -474,11 +477,11 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
 
       // A dominated tag edge is dropped unless the player actually holds the
       // member, in which case the free stock can still be spent on the tag.
-      if (isTagPruningEnabled() && recipe < graph.tagEdgeDominated.size() &&
+      if (pruneTag && recipe < graph.tagEdgeDominated.size() &&
           graph.tagEdgeDominated[recipe]) {
-        const auto memberInputs = graph.r2i.targetsOf(recipe);
-        const Amount held = !memberInputs.empty() && memberInputs[0] < inventory.size()
-                                ? inventory[memberInputs[0]]
+        const auto inputs = graph.r2i.targetsOf(recipe);
+        const Amount held = !inputs.empty() && inputs[0] < inventory.size()
+                                ? inventory[inputs[0]]
                                 : 0;
         if (held == 0)
           continue;
@@ -487,7 +490,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
       // A composite-dominated real recipe is likewise only dropped when the
       // witness input has no stock, so held stock can still be spent through
       // it.
-      if (isRecipePruningEnabled() && recipe < graph.recipeDominated.size() &&
+      if (pruneRecipe && recipe < graph.recipeDominated.size() &&
           graph.recipeDominated[recipe]) {
         const NodeId guard = graph.recipeGuardInput[recipe];
         const Amount held = guard < inventory.size() ? inventory[guard] : 0;

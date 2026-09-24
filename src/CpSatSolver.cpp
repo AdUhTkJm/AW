@@ -318,6 +318,11 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
     parameters.set_random_seed(options.randomSeed);
   parameters.set_log_search_progress(false);
 
+  // Tune parameters to tell the solver that this comes from LP.
+  parameters.set_linearization_level(2);
+  parameters.set_search_branching(operations_research::sat::SatParameters::LP_SEARCH);
+  parameters.set_use_feasibility_pump(true);
+
   sat::CpSolverResponse response;
   try {
     response = sat::SolveWithParameters(model.Build(), parameters);
