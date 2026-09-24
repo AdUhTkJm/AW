@@ -856,6 +856,7 @@ void computeRecipePruning(CraftingGraph& graph) noexcept {
 void computePruning(CraftingGraph& graph) noexcept {
   computeTagPruning(graph);
   computeRecipePruning(graph);
+  computePackPruning(graph);
 }
 
 void setTagPruningEnabled(bool enabled) noexcept {

@@ -237,6 +237,31 @@ void printSummary(const aw::CraftingGraph& graph) {
     std::cout << "inputs per recipe: " << ((double) inputEdges / graph.nRecipe)
           << " average\n";
   }
+  if (graph.packDominated.size() == graph.nRecipe) {
+    size_t packCerts = 0, packEdges = 0, packZero = 0;
+    for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
+      if (!graph.packDominated[recipe])
+        continue;
+      ++packCerts;
+      packEdges += graph.packCertificates[recipe].support.size();
+      packZero += graph.packCertificates[recipe].zeroStock.size();
+    }
+    std::cout << "pack certs     : " << packCerts << " recipes (" << packEdges
+          << " support entries, " << packZero << " zero-stock items)\n";
+  }
+}
+
+bool mulOverflowInt(int64_t a, int64_t b, int64_t& out) {
+  if (a == 0 || b == 0) {
+    out = 0;
+    return false;
+  }
+  const bool over = a > 0 ? (b > 0 ? a > INT64_MAX / b : b < INT64_MIN / a)
+                          : (b > 0 ? a < INT64_MIN / b : a < INT64_MAX / b);
+  if (over)
+    return true;
+  out = a * b;
+  return false;
 }
 
 // Verifies the invariants the kernel is allowed to rely on. Returns the number
@@ -375,6 +400,107 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
     for (size_t item = 0; item < graph.nReal; ++item) {
       if (!graph.i2r.targetsOf(item).empty() && !kept[item]) {
         report("composite pruning removed every recipe of a real item");
+        break;
+      }
+    }
+  }
+
+  // Pack certificates must describe a well-formed pack whose net column is
+  // non-positive on every row: that is exactly the property the query-time
+  // drop relies on.
+  if (graph.packDominated.size() != graph.nRecipe ||
+      graph.packCertificates.size() != graph.nRecipe) {
+    report("pack pruning arrays do not match the recipe count");
+  } else {
+    std::vector<int64_t> net(graph.nItem, 0);
+    std::vector<aw::NodeId> touched;
+    for (size_t r = 0; r < graph.nRecipe; ++r) {
+      if (!graph.packDominated[r])
+        continue;
+      const aw::PackCertificate &cert = graph.packCertificates[r];
+      if (cert.support.empty() || cert.support.size() != cert.count.size()) {
+        report("a pack certificate has a malformed support");
+        break;
+      }
+      bool hasSelf = false, ascending = true;
+      for (size_t k = 0; k < cert.support.size(); ++k) {
+        if (cert.support[k] >= graph.nRecipe || cert.count[k] < 1) {
+          report("a pack certificate names a bad recipe or count");
+          ascending = false;
+          break;
+        }
+        if (k > 0 && cert.support[k] <= cert.support[k - 1])
+          ascending = false;
+        if (cert.support[k] == r)
+          hasSelf = true;
+      }
+      if (!ascending) {
+        report("a pack certificate support is not strictly ascending");
+        break;
+      }
+      if (!hasSelf) {
+        report("a pack certificate does not contain its own recipe");
+        break;
+      }
+
+      touched.clear();
+      bool overflow = false;
+      for (size_t k = 0; k < cert.support.size() && !overflow; ++k) {
+        const size_t s = cert.support[k];
+        const int64_t count = cert.count[k];
+        auto addNet = [&](aw::NodeId item, int64_t delta) {
+          if (net[item] == 0)
+            touched.push_back(item);
+          if (delta > 0 ? net[item] > INT64_MAX - delta
+                        : net[item] < INT64_MIN - delta) {
+            overflow = true;
+            return;
+          }
+          net[item] += delta;
+        };
+        int64_t product = 0;
+        if (mulOverflowInt(graph.outputAmt[s], count, product)) {
+          overflow = true;
+          break;
+        }
+        addNet(graph.output[s], product);
+        const auto inputs = graph.r2i.targetsOf(s);
+        const auto weights = graph.r2i.weightsOf(s);
+        for (size_t e = 0; e < inputs.size(); ++e) {
+          if (mulOverflowInt(weights[e], count, product)) {
+            overflow = true;
+            break;
+          }
+          addNet(inputs[e], -product);
+        }
+      }
+      if (overflow) {
+        for (aw::NodeId item : touched)
+          net[item] = 0;
+        report("a pack certificate overflows int64");
+        break;
+      }
+      for (aw::NodeId item : touched) {
+        if (net[item] > 0) {
+          report("a pack certificate is not a net loss");
+          break;
+        }
+      }
+      for (aw::NodeId item : touched)
+        net[item] = 0;
+
+      bool zeroAscending = true;
+      for (size_t k = 0; k < cert.zeroStock.size(); ++k) {
+        if (cert.zeroStock[k] >= graph.nReal) {
+          report("a pack certificate names a non-real zero-stock item");
+          zeroAscending = false;
+          break;
+        }
+        if (k > 0 && cert.zeroStock[k] <= cert.zeroStock[k - 1])
+          zeroAscending = false;
+      }
+      if (!zeroAscending) {
+        report("a pack certificate zero-stock set is not strictly ascending");
         break;
       }
     }
@@ -563,6 +689,8 @@ int main(int argc, char** argv) {
   bool dump = false;
   bool noPrune = false;
   bool noRecipePrune = false;
+  bool noPackPrune = false;
+  double packSeconds = -1.0;
   bool doReach = false;
   bool doTree = false;
   bool doPlan = false;
@@ -581,6 +709,13 @@ int main(int argc, char** argv) {
       noPrune = true;
     } else if (arg == "--no-recipe-prune") {
       noRecipePrune = true;
+    } else if (arg == "--no-pack-prune") {
+      noPackPrune = true;
+    } else if (arg == "--pack-seconds") {
+      if (i + 1 >= argc || !parseDouble(argv[++i], packSeconds)) {
+        std::cerr << "--pack-seconds needs a number of seconds\n";
+        return EXIT_FAILURE;
+      }
     } else if (arg == "--profile") {
       if (i + 1 >= argc) {
         std::cerr << "--profile needs an output path\n";
@@ -655,7 +790,8 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "-h" || arg == "--help") {
       std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
-                   "                   [--no-prune] [--no-recipe-prune]\n"
+                   "                   [--no-prune] [--no-recipe-prune] [--no-pack-prune]\n"
+                   "                   [--pack-seconds <s>]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                    "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
                    "                   [--names <table.tsv>] [--subgraph <name|handle>]\n"
@@ -671,7 +807,8 @@ int main(int argc, char** argv) {
 
   if (path.empty()) {
     std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
-                 "                   [--no-prune] [--no-recipe-prune]\n"
+                 "                   [--no-prune] [--no-recipe-prune] [--no-pack-prune]\n"
+                 "                   [--pack-seconds <s>]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                  "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
                  "                   [--names <table.tsv>] [--subgraph <name|handle>]\n"
@@ -688,6 +825,17 @@ int main(int argc, char** argv) {
   }
 
   const std::vector<std::byte> bytes = readFile(path);
+
+  // The certificate pass runs at registration time, so its options have to be
+  // installed before the graph is registered.
+  {
+    aw::PackPruneOptions packOptions = aw::getPackPruningOptions();
+    if (noPackPrune)
+      packOptions.enabled = false;
+    if (packSeconds >= 0.0)
+      packOptions.maxSeconds = packSeconds;
+    aw::setPackPruningOptions(packOptions);
+  }
 
   // Profile the whole run: decode + canonicalize + prune precompute, the
   // reachability pass, the LP/CP-SAT solve, and the report. Started before the

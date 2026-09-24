@@ -454,71 +454,122 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
       allowed[handle - 1] = 1;
   }
 
-  std::vector<uint8_t> itemSeen(nItem, 0);
-  std::vector<uint8_t> recipeSeen(nRecipe, 0);
-
-  // Ordinary BFS.
-  std::vector<NodeId> queue;
-  const NodeId start = CraftingGraph::itemNode(output);
-  itemSeen[start] = 1;
-  queue.push_back(start);
-
   const bool pruneTag = isTagPruningEnabled();
   const bool pruneRecipe = isRecipePruningEnabled();
+  const bool prunePack = isPackPruningEnabled();
 
-  for (size_t q = 0; q < queue.size(); q++) {
-    const NodeId item = queue[q];
-    const bool real = graph.isRealItem(item);
+  std::vector<uint8_t> itemSeen(nItem, 0);
+  std::vector<uint8_t> recipeSeen(nRecipe, 0);
+  std::vector<uint8_t> disabled(nRecipe, 0);
+  std::vector<NodeId> queue;
 
-    for (NodeId recipeNode : graph.i2r.targetsOf(item)) {
-      const uint recipe = recipeNode - nItem;
-      if (recipeSeen[recipe])
-        continue;
+  // Ordinary BFS. `disabled` forces a recipe out of the walk without touching
+  // the flags, so the pack-certificate post-pass can rebuild the subgraph.
+  auto walk = [&]() {
+    std::fill(itemSeen.begin(), itemSeen.end(), 0);
+    std::fill(recipeSeen.begin(), recipeSeen.end(), 0);
+    queue.clear();
 
-      // A dominated tag edge is dropped unless the player actually holds the
-      // member, in which case the free stock can still be spent on the tag.
-      if (pruneTag && recipe < graph.tagEdgeDominated.size() &&
-          graph.tagEdgeDominated[recipe]) {
-        const auto inputs = graph.r2i.targetsOf(recipe);
-        const Amount held = !inputs.empty() && inputs[0] < inventory.size()
-                                ? inventory[inputs[0]]
-                                : 0;
-        if (held == 0)
+    const NodeId start = CraftingGraph::itemNode(output);
+    itemSeen[start] = 1;
+    queue.push_back(start);
+
+    for (size_t q = 0; q < queue.size(); q++) {
+      const NodeId item = queue[q];
+      const bool real = graph.isRealItem(item);
+
+      for (NodeId recipeNode : graph.i2r.targetsOf(item)) {
+        const uint recipe = recipeNode - nItem;
+        if (recipeSeen[recipe] || disabled[recipe])
           continue;
-      }
 
-      // A composite-dominated real recipe is likewise only dropped when the
-      // witness input has no stock, so held stock can still be spent through
-      // it.
-      if (pruneRecipe && recipe < graph.recipeDominated.size() &&
-          graph.recipeDominated[recipe]) {
-        const NodeId guard = graph.recipeGuardInput[recipe];
-        const Amount held = guard < inventory.size() ? inventory[guard] : 0;
-        if (held == 0)
-          continue;
-      }
+        // A dominated tag edge is dropped unless the player actually holds the
+        // member, in which case the free stock can still be spent on the tag.
+        if (pruneTag && recipe < graph.tagEdgeDominated.size() &&
+            graph.tagEdgeDominated[recipe]) {
+          const auto inputs = graph.r2i.targetsOf(recipe);
+          const Amount held = !inputs.empty() && inputs[0] < inventory.size()
+                                  ? inventory[inputs[0]]
+                                  : 0;
+          if (held == 0)
+            continue;
+        }
 
-      // A pseudo-resource's synthetic recipes don't need workstation.
-      // They exist only to unfold the pseudo-resource into one of its real members.
-      if (real) {
-        bool usable = false;
-        for (NodeId station : graph.workstations.targetsOf(recipe)) {
-          if (allowed[station]) {
-            usable = true;
-            break;
+        // A composite-dominated real recipe is likewise only dropped when the
+        // witness input has no stock, so held stock can still be spent through
+        // it.
+        if (pruneRecipe && recipe < graph.recipeDominated.size() &&
+            graph.recipeDominated[recipe]) {
+          const NodeId guard = graph.recipeGuardInput[recipe];
+          const Amount held = guard < inventory.size() ? inventory[guard] : 0;
+          if (held == 0)
+            continue;
+        }
+
+        // A pseudo-resource's synthetic recipes don't need workstation.
+        // They exist only to unfold the pseudo-resource into one of its real members.
+        if (real) {
+          bool usable = false;
+          for (NodeId station : graph.workstations.targetsOf(recipe)) {
+            if (allowed[station]) {
+              usable = true;
+              break;
+            }
+          }
+          if (!usable)
+            continue;
+        }
+
+        recipeSeen[recipe] = 1;
+        for (NodeId input : graph.r2i.targetsOf(recipe)) {
+          if (!itemSeen[input]) {
+            itemSeen[input] = 1;
+            queue.push_back(input);
           }
         }
-        if (!usable)
-          continue;
       }
+    }
+  };
 
-      recipeSeen[recipe] = 1;
-      for (NodeId input : graph.r2i.targetsOf(recipe)) {
-        if (!itemSeen[input]) {
-          itemSeen[input] = 1;
-          queue.push_back(input);
+  walk();
+
+  // Pack certificates. A certified recipe is dropped when every recipe of its
+  // pack is present in this subgraph and the pack's zero-stock items really
+  // are out of stock. Removing every such recipe at once is sound: each one is
+  // certified against the walk above, and an optimal plan of that subgraph
+  // avoids all of them, so the optimum is unchanged.
+  if (prunePack && graph.packDominated.size() == nRecipe) {
+    bool any = false;
+    std::vector<uint8_t> drop(nRecipe, 0);
+    for (uint recipe = 0; recipe < nRecipe; recipe++) {
+      if (!recipeSeen[recipe] || !graph.packDominated[recipe])
+        continue;
+      const PackCertificate &cert = graph.packCertificates[recipe];
+      bool ok = true;
+      for (uint32_t support : cert.support) {
+        if (support >= nRecipe || !recipeSeen[support]) {
+          ok = false;
+          break;
         }
       }
+      if (!ok)
+        continue;
+      for (NodeId item : cert.zeroStock) {
+        const Amount held = item < inventory.size() ? inventory[item] : 0;
+        if (held > 0) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok)
+        continue;
+      drop[recipe] = 1;
+      any = true;
+    }
+    if (any) {
+      for (uint recipe = 0; recipe < nRecipe; recipe++)
+        disabled[recipe] |= drop[recipe];
+      walk();
     }
   }
 

@@ -804,6 +804,118 @@ std::vector<std::byte> buildWorkstationGuardSample(bool sSuperset) {
   return out;
 }
 
+// The copper-pickaxe example from docs/algorithm.typ. The pack
+//
+//   r0: ingot  x1 <- nugget  x9
+//   r1: pickaxe x1 <- ingot x3 + stick x2
+//   r2: nugget x1 <- pickaxe x1
+//
+// produces and consumes nothing net but costs 19 steps, so `r0` is never used
+// by an optimal plan once nugget and pickaxe are out of stock.
+//
+//   handle 1 ingot   <- r0 (x1, ws [1], nugget x9)
+//   handle 2 stick     (leaf)
+//   handle 3 pickaxe <- r1 (x1, ws [1], ingot x3 + stick x2)
+//   handle 4 nugget  <- r2 (x1, ws [1], pickaxe x1)
+std::vector<std::byte> buildPackSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 4);  // realResourceCount
+  emitVarInt(out, 3);  // entries: handles 1, 3, 4
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (ingot)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r0 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 9);
+    emitVarInt(out, 4);  // -> handle 4 (nugget)
+  }
+
+  emitVarInt(out, 2);  // output delta -> handle 3 (pickaxe)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r1 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 2);  // two inputs
+    emitVarInt(out, 3);
+    emitVarInt(out, 1);  // -> handle 1 (ingot)
+    emitVarInt(out, 2);
+    emitVarInt(out, 1);  // -> handle 2 (stick)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 4 (nugget)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r2 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (pickaxe)
+  }
+  return out;
+}
+
+// A split-production graph that exercises R3. A has two producers that each
+// make 2 units from a different leaf, and B loops back to the target X, so an
+// unsound full-production branch could keep only one of them.
+//
+//   handle 1 X <- r0 (x1, ws [1], A x3)
+//   handle 2 A <- r1 (x2, ws [1], B x1)
+//              <- r2 (x2, ws [1], C x1)
+//   handle 3 B <- r3 (x1, ws [1], X x1)
+//   handle 4 C   (leaf)
+std::vector<std::byte> buildPackBranchSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 4);  // realResourceCount
+  emitVarInt(out, 3);  // entries: handles 1, 2, 3
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (X)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r0 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);
+    emitVarInt(out, 2);  // -> handle 2 (A)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (A)
+  emitVarInt(out, 2);  // two recipes
+  {
+    emitVarInt(out, 2);  // r1 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (B)
+  }
+  {
+    emitVarInt(out, 2);  // r2 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // -> handle 4 (C)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 3 (B)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r3 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // -> handle 1 (X)
+  }
+  return out;
+}
+
 aw::solver::Matrix makeMatrix(
     uint32_t rows, uint32_t cols,
     const std::vector<std::vector<std::pair<uint32_t, int64_t>>> &columns) {
@@ -1497,6 +1609,157 @@ void testReducedCostParity() {
   }
 }
 
+bool subgraphHasRecipe(const aw::Subgraph &sub, uint32_t source) {
+  for (aw::NodeId r : sub.recipeOrigin)
+    if (r == source)
+      return true;
+  return false;
+}
+
+void testPackPruning() {
+  std::cout << "[Test] wasteful-pack certificates\n";
+  aw::registerCraftingGraph(buildPackSample());
+  expect(aw::getCraftingError() == nullptr, "pack sample parses");
+  {
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    expect(graph.nRecipe == 3 && graph.nReal == 4, "pack sample shape");
+    expect(graph.packDominated.size() == graph.nRecipe &&
+               graph.packCertificates.size() == graph.nRecipe,
+           "one pack certificate slot per recipe");
+    expect(graph.packDominated[0] == 1, "ingot <- nugget is certified");
+    expect(graph.packDominated[1] == 1 && graph.packDominated[2] == 1,
+           "the whole cycle carries certificates");
+    const aw::PackCertificate &cert = graph.packCertificates[0];
+    const uint32_t support[] = {0, 1, 2};
+    const int64_t counts[] = {1, 9, 9};
+    expect(cert.support.size() == 3, "certificate support size");
+    for (int i = 0; i < 3 && cert.support.size() == 3; i++) {
+      expect(cert.support[i] == support[i], "certificate support is the pack");
+      expect(cert.count[i] == counts[i], "certificate counts are the pack");
+    }
+    expect(cert.zeroStock.size() == 2 && cert.zeroStock[0] == 2 &&
+               cert.zeroStock[1] == 3,
+           "certificate zero-stock set is pickaxe and nugget");
+  }
+
+  const aw::Handle all[] = {1, 2, 3, 4};
+  {
+    // With nothing in stock, every route is certified and no recipe survives:
+    // the pickaxe is genuinely infeasible without ingot or nugget stock.
+    const aw::Subgraph sub = aw::reachableSubgraph(3, all);
+    expect(!subgraphHasRecipe(sub, 0), "the certified recipe is dropped");
+    expect(sub.graph.nRecipe == 0, "the whole certified cycle is dropped");
+  }
+  {
+    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    inventory[3] = 10;  // nugget
+    const aw::Subgraph sub = aw::reachableSubgraph(3, all, inventory);
+    expect(subgraphHasRecipe(sub, 0), "stocked nugget keeps the ingot recipe");
+  }
+
+  aw::setPackPruningEnabled(false);
+  aw::registerCraftingGraph(buildPackSample());
+  {
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    expect(graph.packDominated[0] == 0, "disabling the pass drops no recipe");
+    const aw::Subgraph sub = aw::reachableSubgraph(3, all);
+    expect(subgraphHasRecipe(sub, 0), "the recipe survives when disabled");
+  }
+  aw::setPackPruningEnabled(true);
+}
+
+void testPackPruningParity() {
+  std::cout << "[Test] pack pruning preserves the optimum\n";
+
+  auto total = [](const aw::PlanResult &r) {
+    int64_t sum = 0;
+    for (int64_t x : r.exec)
+      sum += x;
+    return sum;
+  };
+
+  // Copper: ingot and stick are leaves, so stock them.
+  {
+    const std::vector<std::byte> bytes = buildPackSample();
+    auto plan = [&](bool prune, aw::Amount amount) {
+      aw::setPackPruningEnabled(prune);
+      aw::registerCraftingGraph(bytes);
+      const aw::Handle all[] = {1, 2, 3, 4};
+      const aw::CraftingGraph &graph = aw::getCraftingGraph();
+      std::vector<aw::Amount> inventory(graph.nItem, 0);
+      inventory[0] = 1000000;  // ingot
+      inventory[1] = 1000000;  // stick
+      const aw::Subgraph sub = aw::reachableSubgraph(3, all, inventory);
+      const aw::NodeId target = sub.translate(2);
+      const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
+      return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
+    };
+    for (aw::Amount amount : {1, 3, 10}) {
+      const auto full = plan(false, amount);
+      const auto pruned = plan(true, amount);
+      expect(full.first == pruned.first, "copper: status preserved");
+      expect(full.second == pruned.second, "copper: optimum preserved");
+    }
+  }
+
+  // Split production: B and C are leaves. No certificate exists, so parity is
+  // the soundness check for the R3 branch.
+  {
+    const std::vector<std::byte> bytes = buildPackBranchSample();
+    aw::setPackPruningEnabled(true);
+    aw::registerCraftingGraph(bytes);
+    expect(aw::getCraftingGraph().packDominated[0] == 0,
+           "a split-production branch yields no certificate");
+
+    auto plan = [&](bool prune, aw::Amount amount) {
+      aw::setPackPruningEnabled(prune);
+      aw::registerCraftingGraph(bytes);
+      const aw::Handle all[] = {1, 2, 3, 4};
+      const aw::CraftingGraph &graph = aw::getCraftingGraph();
+      std::vector<aw::Amount> inventory(graph.nItem, 0);
+      inventory[2] = 1000000;  // B
+      inventory[3] = 1000000;  // C
+      const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+      const aw::NodeId target = sub.translate(0);
+      const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
+      return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
+    };
+    for (aw::Amount amount : {1, 3, 7}) {
+      const auto full = plan(false, amount);
+      const auto pruned = plan(true, amount);
+      expect(full.first == pruned.first, "branch: status preserved");
+      expect(full.second == pruned.second, "branch: optimum preserved");
+    }
+  }
+
+  // Black candle: the composite-pruning sample also carries pack certificates.
+  {
+    const std::vector<std::byte> bytes = buildBlackCandleSample();
+    auto plan = [&](bool prune, aw::Amount amount) {
+      aw::setPackPruningEnabled(prune);
+      aw::registerCraftingGraph(bytes);
+      const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
+      const aw::CraftingGraph &graph = aw::getCraftingGraph();
+      std::vector<aw::Amount> inventory(graph.nItem, 0);
+      for (aw::NodeId m = 0; m < graph.nReal; m++)
+        if (graph.i2r.targetsOf(m).empty())
+          inventory[m] = 1000000000LL;
+      const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
+      const aw::NodeId target = sub.translate(3);
+      const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
+      return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
+    };
+    for (aw::Amount amount : {1, 224, 300}) {
+      const auto full = plan(false, amount);
+      const auto pruned = plan(true, amount);
+      expect(full.first == pruned.first, "black candle: status preserved");
+      expect(full.second == pruned.second, "black candle: optimum preserved");
+    }
+  }
+
+  aw::setPackPruningEnabled(true);
+}
+
 }  // namespace
 
 int main() {
@@ -1514,6 +1777,8 @@ int main() {
   testRecipePruningWorkstations();
   testRecipePruningParity();
   testReducedCostParity();
+  testPackPruning();
+  testPackPruningParity();
 
   if (failures == 0) {
     std::cout << "all tests passed\n";

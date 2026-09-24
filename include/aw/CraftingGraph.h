@@ -85,6 +85,47 @@ struct BaseCraftingGraph {
   }
 };
 
+// A precomputed "wasteful pack" certificate for one recipe.
+//
+// `support` / `count` describe a non-negative integer pack z: if a feasible
+// plan executes the certified recipe at least once, and none of `zeroStock`
+// holds stock, then that plan executes every support recipe at least `count`
+// times. Those executions sum to a net loss (their combined column is <= 0),
+// so removing the pack keeps the plan feasible and strictly cheaper. Hence no
+// optimal plan executes the certified recipe. See docs/algorithm.typ, section
+// "针对多个零库存物品的推广".
+struct PackCertificate {
+  // Source recipe ids with z_r > 0, ascending.
+  std::vector<uint32_t> support;
+  // Parallel to `support`; every count is at least 1.
+  std::vector<Amount> count;
+  // Real items whose balance was used as "no stock" (b = 0), ascending.
+  std::vector<NodeId> zeroStock;
+};
+
+// Budget for the multi-item "wasteful pack" certificates. The defaults keep
+// registration bounded on the full 12k-item graphs; running out of budget only
+// turns a search branch into a leaf, which weakens the pack but never makes it
+// unsound.
+struct PackPruneOptions {
+  bool enabled = true;
+
+  // Pack size: at most this many distinct recipes, and at most this total
+  // count across the pack.
+  uint32_t maxPackRecipes = 128;
+  int64_t maxPackValue = 1024;
+
+  // R3 search budget. Exceeding either turns the node into a leaf.
+  uint32_t maxBranchDepth = 8;
+  uint32_t maxBranchNodes = 4096;
+
+  // Cap on the pack's zero-stock set. A derivation that needs more is dropped.
+  uint32_t maxZeroStockItems = 32;
+
+  // Wall-clock budget for the whole pass. <= 0 means no limit.
+  double maxSeconds = 2.0;
+};
+
 // Add workstation to base crafting graphs.
 struct CraftingGraph : BaseCraftingGraph {
   // Maps recipes to workstations on which it can be executed.
@@ -106,6 +147,13 @@ struct CraftingGraph : BaseCraftingGraph {
   // recipe is only dropped when inventory[Y] == 0, so stocked Y can still be
   // spent. UINT32_MAX otherwise.
   std::vector<NodeId> recipeGuardInput;  // nRecipe entries
+
+  // Multi-item "wasteful pack" certificates. `packDominated[r] == 1` means
+  // recipe r carries the certificate in `packCertificates[r]` and is never
+  // executed by an optimal plan, provided the certificate's zero-stock items
+  // are indeed out of stock and every support recipe is reachable.
+  std::vector<uint8_t> packDominated;              // nRecipe entries
+  std::vector<PackCertificate> packCertificates;   // nRecipe entries
 
   [[nodiscard]]
   static NodeId itemNode(Handle handle) noexcept {
@@ -154,6 +202,13 @@ void setTagPruningEnabled(bool enabled) noexcept;
 bool isTagPruningEnabled() noexcept;
 void setRecipePruningEnabled(bool enabled) noexcept;
 bool isRecipePruningEnabled() noexcept;
+
+// Certificate pruning is on by default. It is computed during
+// registerCraftingGraph, so options must be set before registering a graph.
+void setPackPruningEnabled(bool enabled) noexcept;
+bool isPackPruningEnabled() noexcept;
+void setPackPruningOptions(const PackPruneOptions &options) noexcept;
+PackPruneOptions getPackPruningOptions() noexcept;
 
 void registerCraftingGraph(std::span<const std::byte> bytes) noexcept;
 const char *getCraftingError() noexcept;
