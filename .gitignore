@@ -7,6 +7,9 @@ java-ref/
 AGENTS.md
 third_party/
 
+# Artifact of docs
+*.pdf
+
 # CPU profiles from --profile and their folded stacks / renderings
 *.prof
 *.folded

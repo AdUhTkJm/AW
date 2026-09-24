@@ -51,9 +51,10 @@ struct Options {
   int64_t objectiveCap = 0;
 
   // Reduced-cost fixing. The solver probes for any plan within this much of
-  // the LP relaxation; if one exists, every column whose LP reduced cost
-  // exceeds the LP/integer gap is dropped before the final solve. 0 disables
-  // the pass. Values much above 10 are not worth the extra probe.
+  // the LP relaxation; if one exists, every column is bounded by
+  // floor((incumbent - LP) / d_r), so columns whose bound is 0 are dropped and
+  // the rest get a tightened domain before the final solve. 0 disables the
+  // pass. Values much above 10 are not worth the extra probe.
   double reducedCostGap = 10.0;
 };
 

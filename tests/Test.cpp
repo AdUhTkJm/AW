@@ -931,6 +931,21 @@ void testReducedCostFixing() {
     expect(r.status == aw::PlanStatus::OK && r.objective == 4 && r.fixedColumns == 0,
            "a zero gap disables the fixing");
   }
+
+  // Generalization: a column that can also serve the row is not fixed, but its
+  // reduced cost still caps it at floor((incumbent - LP) / d1) = 1 instead of
+  // dropping it. Exercise that path and check it keeps the optimum.
+  {
+    const aw::solver::Matrix A2 = makeMatrix(1, 2, {{{0, 2}}, {{0, 1}}});
+    const std::vector<int64_t> b2 = {7};
+    const std::vector<int64_t> c2 = {1, 1};
+    aw::solver::Options options;
+    options.reducedCostGap = 0.5;
+    const aw::solver::Result r = aw::solver::solve(A2, b2, c2, options);
+    expect(r.status == aw::PlanStatus::OK && r.provenOptimal && r.objective == 4,
+           "a capped column keeps the optimum");
+    expect(r.fixedColumns == 0, "a positively bounded column is not reported fixed");
+  }
 }
 
 void testPlan() {

@@ -245,18 +245,23 @@ std::vector<int64_t> expandSolution(std::span<const int64_t> reduced,
   return full;
 }
 
-// One solve with x in [0, cap] and sum(c_r x_r) <= cap. `timeLimitSeconds`
-// <= 0 means no limit.
+// One solve with x in [0, cap], x_r <= upper[r] (when given) and
+// sum(c_r x_r) <= cap. `timeLimitSeconds` <= 0 means no limit.
 Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64_t> b,
                     std::span<const int64_t> c, const Options &options,
-                    int64_t cap, double timeLimitSeconds) {
+                    int64_t cap, double timeLimitSeconds,
+                    std::span<const int64_t> upper = {}) {
   Result result;
 
   sat::CpModelBuilder model;
   std::vector<sat::IntVar> variables;
   variables.reserve(A.cols);
-  for (uint32_t r = 0; r < A.cols; r++)
-    variables.push_back(model.NewIntVar(Domain(0, cap)));
+  for (uint32_t r = 0; r < A.cols; r++) {
+    int64_t hi = cap;
+    if (!upper.empty() && upper[r] < hi)
+      hi = upper[r];
+    variables.push_back(model.NewIntVar(Domain(0, hi)));
+  }
 
   std::vector<sat::IntVar> terms;
   std::vector<int64_t> coefficients;
@@ -451,17 +456,42 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
         if (probe.status == PlanStatus::OK &&
             (double) probe.objective >= lp.value) {
           // At an LP optimum `c^T x = LP + sum_r d_r x_r` for every feasible
-          // x, so a column with `d_r > incumbent - LP` cannot appear in any
-          // plan at least as good as the incumbent. The guard above keeps a
-          // numerical overshoot of the LP bound from making this too eager.
+          // x, so every plan with `c^T x <= incumbent` obeys
+          // `x_r <= floor((incumbent - LP) / d_r)`. A zero bound drops the
+          // column outright; a positive one only tightens its domain. The
+          // guard above keeps a numerical overshoot of the LP bound from
+          // making this too eager, and the fixing boundary keeps an extra
+          // unit of slack.
           const double threshold = (double) probe.objective - lp.value;
           std::vector<uint32_t> keep;
           keep.reserve(A.cols);
-          for (uint32_t r = 0; r < A.cols; r++)
-            if (!(lp.reducedCost[r] > threshold + REDUCED_COST_EPSILON))
-              keep.push_back(r);
-          const uint32_t fixed = A.cols - (uint32_t) keep.size();
-          if (fixed > 0) {
+          std::vector<int64_t> keepUpper;
+          keepUpper.reserve(A.cols);
+          uint32_t fixed = 0;
+          bool tightened = false;
+          for (uint32_t r = 0; r < A.cols; r++) {
+            const double d = lp.reducedCost[r];
+            int64_t bound = probe.objective;
+            if (d > threshold + REDUCED_COST_EPSILON) {
+              bound = 0;
+            } else if (d > REDUCED_COST_EPSILON) {
+              bound = (int64_t) std::floor(threshold / d);
+              // Not fixed above, so stay at least one execution to remain
+              // conservative at the boundary.
+              if (bound < 1)
+                bound = 1;
+              bound = std::min(bound, probe.objective);
+            }
+            if (bound <= 0) {
+              fixed++;
+              continue;
+            }
+            if (bound < probe.objective)
+              tightened = true;
+            keep.push_back(r);
+            keepUpper.push_back(bound);
+          }
+          if (fixed > 0 || tightened) {
             std::vector<int64_t> reducedC;
             const Matrix reduced = selectColumns(A, c, keep, reducedC);
             const RowMajor reducedRows = transpose(reduced);
@@ -470,7 +500,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
               budget = options.maxTimeSeconds - elapsedSeconds();
             if (!limited || budget > 0.0) {
               Result out = solveWithCap(reduced, reducedRows, b, reducedC, options,
-                                        probe.objective, budget);
+                                        probe.objective, budget, keepUpper);
               if (debug)
                 std::fprintf(stderr,
                              "[solver] reduced cols=%u fixed=%u status=%d obj=%lld\n",
