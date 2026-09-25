@@ -23,11 +23,13 @@ void computePackPruning(CraftingGraph& graph) noexcept;
 
 // Satellite elimination. `itemSeen` / `recipeSeen` describe the subgraph the
 // reachability walk kept, `target` is the item being planned for and
-// `inventory` is indexed by source item node. Recipes that provably cannot
-// appear in an optimal plan of that subgraph are marked in `drop`; the return
-// value says whether anything was marked. The implementation lives in
-// SatellitePrune.cpp, together with the LP and the exact certificate that back
-// every mark.
+// `inventory` is indexed by source item node. Groups of recipes whose only net
+// output to the rest of the subgraph is one item, hold no stock, and cannot
+// repay that item are marked in `drop`; the return value says whether anything
+// was marked. Both the undirected articulation components and the wider
+// "input-leaking" islands of docs/algorithm.typ ("孤岛消除") are covered. The
+// implementation lives in SatellitePrune.cpp, together with the LP and the
+// exact certificate that backs every mark.
 bool computeSatellitePruning(const CraftingGraph& graph, NodeId target,
                              std::span<const uint8_t> itemSeen,
                              std::span<const uint8_t> recipeSeen,

@@ -1,31 +1,42 @@
 // Satellite elimination: a pruning pass that runs on the reachable subgraph,
 // where the target and the inventory are known.
 //
-// docs/algorithm.typ ("孤岛消除") has the full statement. In one line: if A is
-// an articulation point of the subgraph and G is a component of subgraph - A
-// that holds neither the target nor any stock, and G cannot produce a net
-// surplus of A, then no optimal plan executes a recipe of G.
+// docs/algorithm.typ ("孤岛消除") has the full statement. In one line: pick a
+// set of items I, let G be every recipe that produces or consumes an item of I,
+// and suppose I holds neither the target nor any stock and every recipe of G
+// outputs an item of I or a single escape A. If G cannot produce a net surplus
+// of A, then no optimal plan executes a recipe of G.
+//
+// The old, weaker statement is the special case where I is the item set of a
+// component of subgraph - A (so G cannot even *consume* anything outside I).
+// The pass finds that case with an undirected articulation search, and the
+// wider "input leaking" islands with an escape enumeration: for a fixed escape
+// A, I is the largest set of items that cannot reach the target or a stocked
+// item without passing through A. That set is closed under "consumes ->
+// produces", so the single output condition holds by construction. The copper
+// oxidation cycle is the motivating case; it shares mekanism:oxygen with the
+// ore processing, so it is not an undirected component.
 //
 // The condition "G cannot produce a net surplus of A" is the LP
 //
-//   max (A z)_A   s.t.  (A z)_j >= 0 for every item j of G,  sum z <= 1,  z >= 0
+//   max (A z)_A   s.t.  (A z)_j >= 0 for every item j of I,  sum z <= 1,  z >= 0
 //
-// whose optimum is 0 exactly when the component is dead. Rather than solve that
+// whose optimum is 0 exactly when the island is dead. Rather than solve that
 // and then have to trust its dual, the pass solves the Farkas certificate of
 // "the optimum is 0" directly:
 //
 //   find y >= 0 with  sum_j y_j A_{j,r} + A_{A,r} <= 0  for every recipe r of G
 //
 // Such a y exists exactly when that optimum is 0, and it is a proof: for any
-// z >= 0 with (A z)_j >= 0 on G,
+// z >= 0 with (A z)_j >= 0 on I,
 //
 //   D (A z)_A = sum_j Y_j (A z)_j + D (A z)_A - sum_j Y_j (A z)_j
 //             = sum_r z_r (sum_j Y_j A_{j,r} + D A_{A,r}) - sum_j Y_j (A z)_j <= 0,
 //
 // because the first term is <= 0 by the certificate, z >= 0, and the second is
-// >= 0 because Y >= 0 and (A z)_j >= 0 on G. The LP only proposes y; the pass
-// rounds it to integers and re-checks the inequalities exactly, so a component
-// is dropped only on an exactly verified certificate and never on a float.
+// >= 0 because Y >= 0 and (A z)_j >= 0 on I. The LP only proposes y; the pass
+// rounds it to integers and re-checks the inequalities exactly, so an island is
+// dropped only on an exactly verified certificate and never on a float.
 //
 // This is deliberately the only other file next to CpSatSolver.cpp that
 // includes OR-Tools, so it is exempt from -fno-exceptions -fno-rtti; the
@@ -241,6 +252,120 @@ void collectSubtree(const Undirected& und, const DfsTree& tree, uint v,
 }
 
 // ---------------------------------------------------------------------------
+// The item-level "consume -> produce" graph
+// ---------------------------------------------------------------------------
+// The generalized lemma (docs/algorithm.typ, "孤岛消除") does not need the
+// island to be separated on its inputs. It only needs every recipe that
+// *touches* an island item to be part of the island (so the item's balance row
+// is internal), and no recipe of the island to net-produce an item outside the
+// island plus one escape A (so subtracting the island cannot starve anything
+// else).
+//
+// Both conditions are about consumption, not production: an item j forces in
+// every recipe that eats j, and that recipe forces in the item it makes. The
+// graph below has exactly that edge, j -> output(r) for every recipe r that
+// consumes j. Following it forward from an item therefore collects what that
+// item drags into the island. The escape enumeration does not need the whole
+// graph; it only needs this SCC decomposition, to try the escapes that sit
+// inside a cycle first.
+
+struct ItemGraph {
+  std::vector<uint> offsets;  // nItem + 1
+  std::vector<uint> targets;
+};
+
+void buildItemGraph(const CraftingGraph& graph, std::span<const uint8_t> recipeSeen,
+                    ItemGraph& out) noexcept {
+  const uint nItem = graph.nItem;
+  std::vector<uint> counts(nItem, 0);
+  for (uint r = 0; r < graph.nRecipe; r++) {
+    if (!recipeSeen[r])
+      continue;
+    const NodeId produced = graph.output[r];
+    for (NodeId input : graph.r2i.targetsOf(r))
+      if (input != produced)
+        counts[input]++;
+  }
+
+  out.offsets.assign(nItem + 1, 0);
+  for (uint v = 0; v < nItem; v++)
+    out.offsets[v + 1] = out.offsets[v] + counts[v];
+  out.targets.assign(out.offsets[nItem], 0);
+
+  std::vector<uint> cursor(out.offsets.begin(), out.offsets.end() - 1);
+  for (uint r = 0; r < graph.nRecipe; r++) {
+    if (!recipeSeen[r])
+      continue;
+    const NodeId produced = graph.output[r];
+    for (NodeId input : graph.r2i.targetsOf(r))
+      if (input != produced)
+        out.targets[cursor[input]++] = produced;
+  }
+}
+
+// Iterative Tarjan over the item graph. `comp[v]` is the SCC id of v, or
+// UINT32_MAX when the item is not in the subgraph. The number of components is
+// returned.
+uint32_t computeItemSccs(const ItemGraph& graph, std::span<const uint8_t> itemSeen,
+                         uint nItem, std::vector<uint32_t>& comp) noexcept {
+  comp.assign(nItem, UINT32_MAX);
+  std::vector<uint32_t> index(nItem, UINT32_MAX);
+  std::vector<uint32_t> low(nItem, 0);
+  std::vector<uint8_t> onStack(nItem, 0);
+  std::vector<uint> stack;
+  std::vector<uint> nodeStack;
+  std::vector<uint> edgeStack;
+  uint32_t timer = 0;
+  uint32_t nComp = 0;
+
+  for (uint root = 0; root < nItem; root++) {
+    if (!itemSeen[root] || index[root] != UINT32_MAX)
+      continue;
+    index[root] = low[root] = timer++;
+    onStack[root] = 1;
+    stack.push_back(root);
+    nodeStack.push_back(root);
+    edgeStack.push_back(graph.offsets[root]);
+    while (!nodeStack.empty()) {
+      const uint v = nodeStack.back();
+      uint& edge = edgeStack.back();
+      if (edge < graph.offsets[v + 1]) {
+        const uint w = graph.targets[edge++];
+        if (index[w] == UINT32_MAX) {
+          index[w] = low[w] = timer++;
+          onStack[w] = 1;
+          stack.push_back(w);
+          nodeStack.push_back(w);
+          edgeStack.push_back(graph.offsets[w]);
+        } else if (onStack[w] && index[w] < low[v]) {
+          low[v] = index[w];
+        }
+      } else {
+        nodeStack.pop_back();
+        edgeStack.pop_back();
+        if (low[v] == index[v]) {
+          while (true) {
+            const uint w = stack.back();
+            stack.pop_back();
+            onStack[w] = 0;
+            comp[w] = nComp;
+            if (w == v)
+              break;
+          }
+          nComp++;
+        }
+        if (!nodeStack.empty()) {
+          const uint p = nodeStack.back();
+          if (low[v] < low[p])
+            low[p] = low[v];
+        }
+      }
+    }
+  }
+  return nComp;
+}
+
+// ---------------------------------------------------------------------------
 // The certificate LP
 // ---------------------------------------------------------------------------
 
@@ -358,6 +483,242 @@ bool componentIsDead(const CraftingGraph& graph, NodeId cutNode, const Component
 }
 
 // ---------------------------------------------------------------------------
+// The generalized pass
+// ---------------------------------------------------------------------------
+// The island does not have to be separated on its inputs. Pick an escape item A
+// and let I be the largest set of items that cannot reach the target (or a
+// stocked item) without passing through A. Every recipe touching I goes into G;
+// because I is closed under "consumes -> produces", nothing in G makes an item
+// outside I except A. The certificate then drops G exactly as in the undirected
+// pass, but over the island's items rather than over every item of undirected
+// component.
+//
+// The copper oxidation chain is the motivating case: copper_block is not an
+// articulation point of the undirected graph, because the chain shares
+// mekanism:oxygen with the ore processing, but {exposed, weathered,
+// oxidized}_copper cannot reach the target without copper_block and the
+// certificate settles them.
+//
+// The escape is enumerated over the subgraph's items. The candidate order puts
+// items inside a nontrivial cycle first, because that is where the interesting
+// escapes live; running out of budget only means an escape is not tried.
+bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> itemSeen,
+                 std::span<const uint8_t> recipeSeen, std::span<const Amount> inventory,
+                 std::vector<uint8_t>& drop,
+                 std::chrono::steady_clock::time_point started) noexcept {
+  const uint nItem = graph.nItem;
+  if (target >= nItem || !itemSeen[target])
+    return false;
+
+  // SCCs of the item level consume->produce graph, used only to order escapes.
+  ItemGraph itemEdges;
+  buildItemGraph(graph, recipeSeen, itemEdges);
+  std::vector<uint32_t> comp;
+  const uint32_t nComp = computeItemSccs(itemEdges, itemSeen, nItem, comp);
+  std::vector<uint8_t> cycleItem(nItem, 0);
+  if (nComp > 0) {
+    std::vector<uint> sizes(nComp, 0);
+    for (uint j = 0; j < nItem; j++)
+      if (itemSeen[j] && comp[j] != UINT32_MAX)
+        sizes[comp[j]]++;
+    for (uint j = 0; j < nItem; j++)
+      if (itemSeen[j] && comp[j] != UINT32_MAX && sizes[comp[j]] > 1)
+        cycleItem[j] = 1;
+  }
+
+  // Dependency graph: x -> every input of a recipe that produces x. Following
+  // it from the required items visits everything useful for producing them, so
+  // an item reachable without A can leave the island.
+  std::vector<uint> depOffsets(nItem + 1, 0);
+  for (uint r = 0; r < graph.nRecipe; r++) {
+    if (!recipeSeen[r])
+      continue;
+    depOffsets[graph.output[r] + 1] += (uint) graph.r2i.targetsOf(r).size();
+  }
+  for (uint j = 0; j < nItem; j++)
+    depOffsets[j + 1] += depOffsets[j];
+  std::vector<uint> depTargets(depOffsets[nItem]);
+  {
+    std::vector<uint> cursor(depOffsets.begin(), depOffsets.end() - 1);
+    for (uint r = 0; r < graph.nRecipe; r++) {
+      if (!recipeSeen[r])
+        continue;
+      for (NodeId input : graph.r2i.targetsOf(r))
+        depTargets[cursor[graph.output[r]]++] = input;
+    }
+  }
+
+  // Recipes consuming each item, restricted to the subgraph; producers come
+  // straight from i2r.
+  std::vector<uint> consOffsets(nItem + 1, 0);
+  for (uint r = 0; r < graph.nRecipe; r++) {
+    if (!recipeSeen[r])
+      continue;
+    for (NodeId input : graph.r2i.targetsOf(r))
+      consOffsets[input + 1]++;
+  }
+  for (uint j = 0; j < nItem; j++)
+    consOffsets[j + 1] += consOffsets[j];
+  std::vector<uint> consTargets(consOffsets[nItem]);
+  {
+    std::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
+    for (uint r = 0; r < graph.nRecipe; r++) {
+      if (!recipeSeen[r])
+        continue;
+      for (NodeId input : graph.r2i.targetsOf(r))
+        consTargets[cursor[input]++] = r;
+    }
+  }
+
+  // The items the plan has to supply: the target and everything already held.
+  // Both must stay outside every island, so the reverse walk starts there.
+  std::vector<uint> required;
+  required.push_back(target);
+  for (uint j = 0; j < nItem; j++)
+    if (j != target && held(inventory, j) != 0)
+      required.push_back(j);
+
+  std::vector<uint> candidates;
+  candidates.reserve(nItem);
+  for (uint j = 0; j < nItem; j++)
+    if (itemSeen[j] && cycleItem[j])
+      candidates.push_back(j);
+  if (!cycleItem[target])
+    candidates.push_back(target);
+  for (uint j = 0; j < nItem; j++)
+    if (itemSeen[j] && !cycleItem[j] && j != target)
+      candidates.push_back(j);
+
+  std::vector<uint32_t> visited(nItem, UINT32_MAX);
+  std::vector<uint32_t> itemStamp(nItem, UINT32_MAX);
+  std::vector<uint32_t> recipeStamp(graph.nRecipe, UINT32_MAX);
+  std::vector<uint> queue;
+  std::vector<int32_t> itemPos(nItem, -1);
+  Component island;
+  std::vector<double> y;
+  std::vector<int64_t> scaled;
+
+  const uint nSeen = (uint) std::count(itemSeen.begin(), itemSeen.end(), (uint8_t) 1);
+  bool any = false;
+  int64_t evaluated = 0;
+  int64_t dropped = 0;
+  int64_t skippedWide = 0;
+  int64_t skippedGates = 0;
+  int64_t skippedEscapes = 0;
+
+  for (uint32_t candidate = 0; candidate < candidates.size(); candidate++) {
+    const uint escape = candidates[candidate];
+    if (satelliteSettings.maxSeconds > 0.0 &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() >
+            satelliteSettings.maxSeconds)
+      break;
+
+    // Reverse BFS from the required items, never entering the escape.
+    queue.clear();
+    for (uint j : required) {
+      if (j == escape)
+        continue;
+      visited[j] = candidate;
+      queue.push_back(j);
+    }
+    for (size_t q = 0; q < queue.size(); q++) {
+      const uint x = queue[q];
+      for (uint e = depOffsets[x]; e < depOffsets[x + 1]; e++) {
+        const uint j = depTargets[e];
+        if (j == escape || visited[j] == candidate)
+          continue;
+        visited[j] = candidate;
+        queue.push_back(j);
+      }
+    }
+
+    // I = seen items the walk could not reach, minus the escape itself.
+    if (queue.size() + 1 >= nSeen)
+      continue;  // empty island
+    const uint islandSize = nSeen - queue.size() - 1;
+    if (islandSize > satelliteSettings.maxIslandNodes) {
+      skippedWide++;
+      continue;
+    }
+
+    island.items.clear();
+    for (uint j = 0; j < nItem; j++) {
+      if (!itemSeen[j] || j == escape || visited[j] == candidate)
+        continue;
+      island.items.push_back(j);
+      itemStamp[j] = candidate;
+    }
+
+    // G = every recipe that produces or consumes an island item.
+    island.recipes.clear();
+    for (uint j : island.items) {
+      for (NodeId recipeNode : graph.i2r.targetsOf(j)) {
+        const uint r = recipeNode - nItem;
+        if (!recipeSeen[r] || recipeStamp[r] == candidate)
+          continue;
+        recipeStamp[r] = candidate;
+        island.recipes.push_back(r);
+      }
+      for (uint e = consOffsets[j]; e < consOffsets[j + 1]; e++) {
+        const uint r = consTargets[e];
+        if (recipeStamp[r] == candidate)
+          continue;
+        recipeStamp[r] = candidate;
+        island.recipes.push_back(r);
+      }
+    }
+    if (island.recipes.empty()) {
+      skippedGates++;
+      continue;
+    }
+    if (island.items.size() + island.recipes.size() > satelliteSettings.maxIslandNodes) {
+      skippedWide++;
+      continue;
+    }
+
+    // The closure guarantees this, but never drop G on a surprise: the only net
+    // output of G outside I may be the escape.
+    bool closed = true;
+    for (uint r : island.recipes) {
+      const NodeId produced = graph.output[r];
+      if (itemStamp[produced] == candidate || produced == escape)
+        continue;
+      if (columnCoefficient(graph, r, produced) > 0) {
+        closed = false;
+        break;
+      }
+    }
+    if (!closed) {
+      skippedEscapes++;
+      continue;
+    }
+
+    for (size_t i = 0; i < island.items.size(); i++)
+      itemPos[island.items[i]] = (int32_t) i;
+    evaluated++;
+    if (componentIsDead(graph, escape, island, itemPos, y, scaled)) {
+      for (uint r : island.recipes)
+        drop[r] = 1;
+      any = true;
+      dropped++;
+    }
+    for (NodeId item : island.items)
+      itemPos[item] = -1;
+  }
+
+  if (verbose)
+    std::fprintf(stderr,
+                 "[satellite/directed] evaluated=%lld dropped=%lld (wide=%lld gates=%lld "
+                 "escapes=%lld candidates=%lld) time=%.4f s\n",
+                 (long long) evaluated, (long long) dropped, (long long) skippedWide,
+                 (long long) skippedGates, (long long) skippedEscapes,
+                 (long long) candidates.size(),
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
+                     .count());
+  return any;
+}
+
+// ---------------------------------------------------------------------------
 // The pass
 // ---------------------------------------------------------------------------
 
@@ -451,6 +812,7 @@ bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> ite
                  (long long) skippedWide,
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
                      .count());
+  any |= runDirected(graph, target, itemSeen, recipeSeen, inventory, drop, started);
   return any;
 }
 

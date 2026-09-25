@@ -1021,6 +1021,132 @@ std::vector<std::byte> buildSatelliteSample(uint64_t variantOut) {
   return out;
 }
 
+// A generalized satellite: the island shares an input with the rest of the
+// graph, so it is not an undirected component at all. Handle 9 is a bare
+// workbench.
+//
+//   handle 1 T  <- r0 (x1, ws [9], S x1 + Y x1)      (the target)
+//   handle 2 S  <- r1 (x1, ws [9], CB x1)
+//   handle 3 Y  <- r2 (x1, ws [9], X x1)
+//   handle 4 X     (leaf, shared input)
+//   handle 5 CB <- r3 (x1, ws [9], E x1)             the cut / escape
+//   handle 6 E  <- r4 (x1, ws [9], CB x1 + X x1)
+//              <- r5 (x1, ws [9], W x1)
+//   handle 7 W  <- r6 (x1, ws [9], E x1 + X x1)
+//              <- r7 (x1, ws [9], O x1)
+//   handle 8 O  <- r8 (x1, ws [9], W x1 + X x1)
+//
+// The E/W/O cycle can never net-produce CB, but X is consumed both by it and
+// by the Y -> T chain, so removing CB leaves E/W/O connected to the target in
+// the undirected graph. The escape enumeration still finds it.
+std::vector<std::byte> buildSatelliteLeakSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 9);  // realResourceCount (handle 9 is the workbench)
+  emitVarInt(out, 7);  // entries: handles 1, 2, 3, 5, 6, 7, 8
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (T)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r0 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 9);  // workstation handle 9
+    emitVarInt(out, 2);  // two inputs
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (S)
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // -> handle 3 (Y)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (S)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r1 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 9);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 5);  // -> handle 5 (CB)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 3 (Y)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r2 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 9);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // -> handle 4 (X)
+  }
+
+  emitVarInt(out, 2);  // output delta -> handle 5 (CB)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r3 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 9);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 6);  // -> handle 6 (E)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 6 (E)
+  emitVarInt(out, 2);
+  {
+    emitVarInt(out, 1);  // r4 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 9);
+    emitVarInt(out, 2);
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // -> handle 4 (X)
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // -> handle 5 (CB)
+  }
+  {
+    emitVarInt(out, 1);  // r5 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 9);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 7);  // -> handle 7 (W)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 7 (W)
+  emitVarInt(out, 2);
+  {
+    emitVarInt(out, 1);  // r6 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 9);
+    emitVarInt(out, 2);
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // -> handle 4 (X)
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 6 (E)
+  }
+  {
+    emitVarInt(out, 1);  // r7 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 9);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 8);  // -> handle 8 (O)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 8 (O)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r8 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 9);
+    emitVarInt(out, 2);
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // -> handle 4 (X)
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 7 (W)
+  }
+  return out;
+}
+
 aw::solver::Matrix makeMatrix(
     uint32_t rows, uint32_t cols,
     const std::vector<std::vector<std::pair<uint32_t, int64_t>>> &columns) {
@@ -1803,7 +1929,12 @@ void testPackPruning() {
   {
     std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
     inventory[3] = 10;  // nugget
+    // Satellite elimination is off here: stick is still an unstocked leaf, so
+    // the generalized pass drops the pickaxe recipe no matter what the pack
+    // pass does. This block is about the pack certificate's zero-stock gate.
+    aw::setSatellitePruningEnabled(false);
     const aw::Subgraph sub = aw::reachableSubgraph(3, all, inventory);
+    aw::setSatellitePruningEnabled(true);
     expect(subgraphHasRecipe(sub, 0), "stocked nugget keeps the ingot recipe");
   }
 
@@ -1990,6 +2121,57 @@ void testSatellitePruning() {
   aw::setPackPruningEnabled(true);
 }
 
+// The generalized escape enumeration drops an island that an undirected
+// articulation component cannot see, because the island shares an input with
+// the rest of the graph.
+void testSatelliteLeakPruning() {
+  std::cout << "[Test] generalized satellite elimination\n";
+  const aw::Handle all[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+
+  aw::setTagPruningEnabled(false);
+  aw::setRecipePruningEnabled(false);
+  aw::setPackPruningEnabled(false);
+
+  auto keepsIsland = [&](const aw::Subgraph &sub) {
+    for (uint32_t r : {3u, 4u, 5u, 6u, 7u, 8u})
+      if (!subgraphHasRecipe(sub, r))
+        return false;
+    return true;
+  };
+
+  aw::registerCraftingGraph(buildSatelliteLeakSample());
+  {
+    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(!keepsIsland(sub), "an input-sharing island is dropped");
+  }
+  {
+    // With the shared input and an island item stocked, the island can be
+    // entered and the escape paid back from stock, so r3/r4 stay; the W/O
+    // sub-cycle can still never repay E, so it goes.
+    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    inventory[3] = 10;  // handle 4, item node 3 (X)
+    inventory[5] = 10;  // handle 6, item node 5 (E)
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(subgraphHasRecipe(sub, 3) && subgraphHasRecipe(sub, 4),
+           "a stocked escape keeps the reachable part of the island");
+    for (uint32_t r : {5u, 6u, 7u, 8u})
+      expect(!subgraphHasRecipe(sub, r), "the unpayable sub-cycle is still dropped");
+  }
+
+  aw::setSatellitePruningEnabled(false);
+  aw::registerCraftingGraph(buildSatelliteLeakSample());
+  {
+    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(keepsIsland(sub), "the generalized pass can be switched off");
+  }
+  aw::setSatellitePruningEnabled(true);
+  aw::setTagPruningEnabled(true);
+  aw::setRecipePruningEnabled(true);
+  aw::setPackPruningEnabled(true);
+}
+
 void testSatellitePruningParity() {
   std::cout << "[Test] satellite elimination preserves the optimum\n";
 
@@ -2029,6 +2211,34 @@ void testSatellitePruningParity() {
       }
     }
   }
+  // The input-sharing island: E/W/O can never net-produce the escape, so
+  // dropping it must not move the optimum. Stocking E makes the island usable
+  // and must keep it.
+  {
+    const std::vector<std::byte> bytes = buildSatelliteLeakSample();
+    auto plan = [&](bool prune, aw::Amount amount, aw::Amount eStock) {
+      aw::setSatellitePruningEnabled(prune);
+      aw::registerCraftingGraph(bytes);
+      const aw::Handle all[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+      const aw::CraftingGraph& graph = aw::getCraftingGraph();
+      std::vector<aw::Amount> inventory(graph.nItem, 0);
+      inventory[3] = 10;      // handle 4, item node 3 (X, the shared input)
+      inventory[5] = eStock;  // handle 6, item node 5 (E)
+      const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+      const aw::NodeId target = sub.translate(0);
+      const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
+      return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
+    };
+    for (aw::Amount amount : {1, 4}) {
+      for (aw::Amount stock : {0, 5}) {
+        const auto full = plan(false, amount, stock);
+        const auto pruned = plan(true, amount, stock);
+        expect(full.first == pruned.first, "leak: status agrees with and without the pass");
+        expect(full.second == pruned.second,
+               "leak: optimum agrees with and without the pass");
+      }
+    }
+  }
   aw::setSatellitePruningEnabled(true);
 }
 
@@ -2053,6 +2263,7 @@ int main() {
   testPackPruning();
   testPackPruningParity();
   testSatellitePruning();
+  testSatelliteLeakPruning();
   testSatellitePruningParity();
 
   if (failures == 0) {

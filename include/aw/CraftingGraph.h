@@ -129,9 +129,12 @@ struct PackPruneOptions {
 // Budget for the satellite-elimination pass (docs/algorithm.typ, "孤岛消除").
 //
 // The pass runs inside reachableSubgraph, where the target and the inventory
-// are known: it looks for components that hang off a single articulation point,
-// hold no stock and cannot repay that point, and drops them. Everything else is
-// a budget, and running out of one only means a component is left alone.
+// are known: it looks for groups of recipes whose only net output to the rest
+// of the subgraph is one item, hold no stock inside, and cannot repay that
+// item, and drops them. The undirected articulation components and the wider
+// "input-leaking" islands found by the escape enumeration are two ways to find
+// such groups. Everything else is a budget, and running out of one only means a
+// group is left alone.
 struct SatellitePruneOptions {
   bool enabled = true;
 
@@ -139,6 +142,12 @@ struct SatellitePruneOptions {
   // never a "variants hanging off a basic form" island, and its LP would
   // dominate the pass.
   uint32_t maxComponentNodes = 512;
+
+  // Budget for the generalized escape enumeration. The island of a single
+  // escape can be much wider than an undirected component (the maximal closed
+  // set is taken), so it has its own, larger bound; `maxComponentNodes` still
+  // bounds the undirected pass. The count is items plus recipes.
+  uint32_t maxIslandNodes = 4096;
 
   // Wall-clock budget for one round of the pass, on top of the reachability
   // walk. reachableSubgraph runs at most four rounds. <= 0 means no limit.
