@@ -446,6 +446,51 @@ std::vector<std::byte> buildBulkSample() {
   return out;
 }
 
+// A pack with one "catch-all" tag: T has many members, every member is made
+// from the witness w, so the tag rule would dominate every T <- m edge. The
+// member count is above the tag pass's budget, whose whole point is to keep a
+// tag like this (ATM10 ships two with tens of thousands of members) from
+// expanding into a quadratic universe of pairs. The tag must be skipped, not
+// exploded.
+//
+//   handle 1        w      (leaf, the witness)
+//   handles 2..n+1  m_i    <- (x1, ws [w], w x1)
+//   handle n+2      T      <- (x1, no ws, w x1) and <- (x1, no ws, m_i x1)
+constexpr uint32_t k_wideTagMembers = 6000;
+
+std::vector<std::byte> buildWideTagSample() {
+  const uint32_t n = k_wideTagMembers;
+  const uint32_t witness = 1;
+
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, n + 1);  // realResourceCount: w + m_i
+  emitVarInt(out, n + 1);  // entries: handles 2..n+1 and the tag
+
+  // m_i <- w x1, on workstation w.
+  for (uint32_t i = 0; i < n; i++) {
+    emitVarInt(out, i == 0 ? 2 : 1);  // output delta -> handle 2 + i
+    emitVarInt(out, 1);               // one recipe
+    emitVarInt(out, 1);               // output amount
+    emitVarInt(out, 1);               // one workstation
+    emitVarInt(out, witness);
+    emitVarInt(out, 1);               // one input
+    emitVarInt(out, 1);               // amount
+    emitVarInt(out, witness);         // -> handle 1
+  }
+
+  // T <- w, then T <- m_i for every member.
+  emitVarInt(out, 1);      // output delta -> handle n + 2 (tag)
+  emitVarInt(out, n + 1);  // n + 1 synthetic member edges
+  for (uint32_t i = 0; i <= n; i++) {
+    emitVarInt(out, 1);  // output amount
+    emitVarInt(out, 0);  // no workstations
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);  // amount
+    emitVarInt(out, i == 0 ? witness : 1 + i);  // -> w, else -> m_i
+  }
+  return out;
+}
+
 // The composite-dominance motivating example from docs/algorithm.typ. Black
 // candle can be made from black dye or from black pigment, and black pigment
 // can be made from black dye (256) or from a black candle (224, a net loss).
@@ -1385,6 +1430,30 @@ void testTagPruning() {
   }
 }
 
+void testWideTagPruning() {
+  std::cout << "[Test] oversized tags are skipped\n";
+
+  // The pack pass would spend its own budget scanning this many recipes; the
+  // tag budget is what this test is about.
+  aw::setPackPruningEnabled(false);
+  aw::registerCraftingGraph(buildWideTagSample());
+  aw::setPackPruningEnabled(true);
+
+  expect(aw::getCraftingError() == nullptr, "wide tag sample parses");
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+  const uint32_t n = k_wideTagMembers;
+  expect(graph.nRecipe == 2 * n + 1, "wide tag sample shape");
+  expect(graph.tagEdgeDominated.size() == graph.nRecipe,
+         "wide tag has one pruning flag per recipe");
+
+  // Every T <- m_i edge would be dominated if the tag were part of the
+  // relation; the member edges are the last n + 1 recipes in file order.
+  size_t dominated = 0;
+  for (uint32_t r = n; r < graph.nRecipe; r++)
+    dominated += graph.tagEdgeDominated[r];
+  expect(dominated == 0, "an oversized tag is skipped instead of expanded");
+}
+
 void testTagPruningParity() {
   std::cout << "[Test] tag pruning preserves the optimum\n";
   aw::registerCraftingGraph(buildGlassSample());
@@ -1772,6 +1841,7 @@ int main() {
   testPlanInfeasible();
   testDuplicateRecipes();
   testTagPruning();
+  testWideTagPruning();
   testTagPruningParity();
   testRecipePruning();
   testRecipePruningWorkstations();

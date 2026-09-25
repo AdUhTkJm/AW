@@ -12,8 +12,8 @@ cmake --build build
 # Refresh the sample corpus when a client run is available.
 DUMPS=/mnt/d/IdeaProjects/AppliedWheelchair/runs/client/aw
 if [ -f "$DUMPS/recipes.awr" ]; then
-  cp "$DUMPS/recipes.awr" temp/recipes-small.awr
-  [ -f "$DUMPS/recipes.names.tsv" ] && cp "$DUMPS/recipes.names.tsv" temp/recipes-small.names.tsv
+  cp "$DUMPS/recipes.awr" temp/recipes-vanilla.awr
+  [ -f "$DUMPS/recipes.names.tsv" ] && cp "$DUMPS/recipes.names.tsv" temp/recipes-vanilla.names.tsv
 fi
 
 # Run tests

@@ -38,6 +38,48 @@ using uint = uint32_t;
 bool tagPruning = true;
 bool recipePruning = true;
 
+// ---------------------------------------------------------------------------
+// Budgets
+// ---------------------------------------------------------------------------
+// Both passes build a relation that is quadratic in the width of the graph.
+// What is fine for a vanilla-sized pack is not fine for a 561-mod pack: ATM10
+// ships two "catch-all" ingredients with 63k and 45k members, and items with
+// tens of thousands of recipes. Left unbounded, the tag pass alone asks for
+// ~6e9 pairs (~48 GB) on that pack.
+//
+// Every budget is conservative: running out of it means a tag is left out or
+// an item is left unpruned, so the pass prunes less. Nothing here can mark an
+// edge dominated that is not, because dominance is only ever accepted with a
+// complete justification. The defaults are chosen to leave the vanilla, small
+// and nast test graphs unchanged.
+
+// A tag with more members than this is left out of the dominance relation. Its
+// self cross product is what explodes first, and a tag this wide is a
+// catch-all whose "every other member dominates w" gate can never be met.
+constexpr size_t MAX_TAG_MEMBERS = 1024;
+
+// Ceiling on the sum of |M|^2 over the tags that do take part. |M|^2 covers
+// both the support pairs loop (b) pushes and the adjacency the SCC stage scans,
+// so this bounds the whole per-tag cost. Tags are admitted smallest first, so
+// the budget buys as many of them as possible.
+constexpr uint64_t MAX_TAG_PAIRS = 4'000'000;
+
+// Ceiling on the gating pairs loop (a) contributes. Truncating it only drops
+// (m, w) candidates, which can only make `valid` reject more pairs.
+constexpr uint64_t MAX_WITNESS_PAIRS = 4'000'000;
+
+// A real item with more recipes than this is left unpruned. The composite pass
+// compares every pair of an item's recipes; ATM10 has items with 35k recipes,
+// where comparing all pairs is both quadratic in time and gigabytes of
+// adjacency. Keeping recipes can only cost the planner time, never correctness.
+constexpr size_t MAX_SIBLING_RECIPES = 2048;
+
+// A witness input produced by more recipes than this is skipped, because the
+// composite test has to hold for every producer of the witness. Skipping a
+// witness just leaves its recipe without a guard. ATM10 has 8 items above this
+// (up to 35k producers); the test graphs top out at 1985.
+constexpr size_t MAX_WITNESS_PRODUCERS = 2048;
+
 void prefixSum(std::vector<uint>& v) noexcept {
   v.insert(v.begin(), 0);
   for (size_t i = 0; i + 1 < v.size(); i++)
@@ -363,6 +405,37 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
     if (!graph.i2r.targetsOf(m).empty())
       producible[m] = 1;
 
+  // ---- Budget the tag universe ------------------------------------------
+  // The support pairs below are the cross product of a tag with itself and the
+  // SCC stage scans the same square, so both are quadratic in the member count.
+  // Admit tags smallest first, up to the budget; one that does not fit is
+  // dropped from the relation. Dropping a tag only removes justifications, so
+  // `valid` fires less often and fewer tag edges are ever marked dominated. It
+  // weakens the pass but cannot make it unsound.
+  {
+    std::vector<uint32_t> order;
+    order.reserve(nItem);
+    for (NodeId t = nReal; t < nItem; t++)
+      if (simpleTag[t])
+        order.push_back(t);
+    std::sort(order.begin(), order.end(), [&members](uint32_t a, uint32_t b) noexcept {
+      if (members[a].size() != members[b].size())
+        return members[a].size() < members[b].size();
+      return a < b;
+    });
+
+    uint64_t used = 0;
+    for (uint32_t t : order) {
+      const uint64_t k = members[t].size();
+      const uint64_t cost = k * k;
+      if (k > MAX_TAG_MEMBERS || cost > MAX_TAG_PAIRS - used) {
+        simpleTag[t] = 0;
+        continue;
+      }
+      used += cost;
+    }
+  }
+
   // member -> tags containing it, ascending.
   std::vector<uint> itemTagOffsets(nReal, 0);
   for (NodeId t = nReal; t < nItem; t++)
@@ -411,7 +484,8 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
   std::vector<PairKey> pairs;
   {
     std::vector<NodeId> acc, next, scratch;
-    for (NodeId m = 0; m < nReal; m++) {
+    uint64_t witnessPairs = 0;
+    for (NodeId m = 0; m < nReal && witnessPairs < MAX_WITNESS_PAIRS; m++) {
       const auto recipes = graph.i2r.targetsOf(m);
       if (recipes.empty())
         continue;
@@ -446,9 +520,13 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
         if (acc.empty())
           break;
       }
-      for (NodeId w : acc)
-        if (w != m)
-          pairs.push_back(packPair(m, w));
+      for (NodeId w : acc) {
+        if (w == m)
+          continue;
+        pairs.push_back(packPair(m, w));
+        if (++witnessPairs >= MAX_WITNESS_PAIRS)
+          break;
+      }
     }
   }
   for (NodeId t = nReal; t < nItem; t++) {
@@ -749,6 +827,11 @@ void computeRecipePruning(CraftingGraph& graph) noexcept {
     const auto recipeNodes = graph.i2r.targetsOf(X);
     if (recipeNodes.size() < 2)
       continue;
+    // Comparing every pair of X's recipes costs O(k^2) time and can build a
+    // k^2-edge adjacency. Leave an item with an absurd fan-out unpruned rather
+    // than spend gigabytes on it.
+    if (recipeNodes.size() > MAX_SIBLING_RECIPES)
+      continue;
 
     recs.clear();
     for (NodeId recipeNode : recipeNodes)
@@ -768,6 +851,13 @@ void computeRecipePruning(CraftingGraph& graph) noexcept {
           continue;
         const Amount q = weights[a];
         const auto producers = graph.i2r.targetsOf(Y);
+
+        // The composite has to be at least as good for every producer of Y, so
+        // the inner loop is proportional to producers(Y). Skip a witness that
+        // is itself produced by an absurd number of recipes; that just leaves
+        // R without a guard.
+        if (producers.size() > MAX_WITNESS_PRODUCERS)
+          continue;
 
         // Restrict the siblings to those S that can run on every workstation R
         // can. Otherwise a player who has R's station but not S's would lose the

@@ -7,6 +7,9 @@ java-ref/
 AGENTS.md
 third_party/
 
+# Comparison with other mods
+compare/
+
 # Artifact of docs
 *.pdf
 
