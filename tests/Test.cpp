@@ -310,6 +310,90 @@ std::vector<std::byte> buildGlassSample() {
 //   handle 3 w <- a x1 <- b x1 <- base x1
 //   handle 6 m <- J x1
 //   handle 8 T = {m, w}, handle 9 J = {w, z}, z is a leaf
+// A sample where tag conversions change which route is optimal. Handles 1..6
+// are real, handle 7 is the pseudo-resource T with members {1, 2}.
+//
+//   a <- m1, b <- a, c <- b        (route A: four real crafts to P)
+//   P <- T x5, T <- m1, T <- m2    (route B: one real craft, five tag edges)
+//
+// With every edge costing 1, route A wins (4 < 6). With tag edges free, route
+// B wins (1 < 4).
+std::vector<std::byte> buildFreeTagSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 6);  // realResourceCount
+  emitVarInt(out, 5);  // entries: handles 3, 4, 5, 6, 7
+
+  emitVarInt(out, 3);  // output delta -> handle 3 (a)
+  emitVarInt(out, 1);  // one recipe
+  {
+    emitVarInt(out, 1);  // output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);  // -> handle 1
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);  // amount
+    emitVarInt(out, 1);  // -> handle 1 (m1)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 4 (b)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (a)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 5 (c)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // -> handle 4 (b)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 6 (P)
+  emitVarInt(out, 2);  // two recipes
+  {
+    emitVarInt(out, 1);  // P <- T x5
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 5);
+    emitVarInt(out, 7);  // -> handle 7 (T)
+  }
+  {
+    emitVarInt(out, 1);  // P <- c x1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 5);  // -> handle 5 (c)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 7 (T)
+  emitVarInt(out, 2);  // two synthetic recipes
+  {
+    emitVarInt(out, 1);  // T <- m1
+    emitVarInt(out, 0);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // -> handle 1
+  }
+  {
+    emitVarInt(out, 1);  // T <- m2
+    emitVarInt(out, 0);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2
+  }
+  return out;
+}
+
 std::vector<std::byte> buildCounterSample() {
   std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 7);  // realResourceCount
@@ -1291,6 +1375,49 @@ void testReducedCostFixing() {
   }
 }
 
+void testZeroCostColumns() {
+  std::cout << "[Test] zero-cost columns and the natural cap\n";
+
+  // A free column with nothing to consume it has a natural cap of zero, so the
+  // solver cannot pump it even though the row is only `>=`.
+  {
+    const aw::solver::Matrix A = makeMatrix(2, 2, {{{0, 1}}, {{1, 1}}});
+    const std::vector<int64_t> b = {0, 1};
+    const std::vector<int64_t> c = {0, 1};
+    const aw::solver::Result r = aw::solver::solve(A, b, c);
+    expect(r.status == aw::PlanStatus::OK && r.provenOptimal && r.objective == 1,
+           "an unconsumed free column costs nothing and is not pumped");
+    expect(r.x.size() == 2 && r.x[0] == 0 && r.x[1] == 1,
+           "the natural cap pins the free column to zero");
+  }
+
+  // A free column can need more executions than the objective value: one
+  // costed craft consumes eight tag units. Its domain must come from the
+  // natural cap, not from `cap` itself.
+  {
+    const aw::solver::Matrix A = makeMatrix(2, 2, {{{0, 1}}, {{0, -8}, {1, 1}}});
+    const std::vector<int64_t> b = {0, 1};
+    const std::vector<int64_t> c = {0, 1};
+    const aw::solver::Result r = aw::solver::solve(A, b, c);
+    expect(r.status == aw::PlanStatus::OK && r.provenOptimal && r.objective == 1,
+           "a free column may exceed the objective cap");
+    expect(r.x.size() == 2 && r.x[1] == 1 && r.x[0] >= 8,
+           "the natural cap admits the eight tag units the craft needs");
+  }
+
+  // With no costed column at all there is nothing to minimize, but the model
+  // is still a feasibility problem, not `x = 0`.
+  {
+    const aw::solver::Matrix A = makeMatrix(1, 1, {{{0, 1}}});
+    const std::vector<int64_t> b = {3};
+    const std::vector<int64_t> c = {0};
+    const aw::solver::Result r = aw::solver::solve(A, b, c);
+    expect(r.status == aw::PlanStatus::OK && r.objective == 0 && r.x.size() == 1 &&
+               r.x[0] >= 3,
+           "an all-free model is solved for feasibility");
+  }
+}
+
 void testPlan() {
   std::cout << "[Test] crafting plan\n";
   aw::registerCraftingGraph(buildPlanSample());
@@ -1746,6 +1873,52 @@ void testTagInlining() {
 
   aw::setTagInliningMode(aw::TagInlineMode::OFF);
   aw::registerCraftingGraph(buildGlassSample());
+}
+
+void testFreeTagObjective() {
+  std::cout << "[Test] tag conversions are free\n";
+
+  aw::registerCraftingGraph(buildFreeTagSample());
+  expect(aw::getCraftingError() == nullptr, "free tag sample parses");
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+
+  const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
+  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  inventory[0] = 1000000000ULL;  // m1
+  inventory[1] = 1000000000ULL;  // m2
+
+  const aw::Subgraph sub = aw::reachableSubgraph(6, all, inventory);
+  const aw::NodeId target = sub.translate(5);
+  const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
+
+  expect(r.status == aw::PlanStatus::OK, "free tag plan is feasible");
+
+  int64_t real = 0;
+  int64_t tags = 0;
+  for (uint32_t i = 0; i < sub.graph.nRecipe; i++) {
+    if (sub.graph.output[i] < sub.graph.nReal)
+      real += r.exec[i];
+    else
+      tags += r.exec[i];
+  }
+  expect(real == 1, "the cheap route uses one real craft");
+  // The row is `>=`, so overproduction is legal and harmless (the caller never
+  // executes a tag edge). It must at least cover the five units P consumes.
+  expect(tags >= 5, "the tag covers exactly the consumption at minimum");
+
+  // The fixing pass decides a zero-cost column's neutral domain differently
+  // from a costed one. Check that it does not over-tighten the tag edges.
+  {
+    aw::solver::Options options;
+    options.reducedCostGap = 0.5;
+    const aw::PlanResult fixed = aw::planCrafting(sub, target, 1, inventory, options);
+    expect(fixed.status == aw::PlanStatus::OK, "reduced-cost fixing keeps the plan");
+    int64_t fixedReal = 0;
+    for (uint32_t i = 0; i < sub.graph.nRecipe; i++)
+      if (sub.graph.output[i] < sub.graph.nReal)
+        fixedReal += fixed.exec[i];
+    expect(fixedReal == 1, "reduced-cost fixing keeps the real optimum");
+  }
 }
 
 void testRecipePruning() {
@@ -2308,6 +2481,7 @@ int main() {
   testReachability();
   testSolver();
   testReducedCostFixing();
+  testZeroCostColumns();
   testPlan();
   testPlanInfeasible();
   testDuplicateRecipes();
@@ -2315,6 +2489,7 @@ int main() {
   testWideTagPruning();
   testTagPruningParity();
   testTagInlining();
+  testFreeTagObjective();
   testRecipePruning();
   testRecipePruningWorkstations();
   testRecipePruningParity();

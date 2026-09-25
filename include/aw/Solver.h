@@ -89,8 +89,14 @@ struct Result {
 // `b` has `A.rows` entries, `c` has `A.cols` entries. Negative entries in `b`
 // are free starting stock, matching the balance form used by the planner.
 //
-// Every entry of `c` must be at least 1: the solver bounds the variables with
-// the objective cap, which is only sound when each variable costs something.
+// Every entry of `c` must be at least 0. A costed column is bounded by the
+// objective cap (c_r x_r <= c^T x <= cap). A *zero-cost* column is not, so the
+// solver caps it with the model instead: it bounds the column by the demand
+// plus the consumption capacity of the rows it produces into, under the same
+// cap. Those rows may be `>=` and so allow overproduction; capping anyway is
+// safe because producing more than the plan consumes is pure waste, so an
+// optimum always exists inside the cap. `ceiling` (see `absoluteCap`) is the
+// int64-range fallback when a zero-cost column produces into nothing.
 Result solve(const Matrix& A, std::span<const int64_t> b,
              std::span<const int64_t> c, const Options& options = {});
 

@@ -67,6 +67,10 @@ uint64_t satAdd(uint64_t a, uint64_t b) {
   return a > UINT64_MAX - b ? UINT64_MAX : a + b;
 }
 
+uint64_t satMul(uint64_t a, uint64_t b) {
+  return a != 0 && b > UINT64_MAX / a ? UINT64_MAX : a * b;
+}
+
 int64_t ceilDiv(int64_t numerator, int64_t denominator) {
   return numerator / denominator + (numerator % denominator != 0 ? 1 : 0);
 }
@@ -257,23 +261,95 @@ std::vector<int64_t> expandSolution(std::span<const int64_t> reduced,
   return full;
 }
 
-// One solve with x in [0, cap], x_r <= upper[r] (when given) and
-// sum(c_r x_r) <= cap. `timeLimitSeconds` <= 0 means no limit.
+// Upper bound for every column.
+//
+// A costed column obeys c_r x_r <= c^T x <= cap, so `cap` bounds it. A
+// zero-cost column is not bounded by the objective. It is still bounded in any
+// optimum, though: producing more of a tag than the plan consumes is waste, so
+// there is always an optimal solution with
+//
+//   x_{T<-m} <= (b_T + sum_{consumers} amount * cap) / p_{T<-m}.
+//
+// That is the tag's *natural cap*. It is not implied by the `>=` row above
+// (which lets the column overproduce), but capping at it never removes an
+// optimum. The row capacity is computed once and shared by every member edge,
+// so a tag with thousands of members stays linear. `ceiling` is the
+// int64-range fallback for a zero-cost column that produces into no row.
+std::vector<int64_t> columnDomains(const Matrix &A, const RowMajor &rows,
+                                   std::span<const int64_t> b, std::span<const int64_t> c,
+                                   int64_t cap, int64_t ceiling,
+                                   std::span<const int64_t> upper) {
+  std::vector<int64_t> domain((size_t) A.cols);
+  for (uint32_t r = 0; r < A.cols; r++) {
+    int64_t hi = c[r] != 0 ? cap : ceiling;
+    if (!upper.empty() && upper[r] < hi)
+      hi = upper[r];
+    domain[r] = hi;
+  }
+
+  // Only rows that a zero-cost column produces into need a capacity. Their
+  // negative entries are the consumers, which in the planner are costed
+  // columns, so `cap` bounds them. A zero-cost consumer (a nested tag) is left
+  // at `ceiling`, which only over-estimates the capacity and stays valid.
+  std::vector<uint8_t> needsCapacity((size_t) A.rows, 0);
+  for (uint32_t r = 0; r < A.cols; r++) {
+    if (c[r] != 0)
+      continue;
+    for (uint32_t k = A.colStart[r]; k < A.colStart[r + 1]; k++)
+      if (A.value[k] > 0)
+        needsCapacity[A.rowIndex[k]] = 1;
+  }
+
+  std::vector<uint64_t> rowCapacity((size_t) A.rows, 0);
+  for (uint32_t row = 0; row < A.rows; row++) {
+    if (!needsCapacity[row])
+      continue;
+    // The row's demand plus the most every consumer can take. A negative b
+    // only lowers it, so clamping at 0 is safe.
+    uint64_t consumption = b[row] > 0 ? (uint64_t) b[row] : 0;
+    for (uint32_t j = rows.start[row]; j < rows.start[row + 1]; j++) {
+      if (rows.value[j] >= 0)
+        continue;
+      consumption = satAdd(consumption,
+                           satMul(magnitude(rows.value[j]),
+                                  (uint64_t) domain[rows.column[j]]));
+    }
+    rowCapacity[row] = consumption;
+  }
+
+  for (uint32_t r = 0; r < A.cols; r++) {
+    if (c[r] != 0 || domain[r] == 0)
+      continue;
+    int64_t best = domain[r];
+    for (uint32_t k = A.colStart[r]; k < A.colStart[r + 1]; k++) {
+      const int64_t coefficient = A.value[k];
+      if (coefficient <= 0)
+        continue;
+      const uint64_t candidate = rowCapacity[A.rowIndex[k]] / (uint64_t) coefficient;
+      if (candidate < (uint64_t) best)
+        best = (int64_t) candidate;
+    }
+    domain[r] = best;
+  }
+  return domain;
+}
+
+// One solve with x in [0, domain[r]], x_r <= upper[r] (when given) and
+// sum(c_r x_r) <= cap. `ceiling` is the fallback domain for zero-cost columns.
+// `timeLimitSeconds` <= 0 means no limit.
 Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64_t> b,
                     std::span<const int64_t> c, const Options &options,
-                    int64_t cap, double timeLimitSeconds,
+                    int64_t cap, int64_t ceiling, double timeLimitSeconds,
                     std::span<const int64_t> upper = {}) {
   Result result;
+
+  const std::vector<int64_t> domain = columnDomains(A, rows, b, c, cap, ceiling, upper);
 
   sat::CpModelBuilder model;
   std::vector<sat::IntVar> variables;
   variables.reserve(A.cols);
-  for (uint32_t r = 0; r < A.cols; r++) {
-    int64_t hi = cap;
-    if (!upper.empty() && upper[r] < hi)
-      hi = upper[r];
-    variables.push_back(model.NewIntVar(Domain(0, hi)));
-  }
+  for (uint32_t r = 0; r < A.cols; r++)
+    variables.push_back(model.NewIntVar(Domain(0, domain[r])));
 
   std::vector<sat::IntVar> terms;
   std::vector<int64_t> coefficients;
@@ -309,19 +385,16 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
     terms.push_back(variables[r]);
     coefficients.push_back(c[r]);
   }
-  if (terms.empty()) {
-    // Nothing to optimize; x = 0 is optimal.
-    result.status = PlanStatus::OK;
-    result.provenOptimal = true;
-    result.x.assign(A.cols, 0);
-    return result;
+  if (!terms.empty()) {
+    const sat::LinearExpr objective =
+        sat::LinearExpr::WeightedSum(absl::Span<const sat::IntVar>(terms),
+                                     absl::Span<const int64_t>(coefficients));
+    model.Minimize(objective);
+    model.AddLessOrEqual(objective, cap);
   }
-
-  const sat::LinearExpr objective =
-      sat::LinearExpr::WeightedSum(absl::Span<const sat::IntVar>(terms),
-                                   absl::Span<const int64_t>(coefficients));
-  model.Minimize(objective);
-  model.AddLessOrEqual(objective, cap);
+  // With every objective coefficient zero there is nothing to optimize, but the
+  // constraints still have to be met, so fall through to the solver rather than
+  // claiming x = 0 is optimal.
 
   sat::SatParameters parameters;
   if (timeLimitSeconds > 0)
@@ -493,7 +566,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
           probeBudget = std::min(left, std::max(0.005, left * 0.25));
       }
       if (!limited || probeBudget > 0.0) {
-        const Result probe = solveWithCap(A, rows, b, c, options, probeCap, probeBudget);
+        const Result probe = solveWithCap(A, rows, b, c, options, probeCap, ceiling, probeBudget);
         if (debug)
           std::fprintf(stderr, "[solver] probe cap=%lld budget=%.2f status=%d obj=%lld t=%.3f\n",
                        (long long) probeCap, probeBudget, (int) probe.status,
@@ -523,7 +596,11 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
           bool tightened = false;
           for (uint32_t r = 0; r < A.cols; r++) {
             const double d = lp.reducedCost[r];
-            int64_t bound = probe.objective;
+            // Costed columns are bounded by the objective; zero-cost columns
+            // are not, so their neutral value is the absolute ceiling. The
+            // natural cap in `columnDomains` only tightens them further.
+            const int64_t natural = c[r] != 0 ? probe.objective : ceiling;
+            int64_t bound = natural;
             if (d > threshold + REDUCED_COST_EPSILON) {
               bound = 0;
             } else if (d > REDUCED_COST_EPSILON) {
@@ -532,13 +609,15 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
               // conservative at the boundary.
               if (bound < 1)
                 bound = 1;
-              bound = std::min(bound, probe.objective);
+              // `probe.objective` bounds a costed column, but not a free one.
+              if (c[r] != 0)
+                bound = std::min(bound, probe.objective);
             }
             if (bound <= 0) {
               fixed++;
               continue;
             }
-            if (bound < probe.objective)
+            if (bound < natural)
               tightened = true;
             keep.push_back(r);
             keepUpper.push_back(bound);
@@ -552,7 +631,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
               budget = options.maxTimeSeconds - elapsedSeconds();
             if (!limited || budget > 0.0) {
               Result out = solveWithCap(reduced, reducedRows, b, reducedC, options,
-                                        probe.objective, budget, keepUpper);
+                                        probe.objective, ceiling, budget, keepUpper);
               if (debug)
                 std::fprintf(stderr,
                              "[solver] reduced cols=%u fixed=%u status=%d obj=%lld\n",
@@ -592,7 +671,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
       budget = remaining;
     }
 
-    Result current = solveWithCap(A, rows, b, c, options, cap, budget);
+    Result current = solveWithCap(A, rows, b, c, options, cap, ceiling, budget);
     if (debug)
       std::fprintf(stderr,
                    "[solver] attempt=%d cap=%lld budget=%.2f status=%d obj=%lld "
@@ -636,7 +715,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   // admit some plan. Spend whatever is left on one solve there.
   const double remaining = limited ? options.maxTimeSeconds - elapsedSeconds() : -1.0;
   if (!limited || remaining > 0.0) {
-    const Result last = solveWithCap(A, rows, b, c, options, ceiling, remaining);
+    const Result last = solveWithCap(A, rows, b, c, options, ceiling, ceiling, remaining);
     if (last.status == PlanStatus::OK)
       return last;
     if (last.status == PlanStatus::INFEASIBLE) {

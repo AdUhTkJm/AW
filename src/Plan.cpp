@@ -17,11 +17,15 @@ struct ColumnEntry {
 
 // The problem is
 //
-//   min   sum_r x_r
+//   min   sum_{real r} x_r
 //   s.t.  produced(i) - consumed(i) >= b_i        for every item i
 //         x_r >= 0, x_r integer
 //
-// Here x_r is the number of times recipe `r` is executed.
+// Here x_r is the number of times recipe `r` is executed. A tag edge (a recipe
+// whose output is a synthetic tag node) costs nothing: choosing which member
+// fills a tag slot is free in-game. It is given a natural upper bound by the
+// solver instead -- it can never usefully exceed what the plan consumes of its
+// tag -- so the free column stays finite under the `>=` row above.
 //
 // b_target = amount and b_i = -inventory(i) for every other item.
 PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
@@ -101,7 +105,13 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
     }
   }
 
-  std::vector<int64_t> objective(n, 1);
+  // Tag edges are free. A recipe is a tag edge when it produces a non-real
+  // node; those are exactly the synthetic member edges. Everything else costs
+  // one crafting step. See include/aw/Solver.h for how the solver keeps the
+  // free columns bounded without an equality.
+  std::vector<int64_t> objective(n);
+  for (uint32_t r = 0; r < n; r++)
+    objective[r] = g.output[r] < g.nReal ? 1 : 0;
 
   const solver::Result solved = solver::solve(A, rhs, objective, options);
   result.status = solved.status;
