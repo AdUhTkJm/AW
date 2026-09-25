@@ -154,6 +154,39 @@ struct SatellitePruneOptions {
   double maxSeconds = 0.05;
 };
 
+// Where single-use tag inlining runs. Off by default; it is an experiment.
+//
+// A tag T with member edges `T <- m1 .. T <- mn` and exactly one real consumer
+// `R: a <- T, ...` (with the tag consumed once at amount 1) is replaced by the
+// n real recipes `a <- m1, ...`. The tag node and its n edges disappear and the
+// recipe count drops by one. A larger consumed amount is left alone: it could
+// be served by mixed members, which a homogeneous expansion cannot express.
+//
+// Inlining changes the objective, because the removed tag edges were charged 1
+// each in the solver model. Tag edges are conceptually free; the unit cost is
+// only there to stop the solver turning arbitrary amounts of items into tags.
+// So an inlined optimum is meant to be lower, and the two optima are not
+// compared for equality.
+enum class TagInlineMode : uint8_t {
+  // No inlining.
+  OFF = 0,
+  // Flatten every single-use tag at registration time, using every member
+  // edge, before the dominance passes run. This can re-introduce members that
+  // tag pruning would have dropped, so it can grow the query-time subgraph, but
+  // it gives the passes the flattest graph to reason about.
+  PRE_PRUNE = 1,
+  // Flatten single-use tags at query time, inside reachableSubgraph, after the
+  // walk and every pruning pass. Only recipes that survived are inlined, so a
+  // tag's surviving member edges -- which include a dominated member the player
+  // holds stock of -- are exactly the members that can still be spent. This
+  // keeps the subgraph from growing and keeps stock usable.
+  QUERY_TIME = 2,
+  // PRE_PRUNE followed by QUERY_TIME: persistent single-use tags are flattened
+  // once for the whole corpus, and the subgraph-specific ones are flattened per
+  // query.
+  BOTH = 3,
+};
+
 // Add workstation to base crafting graphs.
 struct CraftingGraph : BaseCraftingGraph {
   // Maps recipes to workstations on which it can be executed.
@@ -244,6 +277,11 @@ void setSatellitePruningEnabled(bool enabled) noexcept;
 bool isSatellitePruningEnabled() noexcept;
 void setSatellitePruningOptions(const SatellitePruneOptions &options) noexcept;
 SatellitePruneOptions getSatellitePruningOptions() noexcept;
+
+// Single-use tag inlining. Like the pack options it is read at registration
+// time, so it must be set before registerCraftingGraph.
+void setTagInliningMode(TagInlineMode mode) noexcept;
+TagInlineMode getTagInliningMode() noexcept;
 
 void registerCraftingGraph(std::span<const std::byte> bytes) noexcept;
 const char *getCraftingError() noexcept;

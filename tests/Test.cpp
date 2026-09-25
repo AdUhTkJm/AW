@@ -1690,6 +1690,64 @@ void testTagPruningParity() {
          "pruning does not change the optimum");
 }
 
+void testTagInlining() {
+  std::cout << "[Test] single-use tag inlining\n";
+  const aw::Handle all[] = {1, 2, 3, 4, 5};
+
+  struct Result {
+    size_t globalRecipes;
+    size_t subRecipes;
+    int64_t real;
+  };
+
+  // Tag edges are conceptually free, so the real part of the plan is the
+  // objective that must not move.
+  auto run = [&](aw::TagInlineMode mode, aw::Amount stainedStock) {
+    aw::setTagInliningMode(mode);
+    aw::registerCraftingGraph(buildGlassSample());
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    std::vector<aw::Amount> inventory(graph.nItem, 0);
+    for (aw::NodeId m = 0; m < graph.nReal; m++)
+      if (graph.i2r.targetsOf(m).empty())
+        inventory[m] = 1000000000ULL;
+    inventory[1] = stainedStock;  // handle 2: stained glass, the dominated member
+    const aw::Subgraph sub = aw::reachableSubgraph(5, all, inventory);
+    const aw::NodeId target = sub.translate(4);
+    const aw::PlanResult r = aw::planCrafting(sub, target, 16, inventory);
+    int64_t real = 0;
+    if (r.status == aw::PlanStatus::OK)
+      for (uint32_t i = 0; i < sub.graph.nRecipe; i++)
+        if (sub.graph.output[i] < sub.graph.nReal)
+          real += r.exec[i];
+    return Result{graph.nRecipe, sub.graph.nRecipe, real};
+  };
+
+  // T = {stained, glass} is consumed once by P, at amount 1. With no stock, tag
+  // pruning drops the stained member edge, so only glass is left to fold in.
+  const auto off = run(aw::TagInlineMode::OFF, 0);
+  const auto pre = run(aw::TagInlineMode::PRE_PRUNE, 0);
+  const auto query = run(aw::TagInlineMode::QUERY_TIME, 0);
+  expect(off.globalRecipes == 5, "off keeps the tag node and its two edges");
+  expect(pre.globalRecipes == 4, "PRE removes the tag edges from the graph");
+  expect(query.subRecipes < off.subRecipes,
+         "QUERY_TIME removes the tag edge from the subgraph");
+  expect(off.real == pre.real && off.real == query.real,
+         "inlining preserves the real optimum");
+
+  // Stocking the dominated member must keep it usable. QUERY_TIME sees the
+  // stocked member edge in the walk and folds it in; filtering members at
+  // registration time would have dropped it and forced a plain glass craft.
+  const auto offStock = run(aw::TagInlineMode::OFF, 1000);
+  const auto preStock = run(aw::TagInlineMode::PRE_PRUNE, 1000);
+  const auto queryStock = run(aw::TagInlineMode::QUERY_TIME, 1000);
+  expect(offStock.real == 16, "stocked stained glass is spent when off");
+  expect(preStock.real == 16, "PRE still spends the stocked member");
+  expect(queryStock.real == 16, "QUERY_TIME still spends the stocked member");
+
+  aw::setTagInliningMode(aw::TagInlineMode::OFF);
+  aw::registerCraftingGraph(buildGlassSample());
+}
+
 void testRecipePruning() {
   std::cout << "[Test] composite recipe pruning\n";
 
@@ -2256,6 +2314,7 @@ int main() {
   testTagPruning();
   testWideTagPruning();
   testTagPruningParity();
+  testTagInlining();
   testRecipePruning();
   testRecipePruningWorkstations();
   testRecipePruningParity();

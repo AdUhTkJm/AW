@@ -250,6 +250,15 @@ void printSummary(const aw::CraftingGraph& graph) {
     std::cout << "inputs per recipe: " << ((double) inputEdges / graph.nRecipe)
           << " average\n";
   }
+  size_t pseudoRecipes = 0, tagDominated = 0, recipeDominated = 0;
+  for (size_t r = 0; r < graph.nRecipe; ++r) {
+    if (graph.output[r] >= graph.nReal) ++pseudoRecipes;
+    if (r < graph.tagEdgeDominated.size() && graph.tagEdgeDominated[r]) ++tagDominated;
+    if (r < graph.recipeDominated.size() && graph.recipeDominated[r]) ++recipeDominated;
+  }
+  std::cout << "tag edges      : " << pseudoRecipes << " (" << tagDominated
+        << " dominated)\n";
+  std::cout << "recipes dominated: " << recipeDominated << '\n';
   if (graph.packDominated.size() == graph.nRecipe) {
     size_t packCerts = 0, packEdges = 0, packZero = 0;
     for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
@@ -697,6 +706,7 @@ int main(int argc, char** argv) {
   std::string planArg;
   std::string invArg;
   std::string profilePath;
+  std::string inlineTags = "off";
   ProfileGuard profileGuard;
   bool check = false;
   bool dump = false;
@@ -736,6 +746,17 @@ int main(int argc, char** argv) {
     } else if (arg == "--pack-seconds") {
       if (i + 1 >= argc || !parseDouble(argv[++i], packSeconds)) {
         std::cerr << "--pack-seconds needs a number of seconds\n";
+        return EXIT_FAILURE;
+      }
+    } else if (arg == "--inline-tags") {
+      if (i + 1 >= argc) {
+        std::cerr << "--inline-tags needs off, pre, post or both\n";
+        return EXIT_FAILURE;
+      }
+      inlineTags = argv[++i];
+      if (inlineTags != "off" && inlineTags != "pre" && inlineTags != "post" &&
+          inlineTags != "both") {
+        std::cerr << "--inline-tags needs off, pre, post or both\n";
         return EXIT_FAILURE;
       }
     } else if (arg == "--profile") {
@@ -814,7 +835,7 @@ int main(int argc, char** argv) {
       std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
                    "                   [--no-prune] [--no-recipe-prune] [--no-pack-prune]\n"
                    "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
-                   "                   [--pack-seconds <s>]\n"
+                   "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                    "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
                    "                   [--names <table.tsv>] [--subgraph <name|handle>]\n"
@@ -832,7 +853,7 @@ int main(int argc, char** argv) {
     std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
                  "                   [--no-prune] [--no-recipe-prune] [--no-pack-prune]\n"
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
-                 "                   [--pack-seconds <s>]\n"
+                 "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                  "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
                  "                   [--names <table.tsv>] [--subgraph <name|handle>]\n"
@@ -849,6 +870,16 @@ int main(int argc, char** argv) {
   }
 
   const std::vector<std::byte> bytes = readFile(path);
+
+  // Single-use tag inlining is read at registration time.
+  if (inlineTags == "pre")
+    aw::setTagInliningMode(aw::TagInlineMode::PRE_PRUNE);
+  else if (inlineTags == "post")
+    aw::setTagInliningMode(aw::TagInlineMode::QUERY_TIME);
+  else if (inlineTags == "both")
+    aw::setTagInliningMode(aw::TagInlineMode::BOTH);
+  else
+    aw::setTagInliningMode(aw::TagInlineMode::OFF);
 
   // The certificate pass runs at registration time, so its options have to be
   // installed before the graph is registered.
@@ -1041,10 +1072,15 @@ int main(int argc, char** argv) {
 
     if (plan.status == aw::PlanStatus::OK) {
       int64_t totalExec = 0;
-      for (int64_t x : plan.exec)
-        totalExec += x;
+      int64_t realExec = 0;
+      for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
+        totalExec += plan.exec[r];
+        if (sub.graph.output[r] < sub.graph.nReal)
+          realExec += plan.exec[r];
+      }
 
-      std::cout << "  total executions: " << totalExec << '\n';
+      std::cout << "  total executions: " << totalExec
+                << ", real: " << realExec << '\n';
       for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
         const int64_t count = plan.exec[r];
         if (count == 0)

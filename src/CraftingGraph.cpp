@@ -10,6 +10,9 @@ CraftingGraph graph;
 // Last parse error, or nullptr when the last registerCraftingGraph succeeded.
 // The Java side reads this to turn a malformed blob into an exception.
 const char *error;
+// Single-use tag inlining mode. Global and read at registration time, matching
+// the other registration-time knobs.
+TagInlineMode tagInlineMode = TagInlineMode::OFF;
 
 namespace {
 
@@ -337,6 +340,239 @@ void canonicalizeRecipes() noexcept {
   graph.nRecipe = newNRecipe;
 }
 
+// ---------------------------------------------------------------------------
+// Single-use tag inlining
+// ---------------------------------------------------------------------------
+// See TagInlineMode in the header. A tag T with member edges `T <- m1 .. T <-
+// mn` and exactly one real consumer `R: a <- T, ...` that consumes T once at
+// amount 1 is replaced by the n real recipes `a <- m1, ...`: the tag node, its
+// n member edges and R disappear, and n recipes take their place. The recipe
+// count therefore drops by exactly one per inlined tag.
+//
+// The transform is a fixpoint, but it cannot cascade into a product of member
+// sets: the n copies of R are consumers of every *other* tag R used, so those
+// tags stop being single-use and are never expanded. Each inlining strictly
+// decreases the recipe count, so the loop terminates.
+
+struct MutableRecipe {
+  NodeId out = 0;
+  Amount outAmt = 0;
+  std::vector<NodeId> ws;
+  std::vector<NodeId> inputs;
+  std::vector<Amount> amounts;
+  // Source recipe id, or UINT32_MAX for a recipe the query-time inliner made.
+  uint32_t origin = UINT32_MAX;
+};
+
+// The core fixpoint. `allowed` is consulted once, while the member sets are
+// collected, and receives the index of a recipe in `recipes`. The query-time
+// path accepts everything: it only ever hands in the recipes that survived
+// reachability and pruning, so a tag's surviving member edges are exactly the
+// members whose stock the player can still spend.
+template <typename Allowed>
+bool inlineSingleUseTagsCore(std::vector<MutableRecipe>& recipes, uint nReal,
+                             uint nItem, Allowed allowed) {
+  if (nItem <= nReal || recipes.empty())
+    return false;
+
+  // A tag is "simple" when every one of its member edges is a single real input
+  // of amount 1 with no workstation. A tag with any other kind of recipe is
+  // left alone, so no nested or weighted tag ever has to be unfolded.
+  std::vector<uint8_t> simpleTag(nItem, 1);
+  std::vector<uint8_t> hasRecipe(nItem, 0);
+  for (const MutableRecipe& rec : recipes) {
+    if (rec.out < nReal)
+      continue;
+    hasRecipe[rec.out] = 1;
+    if (!(rec.ws.empty() && rec.inputs.size() == 1 && rec.amounts[0] == 1 &&
+          rec.inputs[0] < nReal))
+      simpleTag[rec.out] = 0;
+  }
+  for (uint t = nReal; t < nItem; t++)
+    if (!hasRecipe[t])
+      simpleTag[t] = 0;
+
+  std::vector<std::vector<NodeId>> members(nItem);
+  for (uint r = 0; r < recipes.size(); r++) {
+    const MutableRecipe& rec = recipes[r];
+    if (rec.out < nReal || !simpleTag[rec.out] || !allowed(r))
+      continue;
+    members[rec.out].push_back(rec.inputs[0]);
+  }
+
+  // The consumer side of a tag: the number of input slots that name it, the
+  // (single) recipe that owns the slot and the amount it consumes.
+  std::vector<uint32_t> consumerCount(nItem, 0);
+  std::vector<uint32_t> consumerRecipe(nItem, 0);
+  std::vector<Amount> consumerAmount(nItem, 0);
+  bool changed = false;
+
+  while (true) {
+    std::fill(consumerCount.begin(), consumerCount.end(), 0);
+    for (uint i = 0; i < recipes.size(); i++) {
+      const MutableRecipe& rec = recipes[i];
+      if (rec.out >= nReal)
+        continue;
+      for (size_t k = 0; k < rec.inputs.size(); k++) {
+        const NodeId j = rec.inputs[k];
+        if (j < nReal)
+          continue;
+        consumerCount[j]++;
+        consumerRecipe[j] = i;
+        consumerAmount[j] = rec.amounts[k];
+      }
+    }
+
+    uint32_t chosen = UINT32_MAX;
+    for (uint t = nReal; t < nItem; t++) {
+      if (simpleTag[t] && !members[t].empty() && consumerCount[t] == 1 &&
+          consumerAmount[t] == 1) {
+        chosen = t;
+        break;
+      }
+    }
+    if (chosen == UINT32_MAX)
+      break;
+
+    const uint t = chosen;
+    const uint32_t consumer = consumerRecipe[t];
+    const std::vector<NodeId> ms = members[t];
+
+    // The consumer without its tag input. Inputs are strictly ascending, so
+    // this keeps them ordered.
+    std::vector<NodeId> newInputs;
+    std::vector<Amount> newAmounts;
+    newInputs.reserve(recipes[consumer].inputs.size());
+    newAmounts.reserve(recipes[consumer].inputs.size());
+    for (size_t k = 0; k < recipes[consumer].inputs.size(); k++) {
+      if (recipes[consumer].inputs[k] == t)
+        continue;
+      newInputs.push_back(recipes[consumer].inputs[k]);
+      newAmounts.push_back(recipes[consumer].amounts[k]);
+    }
+
+    // Drop the consumer and every member edge of the tag, then add a copy of
+    // the consumer per member. recipes[consumer] is skipped rather than moved,
+    // so it is still readable while the copies are built.
+    std::vector<MutableRecipe> next;
+    next.reserve(recipes.size() - 1);
+    for (uint i = 0; i < recipes.size(); i++) {
+      if (i == consumer || recipes[i].out == t)
+        continue;
+      next.push_back(std::move(recipes[i]));
+    }
+    for (NodeId m : ms) {
+      MutableRecipe copy;
+      copy.out = recipes[consumer].out;
+      copy.outAmt = recipes[consumer].outAmt;
+      copy.ws = recipes[consumer].ws;
+      copy.inputs = newInputs;
+      copy.amounts = newAmounts;
+      const auto it = std::lower_bound(copy.inputs.begin(), copy.inputs.end(), m);
+      const size_t pos = (size_t) (it - copy.inputs.begin());
+      if (pos < copy.inputs.size() && copy.inputs[pos] == m) {
+        copy.amounts[pos] += 1;
+      } else {
+        copy.inputs.insert(copy.inputs.begin() + pos, m);
+        copy.amounts.insert(copy.amounts.begin() + pos, 1);
+      }
+      next.push_back(std::move(copy));
+    }
+    recipes.swap(next);
+    changed = true;
+  }
+  return changed;
+}
+
+// Flattens `graph`'s recipes into the mutable form.
+void extractRecipes(const CraftingGraph& graph, std::vector<MutableRecipe>& out) {
+  out.clear();
+  out.reserve(graph.nRecipe);
+  for (uint r = 0; r < graph.nRecipe; r++) {
+    MutableRecipe rec;
+    rec.out = graph.output[r];
+    rec.outAmt = graph.outputAmt[r];
+    const auto ws = graph.workstations.targetsOf(r);
+    rec.ws.assign(ws.begin(), ws.end());
+    const auto inputs = graph.r2i.targetsOf(r);
+    const auto amounts = graph.r2i.weightsOf(r);
+    rec.inputs.assign(inputs.begin(), inputs.end());
+    rec.amounts.assign(amounts.begin(), amounts.end());
+    out.push_back(std::move(rec));
+  }
+}
+
+// Rebuilds every CSR field from a rewritten recipe list, then merges the
+// duplicates the rewrite may have produced.
+void rebuildFromRecipes(CraftingGraph& graph, std::vector<MutableRecipe>& recipes) {
+  const uint nItem = graph.nItem;
+  const uint newNRecipe = (uint) recipes.size();
+
+  // Rebuild item -> recipe.
+  std::vector<uint> itemOffsets(nItem, 0);
+  for (const MutableRecipe& rec : recipes)
+    itemOffsets[rec.out]++;
+  prefixSum(itemOffsets);
+  graph.i2r.offsets = std::move(itemOffsets);
+  graph.i2r.targets.resize(newNRecipe);
+  graph.i2r.weights.resize(newNRecipe);
+  {
+    std::vector<uint> cursor(graph.i2r.offsets.begin(), graph.i2r.offsets.end() - 1);
+    for (uint r = 0; r < newNRecipe; r++) {
+      const uint slot = cursor[recipes[r].out]++;
+      graph.i2r.targets[slot] = graph.recipeNode(r);
+      graph.i2r.weights[slot] = recipes[r].outAmt;
+    }
+  }
+
+  // Rebuild recipe -> item.
+  graph.r2i.offsets.assign(newNRecipe + 1, 0);
+  for (uint r = 0; r < newNRecipe; r++)
+    graph.r2i.offsets[r + 1] = graph.r2i.offsets[r] + (uint) recipes[r].inputs.size();
+  graph.r2i.targets.resize(graph.r2i.offsets.back());
+  graph.r2i.weights.resize(graph.r2i.offsets.back());
+  for (uint r = 0; r < newNRecipe; r++) {
+    uint slot = graph.r2i.offsets[r];
+    for (size_t k = 0; k < recipes[r].inputs.size(); k++) {
+      graph.r2i.targets[slot] = recipes[r].inputs[k];
+      graph.r2i.weights[slot] = recipes[r].amounts[k];
+      slot++;
+    }
+  }
+
+  // Rebuild workstations.
+  graph.workstations.offsets.assign(newNRecipe + 1, 0);
+  for (uint r = 0; r < newNRecipe; r++)
+    graph.workstations.offsets[r + 1] =
+        graph.workstations.offsets[r] + (uint) recipes[r].ws.size();
+  graph.workstations.targets.resize(graph.workstations.offsets.back());
+  for (uint r = 0; r < newNRecipe; r++) {
+    uint slot = graph.workstations.offsets[r];
+    for (NodeId w : recipes[r].ws)
+      graph.workstations.targets[slot++] = w;
+  }
+
+  graph.output.resize(newNRecipe);
+  graph.outputAmt.resize(newNRecipe);
+  for (uint r = 0; r < newNRecipe; r++) {
+    graph.output[r] = recipes[r].out;
+    graph.outputAmt[r] = recipes[r].outAmt;
+  }
+  graph.nRecipe = newNRecipe;
+
+  canonicalizeRecipes();
+}
+
+// Registration-time inliner: flatten every single-use tag, using every member
+// edge, before the dominance passes run.
+void inlineSingleUseTags(CraftingGraph& graph) noexcept {
+  std::vector<MutableRecipe> recipes;
+  extractRecipes(graph, recipes);
+  if (!inlineSingleUseTagsCore(recipes, graph.nReal, graph.nItem,
+                               [](uint) { return true; }))
+    return;
+  rebuildFromRecipes(graph, recipes);
+}
 }  // namespace
 
 void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
@@ -423,6 +659,12 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
   }
 
   canonicalizeRecipes();
+  const TagInlineMode inlineMode = tagInlineMode;
+  // PRE flattens every single-use tag before the dominance passes see the
+  // graph. The query-time spot (QUERY_TIME / BOTH) runs later, inside
+  // reachableSubgraph, on the recipes that survived reachability and pruning.
+  if (inlineMode == TagInlineMode::PRE_PRUNE || inlineMode == TagInlineMode::BOTH)
+    inlineSingleUseTags(graph);
   computePruning(graph);
 }
 
@@ -436,6 +678,14 @@ void clearCraftingError() noexcept {
 
 const CraftingGraph &getCraftingGraph() noexcept {
   return graph;
+}
+
+void setTagInliningMode(TagInlineMode mode) noexcept {
+  tagInlineMode = mode;
+}
+
+TagInlineMode getTagInliningMode() noexcept {
+  return tagInlineMode;
 }
 
 Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
@@ -592,6 +842,54 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
     }
   }
 
+  // Collect the surviving recipes as an explicit, rewritable list. Everything
+  // below is built from it, which is what lets the query-time inliner add
+  // recipes that have no single source counterpart.
+  std::vector<MutableRecipe> built;
+  built.reserve(nRecipe);
+  for (uint r = 0; r < nRecipe; r++) {
+    if (!recipeSeen[r])
+      continue;
+    MutableRecipe rec;
+    rec.origin = r;
+    rec.out = graph.output[r];
+    rec.outAmt = graph.outputAmt[r];
+    // Workstations are not kept in a Subgraph: reachability already filtered by
+    // the caller's station set, and every synthesized variant inherits them.
+    // They are still copied here so the inliner can tell a synthetic tag edge
+    // from a real recipe.
+    const auto ws = graph.workstations.targetsOf(r);
+    rec.ws.assign(ws.begin(), ws.end());
+    const auto inputs = graph.r2i.targetsOf(r);
+    const auto amounts = graph.r2i.weightsOf(r);
+    rec.inputs.assign(inputs.begin(), inputs.end());
+    rec.amounts.assign(amounts.begin(), amounts.end());
+    built.push_back(std::move(rec));
+  }
+
+  // Query-time single-use inlining. At this point `recipeSeen` already reflects
+  // tag pruning and the inventory guard, so a tag's surviving member edges are
+  // exactly the members the player can still spend -- including a dominated
+  // member that is in stock. Folding them into the consumer removes the tag
+  // node without dropping any option, and without the subgraph growth the
+  // registration-time flattening has.
+  if (tagInlineMode == TagInlineMode::QUERY_TIME || tagInlineMode == TagInlineMode::BOTH) {
+    inlineSingleUseTagsCore(built, graph.nReal, nItem, [](uint) { return true; });
+
+    // A flattened tag has neither producers nor consumers left. Drop it so it
+    // does not become an empty balance row in the plan matrix.
+    std::vector<uint8_t> used(nItem, 0);
+    used[CraftingGraph::itemNode(output)] = 1;
+    for (const MutableRecipe& rec : built) {
+      used[rec.out] = 1;
+      for (NodeId input : rec.inputs)
+        used[input] = 1;
+    }
+    for (NodeId item = 0; item < nItem; item++)
+      if (!used[item])
+        itemSeen[item] = 0;
+  }
+
   // Start filling the remapping between source graph and subgraph.
   // Use UINT32_MAX for empty entries.
   std::vector<NodeId> itemMap(nItem, UINT32_MAX);
@@ -605,71 +903,53 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
         subreal++;
     }
   }
-  std::vector<uint32_t> recipeMap(nRecipe, UINT32_MAX);
-  for (uint recipe = 0; recipe < nRecipe; recipe++) {
-    if (recipeSeen[recipe]) {
-      recipeMap[recipe] = result.recipeOrigin.size();
-      result.recipeOrigin.push_back(recipe);
-    }
-  }
 
-  // Start filling the map itself.
   const uint subItems = result.itemOrigin.size();
-  const uint subRecipes = result.recipeOrigin.size();
+  const uint subRecipes = built.size();
+  result.recipeOrigin.resize(subRecipes);
+  for (uint i = 0; i < subRecipes; i++)
+    result.recipeOrigin[i] = built[i].origin;
 
   BaseCraftingGraph &sub = result.graph;
   sub.nReal = subreal;
   sub.nItem = subItems;
   sub.nRecipe = subRecipes;
 
-  // Fill item -> recipe.
+  // Fill item -> recipe. One edge per recipe, grouped by output item.
   sub.i2r.offsets.assign(subItems + 1, 0);
-  for (uint i = 0; i < subItems; ++i) {
-    uint count = 0;
-    for (NodeId recipeNode : graph.i2r.targetsOf(result.itemOrigin[i])) {
-      if (recipeMap[recipeNode - nItem] != UINT32_MAX)
-        ++count;
-    }
-    sub.i2r.offsets[i + 1] = sub.i2r.offsets[i] + count;
-  }
-  sub.i2r.targets.resize(sub.i2r.offsets.back());
-  sub.i2r.weights.resize(sub.i2r.offsets.back());
-  for (uint i = 0; i < subItems; i++) {
-    NodeId cursor = sub.i2r.offsets[i];
-    const auto targets = graph.i2r.targetsOf(result.itemOrigin[i]);
-    const auto weights = graph.i2r.weightsOf(result.itemOrigin[i]);
-    for (size_t k = 0; k < targets.size(); ++k) {
-      const uint32_t recipe = recipeMap[targets[k] - nItem];
-      if (recipe == UINT32_MAX)
-        continue;
-      sub.i2r.targets[cursor] = sub.nItem + recipe;
-      sub.i2r.weights[cursor++] = weights[k];
+  for (const MutableRecipe &rec : built)
+    sub.i2r.offsets[itemMap[rec.out] + 1]++;
+  for (uint i = 0; i + 1 < sub.i2r.offsets.size(); i++)
+    sub.i2r.offsets[i + 1] += sub.i2r.offsets[i];
+  sub.i2r.targets.resize(subRecipes);
+  sub.i2r.weights.resize(subRecipes);
+  {
+    std::vector<uint> cursor(sub.i2r.offsets.begin(), sub.i2r.offsets.end() - 1);
+    for (uint i = 0; i < subRecipes; i++) {
+      const uint slot = cursor[itemMap[built[i].out]]++;
+      sub.i2r.targets[slot] = sub.nItem + i;
+      sub.i2r.weights[slot] = built[i].outAmt;
     }
   }
 
   sub.output.resize(subRecipes);
   sub.outputAmt.resize(subRecipes);
   for (uint i = 0; i < subRecipes; i++) {
-    const uint recipe = result.recipeOrigin[i];
-    sub.output[i] = itemMap[graph.output[recipe]];
-    sub.outputAmt[i] = graph.outputAmt[recipe];
+    sub.output[i] = itemMap[built[i].out];
+    sub.outputAmt[i] = built[i].outAmt;
   }
 
   // Fill recipe -> item.
   sub.r2i.offsets.assign(subRecipes + 1, 0);
   for (uint i = 0; i < subRecipes; ++i)
-    sub.r2i.offsets[i + 1] = sub.r2i.offsets[i] +
-        graph.r2i.targetsOf(result.recipeOrigin[i]).size();
+    sub.r2i.offsets[i + 1] = sub.r2i.offsets[i] + (uint) built[i].inputs.size();
   sub.r2i.targets.resize(sub.r2i.offsets.back());
   sub.r2i.weights.resize(sub.r2i.offsets.back());
   for (uint i = 0; i < subRecipes; ++i) {
-    int cursor = sub.r2i.offsets[i];
-    const uint recipe = result.recipeOrigin[i];
-    const auto targets = graph.r2i.targetsOf(recipe);
-    const auto weights = graph.r2i.weightsOf(recipe);
-    for (size_t j = 0; j < targets.size(); j++) {
-      sub.r2i.targets[cursor] = itemMap[targets[j]];
-      sub.r2i.weights[cursor++] = weights[j];
+    uint cursor = sub.r2i.offsets[i];
+    for (size_t j = 0; j < built[i].inputs.size(); j++) {
+      sub.r2i.targets[cursor] = itemMap[built[i].inputs[j]];
+      sub.r2i.weights[cursor++] = built[i].amounts[j];
     }
   }
 
