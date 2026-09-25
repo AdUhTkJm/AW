@@ -1200,7 +1200,12 @@ void testPlanInfeasible() {
   expect(aw::getCraftingError() == nullptr, "leaf sample parses");
 
   const aw::Handle all[] = {1};
+  // Satellite elimination now drops the dead raw-material route as well, which
+  // would hide the missing leaf this test is about; keep the pass off so the
+  // reachability shape stays visible.
+  aw::setSatellitePruningEnabled(false);
   const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+  aw::setSatellitePruningEnabled(true);
   expect(sub.graph.nItem == 2 && sub.graph.nRecipe == 1, "leaf subgraph shape");
 
   const aw::NodeId target = sub.translate(0);
@@ -1237,10 +1242,13 @@ void testDuplicateRecipes() {
   // The reachable subgraph inherits the canonicalized graph, so it cannot
   // contain two identical columns either. Recipe pruning is disabled here:
   // item 2 is an unstocked leaf, so it would collapse the three recipes on its
-  // own.
+  // own. Satellite elimination is off for the same reason: the same leaf would
+  // make the whole component dead.
   aw::setRecipePruningEnabled(false);
+  aw::setSatellitePruningEnabled(false);
   const aw::Handle all[] = {1, 2, 3};
   const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+  aw::setSatellitePruningEnabled(true);
   aw::setRecipePruningEnabled(true);
   expect(sub.graph.nItem == 2, "only the output and its leaf are reachable");
   expect(sub.graph.nRecipe == 3, "the subgraph keeps every surviving recipe");
@@ -1468,9 +1476,13 @@ void testTagPruning() {
     expect(keepsStainedEdge(sub), "inventory keeps the dominated tag edge");
   }
   {
-    // The A/B switch turns the drop off entirely.
+    // The A/B switch turns the drop off entirely. Satellite elimination is
+    // disabled too: it drops the same dead tag island independently of the tag
+    // pass.
     aw::setTagPruningEnabled(false);
+    aw::setSatellitePruningEnabled(false);
     const aw::Subgraph sub = aw::reachableSubgraph(5, all);
+    aw::setSatellitePruningEnabled(true);
     aw::setTagPruningEnabled(true);
     expect(keepsStainedEdge(sub), "disabling pruning keeps every tag edge");
   }
@@ -1588,10 +1600,13 @@ void testRecipePruning() {
     expect(r.status == aw::PlanStatus::OK, "a stocked guard still plans");
   }
   {
-    // The A/B switch turns the drop off entirely.
+    // The A/B switch turns the drop off entirely. Satellite elimination is
+    // disabled too: it would drop the same dead island on its own.
     const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
     aw::setRecipePruningEnabled(false);
+    aw::setSatellitePruningEnabled(false);
     const aw::Subgraph sub = aw::reachableSubgraph(4, all);
+    aw::setSatellitePruningEnabled(true);
     aw::setRecipePruningEnabled(true);
     bool kept = false;
     for (aw::NodeId r : sub.recipeOrigin)
@@ -1793,6 +1808,9 @@ void testPackPruning() {
   }
 
   aw::setPackPruningEnabled(false);
+  // Satellite elimination also drops this cycle once the pack is off, so it is
+  // switched off as well to isolate the pack A/B switch.
+  aw::setSatellitePruningEnabled(false);
   aw::registerCraftingGraph(buildPackSample());
   {
     const aw::CraftingGraph &graph = aw::getCraftingGraph();
@@ -1800,6 +1818,7 @@ void testPackPruning() {
     const aw::Subgraph sub = aw::reachableSubgraph(3, all);
     expect(subgraphHasRecipe(sub, 0), "the recipe survives when disabled");
   }
+  aw::setSatellitePruningEnabled(true);
   aw::setPackPruningEnabled(true);
 }
 
@@ -1915,7 +1934,8 @@ void testSatellitePruning() {
 
   // Break-even recycling: 1 plate -> 1 variant -> 1 plate. The island is closed
   // (the variant is made inside it) and can never repay the plate, so it goes.
-  // The ore route stays: ore is a raw material, not a closed island.
+  // The ore route stays only because the ore is stocked: with an empty stock it
+  // is a dead component too.
   aw::registerCraftingGraph(buildSatelliteSample(1));
   {
     const std::vector<aw::Amount> inventory = stockedOre();
@@ -1934,14 +1954,15 @@ void testSatellitePruning() {
            "a stocked island is kept");
   }
   {
-    // Empty stock does not change either answer: the island is still closed and
-    // still unpayable, and the raw-material route is still left alone.
+    // With empty stock the raw-material route is dead too: nothing can run it,
+    // so the certificate accepts the whole component hanging off the target
+    // gear and every recipe goes. This only hides the missing ore; the plan is
+    // infeasible either way.
     std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
-    expect(subgraphHasRecipe(sub, 0) && subgraphHasRecipe(sub, 1),
-           "a raw-material route is left alone");
-    expect(!subgraphHasRecipe(sub, 2) && !subgraphHasRecipe(sub, 3),
-           "a closed island is dropped even with empty stock");
+    expect(sub.graph.nRecipe == 0,
+           "an unstocked raw-material route is dropped too");
+    expect(sub.graph.nItem == 1, "only the target survives");
   }
 
   // Gainful recycling: 1 plate -> 2 variants -> 2 plates. The island repays the
@@ -1981,13 +2002,14 @@ void testSatellitePruningParity() {
 
   for (uint64_t variantOut : {1ULL, 2ULL, 3ULL}) {
     const std::vector<std::byte> bytes = buildSatelliteSample(variantOut);
-    auto plan = [&](bool prune, aw::Amount amount, aw::Amount variantStock) {
+    auto plan = [&](bool prune, aw::Amount amount, aw::Amount oreStock,
+                   aw::Amount variantStock) {
       aw::setSatellitePruningEnabled(prune);
       aw::registerCraftingGraph(bytes);
       const aw::Handle all[] = {1, 2, 3, 4, 5};
       const aw::CraftingGraph& graph = aw::getCraftingGraph();
       std::vector<aw::Amount> inventory(graph.nItem, 0);
-      inventory[3] = 1000000;  // ore
+      inventory[3] = oreStock;
       inventory[2] = variantStock;
       const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
       const aw::NodeId target = sub.translate(0);
@@ -1995,11 +2017,15 @@ void testSatellitePruningParity() {
       return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
     };
     for (aw::Amount amount : {1, 4, 9}) {
-      for (aw::Amount stock : {0, 5}) {
-        const auto full = plan(false, amount, stock);
-        const auto pruned = plan(true, amount, stock);
-        expect(full.first == pruned.first, "status agrees with and without the pass");
-        expect(full.second == pruned.second, "optimum agrees with and without the pass");
+      // An empty ore stock makes the raw-material route dead too; dropping it
+      // hides the missing input but must keep the plan infeasible.
+      for (aw::Amount ore : {0, 1000000}) {
+        for (aw::Amount stock : {0, 5}) {
+          const auto full = plan(false, amount, ore, stock);
+          const auto pruned = plan(true, amount, ore, stock);
+          expect(full.first == pruned.first, "status agrees with and without the pass");
+          expect(full.second == pruned.second, "optimum agrees with and without the pass");
+        }
       }
     }
   }

@@ -31,6 +31,10 @@
 // includes OR-Tools, so it is exempt from -fno-exceptions -fno-rtti; the
 // exported entry point is noexcept and swallows every exception itself.
 
+#ifdef IN_VSCODE
+#define OR_PROTO_DLL // To make VSCode work with #include <ortools/...>
+#endif
+
 #include "Prune.h"
 
 #include <algorithm>
@@ -381,7 +385,6 @@ bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> ite
   int64_t evaluated = 0;
   int64_t dropped = 0;
   int64_t skippedStock = 0;
-  int64_t skippedLeaf = 0;
   int64_t skippedWide = 0;
 
   // Every item A that has a child c in the DFS tree with low[c] >= disc[A] is an
@@ -425,27 +428,11 @@ bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> ite
     for (size_t i = 0; i < comp.items.size(); i++)
       itemPos[comp.items[i]] = (int32_t) i;
 
-    // Only closed islands take part: every item of G has to be producible
-    // inside G. A component that contains a raw material the player does not
-    // hold is dead too (nothing can run), but dropping it would only hide the
-    // input the plan is missing, and it can never change a feasible plan. This
-    // keeps the pass pointed at what it is for: variants that hang off a basic
-    // form and cannot pay it back.
-    if (true) {
-      std::vector<uint8_t> produced(comp.items.size(), 0);
-      for (uint r : comp.recipes) {
-        const int32_t pos = itemPos[graph.output[r]];
-        if (pos >= 0)
-          produced[pos] = 1;
-      }
-      if (std::find(produced.begin(), produced.end(), (uint8_t) 0) != produced.end()) {
-        skippedLeaf++;
-        for (NodeId item : comp.items)
-          itemPos[item] = -1;
-        continue;
-      }
-    }
-
+    // A component that contains a raw material the player does not hold is
+    // dead as well: no plan can run it, so the certificate below accepts it.
+    // Dropping it only hides the input the plan is missing; it can never change
+    // a feasible plan, and it is what exposes the variants that hang off a
+    // basic form and cannot pay it back.
     evaluated++;
     if (componentIsDead(graph, cut, comp, itemPos, y, scaled)) {
       for (uint r : comp.recipes)
@@ -458,10 +445,10 @@ bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> ite
   }
   if (verbose)
     std::fprintf(stderr,
-                 "[satellite] evaluated=%lld dropped=%lld (stock=%lld leaf=%lld wide=%lld) "
+                 "[satellite] evaluated=%lld dropped=%lld (stock=%lld wide=%lld) "
                  "time=%.4f s\n",
                  (long long) evaluated, (long long) dropped, (long long) skippedStock,
-                 (long long) skippedLeaf, (long long) skippedWide,
+                 (long long) skippedWide,
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
                      .count());
   return any;
