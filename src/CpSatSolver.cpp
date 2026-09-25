@@ -46,6 +46,18 @@ bool searchDebug() {
   return enabled;
 }
 
+// AW_SAT_* overrides exist for parameter sweeps during development. A negative
+// value (also the "unset" sentinel) keeps the compiled-in default.
+int envInt(const char *name) {
+  const char *value = std::getenv(name);
+  return value == nullptr ? -1 : (int) std::strtol(value, nullptr, 10);
+}
+
+double envDouble(const char *name, double fallback) {
+  const char *value = std::getenv(name);
+  return value == nullptr ? fallback : std::strtod(value, nullptr);
+}
+
 // Same as abs, but avoids the std::abs(INT64_MIN) trap.
 uint64_t magnitude(int64_t value) {
   return value < 0 ? (uint64_t) (-(value + 1)) + 1 : (uint64_t) value;
@@ -328,6 +340,41 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
   parameters.set_search_branching(operations_research::sat::SatParameters::LP_SEARCH);
   parameters.set_use_feasibility_pump(true);
 
+  // Development overrides for parameter sweeps (see envInt above).
+  if (const int value = envInt("AW_SAT_LINEARIZATION"); value >= 0)
+    parameters.set_linearization_level(value);
+  if (const int value = envInt("AW_SAT_BRANCHING"); value >= 0)
+    parameters.set_search_branching((sat::SatParameters::SearchBranching) value);
+  if (const int value = envInt("AW_SAT_FP"); value >= 0)
+    parameters.set_use_feasibility_pump(value != 0);
+  if (const int value = envInt("AW_SAT_LNS"); value >= 0)
+    parameters.set_use_lns(value != 0);
+  if (const int value = envInt("AW_SAT_LNS_ONLY"); value >= 0)
+    parameters.set_use_lns_only(value != 0);
+  if (const int value = envInt("AW_SAT_PRESOLVE"); value >= 0)
+    parameters.set_cp_model_presolve(value != 0);
+  if (const int value = envInt("AW_SAT_PROBING"); value >= 0)
+    parameters.set_cp_model_probing_level(value);
+  if (const int value = envInt("AW_SAT_SYMMETRY"); value >= 0)
+    parameters.set_symmetry_level(value);
+  if (const int value = envInt("AW_SAT_RANDOMIZE"); value >= 0)
+    parameters.set_randomize_search(value != 0);
+  if (const int value = envInt("AW_SAT_CUTS"); value >= 0)
+    parameters.set_max_num_cuts(value);
+  if (const int value = envInt("AW_SAT_PRESOLVE_ITERS"); value >= 0)
+    parameters.set_max_presolve_iterations(value);
+  if (const int value = envInt("AW_SAT_OBJLB"); value >= 0)
+    parameters.set_use_objective_lb_search(value != 0);
+  if (const int value = envInt("AW_SAT_OBJSHAVE"); value >= 0)
+    parameters.set_use_objective_shaving_search(value != 0);
+  if (envInt("AW_SAT_LOG") > 0) {
+    parameters.set_log_search_progress(true);
+  }
+  if (const int value = envInt("AW_SAT_GAP_X1000"); value >= 0)
+    parameters.set_relative_gap_limit((double) value / 1000.0);
+  if (const int value = envInt("AW_SAT_ABS_GAP"); value >= 0)
+    parameters.set_absolute_gap_limit((double) value);
+
   sat::CpSolverResponse response;
   try {
     response = sat::SolveWithParameters(model.Build(), parameters);
@@ -399,10 +446,14 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
 
   // One LP relaxation serves two purposes: the objective cap (as before) and
   // the reduced costs used by the fixing pass below.
-  const bool needRelaxation = options.objectiveCap == 0 || options.reducedCostGap > 0.0;
+  const bool needRelaxation = options.objectiveCap == 0 ||
+                              envDouble("AW_RC_GAP", options.reducedCostGap) > 0.0;
+  const auto relaxationStart = std::chrono::steady_clock::now();
   const LpResult lp = needRelaxation ? lpRelaxation(A, rows, b, c) : LpResult{};
   if (searchDebug())
-    fprintf(stderr, "[solver] relaxation=%.6g ok=%d\n", lp.value, (int) lp.ok);
+    fprintf(stderr, "[solver] relaxation=%.6g ok=%d time=%.3f\n", lp.value, (int) lp.ok,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - relaxationStart)
+                .count());
 
   const int64_t ceiling = absoluteCap(A, c);
 
@@ -429,10 +480,11 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   // bound: a feasible answer gives an incumbent tight enough for the reduced
   // costs to fix columns, while an infeasible answer proves the integrality
   // gap is too wide to bother. See docs/algorithm.typ.
-  if (options.reducedCostGap > 0.0 && lp.ok && std::isfinite(lp.value) &&
+  if (envDouble("AW_RC_GAP", options.reducedCostGap) > 0.0 && lp.ok && std::isfinite(lp.value) &&
       lp.value >= 0.0 && A.cols > 0) {
     const int64_t probeCap = std::clamp<int64_t>(
-        (int64_t) std::ceil(lp.value + options.reducedCostGap), 1, ceiling);
+        (int64_t) std::ceil(lp.value + envDouble("AW_RC_GAP", options.reducedCostGap)), 1,
+        ceiling);
     if (probeCap < cap) {
       double probeBudget = -1.0;
       if (limited) {
@@ -443,9 +495,9 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
       if (!limited || probeBudget > 0.0) {
         const Result probe = solveWithCap(A, rows, b, c, options, probeCap, probeBudget);
         if (debug)
-          std::fprintf(stderr, "[solver] probe cap=%lld budget=%.2f status=%d obj=%lld\n",
+          std::fprintf(stderr, "[solver] probe cap=%lld budget=%.2f status=%d obj=%lld t=%.3f\n",
                        (long long) probeCap, probeBudget, (int) probe.status,
-                       (long long) probe.objective);
+                       (long long) probe.objective, elapsedSeconds());
         if (probe.status == PlanStatus::NUMERICAL_FAIL)
           return probe;
         // A plan strictly below the probe cap means the cap did not bind, so it
@@ -544,10 +596,11 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
     if (debug)
       std::fprintf(stderr,
                    "[solver] attempt=%d cap=%lld budget=%.2f status=%d obj=%lld "
-                   "bound=%.0f conflicts=%lld branches=%lld\n",
+                   "bound=%.0f conflicts=%lld branches=%lld t=%.3f\n",
                    attempt, (long long) cap, budget, (int) current.status,
                    (long long) current.objective, current.bestBound,
-                   (long long) current.numConflicts, (long long) current.numBranches);
+                   (long long) current.numConflicts, (long long) current.numBranches,
+                   elapsedSeconds());
     if (current.status == PlanStatus::OK) {
       if (!haveBest || current.objective < best.objective) {
         best = std::move(current);

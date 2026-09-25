@@ -10,8 +10,10 @@
 // Note that -fno-exception is also enabled for this file.
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -28,6 +30,17 @@
 namespace {
 
 #define fail(msg, ...) { std::cerr << (msg) << "\n"; return __VA_ARGS__; }
+
+// AW_INSPECT_TIME=1 prints phase timings to stderr. Development aid; off by
+// default so the normal run stays quiet.
+bool inspectTiming() {
+  static const bool enabled = std::getenv("AW_INSPECT_TIME") != nullptr;
+  return enabled;
+}
+
+double since(const std::chrono::steady_clock::time_point &start) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
 
 // Owns the profiling session for the whole run. It stops the profiler however
 // main returns and reports the sample count, which makes a run that was too
@@ -848,7 +861,10 @@ int main(int argc, char** argv) {
     profileGuard.path = profilePath;
   }
 
+  const auto registerStart = std::chrono::steady_clock::now();
   aw::registerCraftingGraph(bytes);
+  if (inspectTiming())
+    std::fprintf(stderr, "[time] register+prune: %.3f s\n", since(registerStart));
   if (const char *error = aw::getCraftingError()) {
     std::cout << "malformed graph: " << error << "\n";
     return EXIT_SUCCESS;
@@ -962,7 +978,10 @@ int main(int argc, char** argv) {
       }
     }
 
+    const auto reachStart = std::chrono::steady_clock::now();
     const aw::Subgraph sub = aw::reachableSubgraph(target, stations, inventory);
+    if (inspectTiming())
+      std::fprintf(stderr, "[time] reachableSubgraph: %.3f s\n", since(reachStart));
     if (sub.graph.nItem == 0) {
       std::cerr << "no subgraph reachable from " << planArg << '\n';
       return EXIT_FAILURE;
@@ -976,8 +995,11 @@ int main(int argc, char** argv) {
               << " recipes\n";
 
     const aw::NodeId targetNode = sub.translate(aw::CraftingGraph::itemNode(target));
+    const auto planStart = std::chrono::steady_clock::now();
     const aw::PlanResult plan =
         aw::planCrafting(sub, targetNode, planAmount, inventory, solverOptions);
+    if (inspectTiming())
+      std::fprintf(stderr, "[time] planCrafting(solve): %.3f s\n", since(planStart));
 
     const char *statusName = "?";
     switch (plan.status) {

@@ -54,8 +54,15 @@ struct Options {
   // the LP relaxation; if one exists, every column is bounded by
   // floor((incumbent - LP) / d_r), so columns whose bound is 0 are dropped and
   // the rest get a tightened domain before the final solve. 0 disables the
-  // pass. Values much above 10 are not worth the extra probe.
-  double reducedCostGap = 10.0;
+  // pass.
+  //
+  // Off by default. The probe is a second full CP-SAT solve (model load and
+  // presolve, plus proving the tightened cap), which measured 0.5-1.0 s on the
+  // recipe graphs. There the integer optimum sits far enough above the LP bound
+  // that the probe is infeasible and fixes nothing, so the time is pure
+  // overhead; enable it explicitly on instances where the optimum is known to
+  // be close to the LP bound.
+  double reducedCostGap = 0.0;
 };
 
 struct Result {
