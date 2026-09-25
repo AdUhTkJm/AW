@@ -961,6 +961,66 @@ std::vector<std::byte> buildPackBranchSample() {
   return out;
 }
 
+// A hub with a variant branch hanging off it, which is the shape satellite
+// elimination is aimed at. Handle 5 is a bare workbench.
+//
+//   handle 1 gear    <- r0 (x1, ws [5], plate x1)      (the target)
+//   handle 2 plate   <- r1 (x1, ws [5], ore x1)        the cut vertex A
+//                    <- r3 (x1, ws [5], variant x1)    the recycling edge
+//   handle 3 variant <- r2 (x{variantOut}, ws [5], plate x1)
+//   handle 4 ore        (leaf)
+//
+// With variantOut == 1 the branch is break-even (1 plate -> 1 variant ->
+// 1 plate) and can never repay the plate, so it is dead. With variantOut == 2
+// it is gainful and must be kept.
+std::vector<std::byte> buildSatelliteSample(uint64_t variantOut) {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 5);  // realResourceCount
+  emitVarInt(out, 3);  // entries: handles 1, 2, 3
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (gear)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // r0 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 5);  // workstation handle 5
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (plate)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (plate)
+  emitVarInt(out, 2);  // two recipes
+  {
+    emitVarInt(out, 1);  // r1 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 5);  // workstation handle 5
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // -> handle 4 (ore)
+  }
+  {
+    emitVarInt(out, 1);  // r3 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 5);  // workstation handle 5
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (variant)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 3 (variant)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, variantOut);  // r2 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 5);  // workstation handle 5
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (plate)
+  }
+  return out;
+}
+
 aw::solver::Matrix makeMatrix(
     uint32_t rows, uint32_t cols,
     const std::vector<std::vector<std::pair<uint32_t, int64_t>>> &columns) {
@@ -1240,7 +1300,13 @@ void testReachability() {
   expect(graph.isRealItem(3) && !graph.isRealItem(4), "handle 5 is a pseudo-resource");
 
   const aw::Handle allowed[] = {3};  // -> item node 2
-  aw::Subgraph sub = aw::reachableSubgraph(1, allowed);
+  // Item node 1 is stocked, so the rD branch stays: satellite elimination keeps
+  // a component that holds stock (it is a way to spend it) even though nothing
+  // produces item node 1. With no stock that branch would be dropped, which is
+  // what testSatellitePruning covers.
+  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  inventory[1] = 10;
+  aw::Subgraph sub = aw::reachableSubgraph(1, allowed, inventory);
 
   // Kept items are the output (0), the pseudo (4) and the pseudo's reachable
   // member (1)
@@ -1829,6 +1895,117 @@ void testPackPruningParity() {
   aw::setPackPruningEnabled(true);
 }
 
+void testSatellitePruning() {
+  std::cout << "[Test] satellite elimination\n";
+  const aw::Handle all[] = {1, 2, 3, 4, 5};
+
+  // The other passes can remove the same island on these tiny graphs (a
+  // break-even 2-cycle is exactly what the composite pass and the pack
+  // certificates look for), so they are switched off here: this test is about
+  // what *this* pass does on its own.
+  aw::setTagPruningEnabled(false);
+  aw::setRecipePruningEnabled(false);
+  aw::setPackPruningEnabled(false);
+
+  auto stockedOre = []() {
+    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    inventory[3] = 1000;  // ore is handle 4, node 3
+    return inventory;
+  };
+
+  // Break-even recycling: 1 plate -> 1 variant -> 1 plate. The island is closed
+  // (the variant is made inside it) and can never repay the plate, so it goes.
+  // The ore route stays: ore is a raw material, not a closed island.
+  aw::registerCraftingGraph(buildSatelliteSample(1));
+  {
+    const std::vector<aw::Amount> inventory = stockedOre();
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(!subgraphHasRecipe(sub, 2), "the break-even island is dropped");
+    expect(!subgraphHasRecipe(sub, 3), "its recycling edge goes with it");
+    expect(subgraphHasRecipe(sub, 0) && subgraphHasRecipe(sub, 1),
+           "the ore route survives because ore is stocked");
+  }
+  {
+    // A stocked variant is a way to spend stock, so nothing may be dropped.
+    std::vector<aw::Amount> inventory = stockedOre();
+    inventory[2] = 10;  // variant is handle 3, node 2
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(subgraphHasRecipe(sub, 2) && subgraphHasRecipe(sub, 3),
+           "a stocked island is kept");
+  }
+  {
+    // Empty stock does not change either answer: the island is still closed and
+    // still unpayable, and the raw-material route is still left alone.
+    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(subgraphHasRecipe(sub, 0) && subgraphHasRecipe(sub, 1),
+           "a raw-material route is left alone");
+    expect(!subgraphHasRecipe(sub, 2) && !subgraphHasRecipe(sub, 3),
+           "a closed island is dropped even with empty stock");
+  }
+
+  // Gainful recycling: 1 plate -> 2 variants -> 2 plates. The island repays the
+  // plate, so it must survive the pass.
+  aw::registerCraftingGraph(buildSatelliteSample(2));
+  {
+    const std::vector<aw::Amount> inventory = stockedOre();
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(subgraphHasRecipe(sub, 2) && subgraphHasRecipe(sub, 3),
+           "a gainful island is kept");
+  }
+
+  // Disabling the pass.
+  aw::setSatellitePruningEnabled(false);
+  aw::registerCraftingGraph(buildSatelliteSample(1));
+  {
+    const std::vector<aw::Amount> inventory = stockedOre();
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(subgraphHasRecipe(sub, 2) && subgraphHasRecipe(sub, 3),
+           "the pass can be switched off");
+  }
+  aw::setSatellitePruningEnabled(true);
+  aw::setTagPruningEnabled(true);
+  aw::setRecipePruningEnabled(true);
+  aw::setPackPruningEnabled(true);
+}
+
+void testSatellitePruningParity() {
+  std::cout << "[Test] satellite elimination preserves the optimum\n";
+
+  auto total = [](const aw::PlanResult& r) {
+    int64_t sum = 0;
+    for (int64_t x : r.exec)
+      sum += x;
+    return sum;
+  };
+
+  for (uint64_t variantOut : {1ULL, 2ULL, 3ULL}) {
+    const std::vector<std::byte> bytes = buildSatelliteSample(variantOut);
+    auto plan = [&](bool prune, aw::Amount amount, aw::Amount variantStock) {
+      aw::setSatellitePruningEnabled(prune);
+      aw::registerCraftingGraph(bytes);
+      const aw::Handle all[] = {1, 2, 3, 4, 5};
+      const aw::CraftingGraph& graph = aw::getCraftingGraph();
+      std::vector<aw::Amount> inventory(graph.nItem, 0);
+      inventory[3] = 1000000;  // ore
+      inventory[2] = variantStock;
+      const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+      const aw::NodeId target = sub.translate(0);
+      const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
+      return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
+    };
+    for (aw::Amount amount : {1, 4, 9}) {
+      for (aw::Amount stock : {0, 5}) {
+        const auto full = plan(false, amount, stock);
+        const auto pruned = plan(true, amount, stock);
+        expect(full.first == pruned.first, "status agrees with and without the pass");
+        expect(full.second == pruned.second, "optimum agrees with and without the pass");
+      }
+    }
+  }
+  aw::setSatellitePruningEnabled(true);
+}
+
 }  // namespace
 
 int main() {
@@ -1849,6 +2026,8 @@ int main() {
   testReducedCostParity();
   testPackPruning();
   testPackPruningParity();
+  testSatellitePruning();
+  testSatellitePruningParity();
 
   if (failures == 0) {
     std::cout << "all tests passed\n";

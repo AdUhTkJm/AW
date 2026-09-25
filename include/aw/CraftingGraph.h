@@ -126,6 +126,25 @@ struct PackPruneOptions {
   double maxSeconds = 2.0;
 };
 
+// Budget for the satellite-elimination pass (docs/algorithm.typ, "孤岛消除").
+//
+// The pass runs inside reachableSubgraph, where the target and the inventory
+// are known: it looks for components that hang off a single articulation point,
+// hold no stock and cannot repay that point, and drops them. Everything else is
+// a budget, and running out of one only means a component is left alone.
+struct SatellitePruneOptions {
+  bool enabled = true;
+
+  // A component with more nodes than this is skipped. A wide component is
+  // never a "variants hanging off a basic form" island, and its LP would
+  // dominate the pass.
+  uint32_t maxComponentNodes = 512;
+
+  // Wall-clock budget for one round of the pass, on top of the reachability
+  // walk. reachableSubgraph runs at most four rounds. <= 0 means no limit.
+  double maxSeconds = 0.05;
+};
+
 // Add workstation to base crafting graphs.
 struct CraftingGraph : BaseCraftingGraph {
   // Maps recipes to workstations on which it can be executed.
@@ -209,6 +228,13 @@ void setPackPruningEnabled(bool enabled) noexcept;
 bool isPackPruningEnabled() noexcept;
 void setPackPruningOptions(const PackPruneOptions &options) noexcept;
 PackPruneOptions getPackPruningOptions() noexcept;
+
+// Satellite elimination is on by default. It is a query-time pass, so it can be
+// switched off independently of the registration-time passes above.
+void setSatellitePruningEnabled(bool enabled) noexcept;
+bool isSatellitePruningEnabled() noexcept;
+void setSatellitePruningOptions(const SatellitePruneOptions &options) noexcept;
+SatellitePruneOptions getSatellitePruningOptions() noexcept;
 
 void registerCraftingGraph(std::span<const std::byte> bytes) noexcept;
 const char *getCraftingError() noexcept;

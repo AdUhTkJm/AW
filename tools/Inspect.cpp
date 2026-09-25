@@ -704,6 +704,8 @@ int main(int argc, char** argv) {
   bool noRecipePrune = false;
   bool noPackPrune = false;
   double packSeconds = -1.0;
+  bool noSatellitePrune = false;
+  double satelliteSeconds = -1.0;
   bool doReach = false;
   bool doTree = false;
   bool doPlan = false;
@@ -724,6 +726,13 @@ int main(int argc, char** argv) {
       noRecipePrune = true;
     } else if (arg == "--no-pack-prune") {
       noPackPrune = true;
+    } else if (arg == "--no-satellite-prune") {
+      noSatellitePrune = true;
+    } else if (arg == "--satellite-seconds") {
+      if (i + 1 >= argc || !parseDouble(argv[++i], satelliteSeconds)) {
+        std::cerr << "--satellite-seconds needs a number of seconds\n";
+        return EXIT_FAILURE;
+      }
     } else if (arg == "--pack-seconds") {
       if (i + 1 >= argc || !parseDouble(argv[++i], packSeconds)) {
         std::cerr << "--pack-seconds needs a number of seconds\n";
@@ -804,6 +813,7 @@ int main(int argc, char** argv) {
     } else if (arg == "-h" || arg == "--help") {
       std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
                    "                   [--no-prune] [--no-recipe-prune] [--no-pack-prune]\n"
+                   "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
                    "                   [--pack-seconds <s>]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                    "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
@@ -821,6 +831,7 @@ int main(int argc, char** argv) {
   if (path.empty()) {
     std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
                  "                   [--no-prune] [--no-recipe-prune] [--no-pack-prune]\n"
+                 "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
                  "                   [--pack-seconds <s>]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                  "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
@@ -848,6 +859,16 @@ int main(int argc, char** argv) {
     if (packSeconds >= 0.0)
       packOptions.maxSeconds = packSeconds;
     aw::setPackPruningOptions(packOptions);
+  }
+
+  // Satellite elimination runs per query, on the reachable subgraph.
+  {
+    aw::SatellitePruneOptions satelliteOptions = aw::getSatellitePruningOptions();
+    if (noSatellitePrune)
+      satelliteOptions.enabled = false;
+    if (satelliteSeconds >= 0.0)
+      satelliteOptions.maxSeconds = satelliteSeconds;
+    aw::setSatellitePruningOptions(satelliteOptions);
   }
 
   // Profile the whole run: decode + canonicalize + prune precompute, the

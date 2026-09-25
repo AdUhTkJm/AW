@@ -23,7 +23,9 @@ endif()
 
 # The hand-written code is exception- and RTTI-free. OR-Tools, Abseil and
 # protobuf need both, so the flags are applied per source file rather than
-# globally; src/CpSatSolver.cpp is the only file that includes OR-Tools.
+# globally; src/CpSatSolver.cpp (the CP-SAT model) and src/SatellitePrune.cpp
+# (the small GLOP LP behind satellite elimination) are the only files that
+# include OR-Tools.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
    set(AW_STRICT_FLAGS -fno-exceptions -fno-rtti)
 else()
@@ -62,7 +64,7 @@ endif()
 
 find_package(ortools CONFIG REQUIRED)
 
-add_library(aw_crafting STATIC src/CraftingGraph.cpp src/CpSatSolver.cpp src/PackPrune.cpp src/Plan.cpp src/Prune.cpp)
+add_library(aw_crafting STATIC src/CraftingGraph.cpp src/CpSatSolver.cpp src/PackPrune.cpp src/Plan.cpp src/Prune.cpp src/SatellitePrune.cpp)
 target_include_directories(aw_crafting PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(aw_crafting PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(aw_crafting PUBLIC cxx_std_20)

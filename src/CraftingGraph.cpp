@@ -573,6 +573,25 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
     }
   }
 
+  // Satellite elimination (docs/algorithm.typ, "孤岛消除"). Unlike the passes
+  // above it needs the target and the inventory, so it cannot be precomputed at
+  // registration time. Dropping a component can expose new articulation points,
+  // hence the repeat; the pass carries its own wall-clock budget, so the loop
+  // bound is only there to keep a pathological graph from spinning.
+  if (isSatellitePruningEnabled()) {
+    constexpr uint MAX_SATELLITE_ROUNDS = 4;
+    const NodeId target = CraftingGraph::itemNode(output);
+    std::vector<uint8_t> drop(nRecipe, 0);
+    for (uint round = 0; round < MAX_SATELLITE_ROUNDS; round++) {
+      std::fill(drop.begin(), drop.end(), 0);
+      if (!computeSatellitePruning(graph, target, itemSeen, recipeSeen, inventory, drop))
+        break;
+      for (uint recipe = 0; recipe < nRecipe; recipe++)
+        disabled[recipe] |= drop[recipe];
+      walk();
+    }
+  }
+
   // Start filling the remapping between source graph and subgraph.
   // Use UINT32_MAX for empty entries.
   std::vector<NodeId> itemMap(nItem, UINT32_MAX);
