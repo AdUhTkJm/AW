@@ -574,6 +574,9 @@ struct PackSearch {
     }
 
     // Branch on the item with the fewest producers that can still be pushed.
+    if (!std::getenv("AW_R3"))
+      return;
+
     NodeId branchItem = UINT32_MAX;
     uint32_t branchProducers = UINT32_MAX;
     for (NodeId i : needList) {
