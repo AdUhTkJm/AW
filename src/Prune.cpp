@@ -1,6 +1,6 @@
 // Dominance pruning for the canonical crafting graph.
 //
-// Three independent passes run once, at registration time:
+// Four independent passes run once, at registration time:
 //
 //   1. Tag-edge pruning deletes synthetic `T <- m` edges whose member m is
 //      cost-dominated by another member of T. It only reasons about real
@@ -28,11 +28,17 @@
 //      an edge, so a slow but material-cheap recipe can beat a fast costly one
 //      without collapsing equal-ratio recipes of different batch size.
 //
+//   4. Dominated-input substitution pruning deletes a real recipe R whose
+//      column loses to a sibling S once one of R's inputs Y is paid for with a
+//      resource w that cost-dominates it. It fills the gap the composite pass
+//      leaves when the witness is a pseudo-item or when its production chain
+//      needs more than one level, see docs/algorithm.typ.
+//
 // The passes can remove an edge that the player might usefully keep, because
 // a stocked input can always be spent directly, and a recipe whose replacement
 // needs an unavailable workstation must survive. The tag and composite passes
-// therefore record the input the certificate relied on, and the two real-recipe
-// passes record the workstations of the replacements, so reachableSubgraph can
+// therefore record the input the certificate relied on, and every real-recipe
+// pass records the workstations of the replacements, so reachableSubgraph can
 // keep a recipe whose guard is in the inventory or whose replacement cannot be
 // run.
 
@@ -41,6 +47,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <span>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -57,6 +64,7 @@ using uint = uint32_t;
 bool tagPruning = true;
 bool recipePruning = true;
 bool directPruning = true;
+bool substitutionPruning = true;
 
 // ---------------------------------------------------------------------------
 // Budgets
@@ -111,6 +119,20 @@ constexpr size_t MAX_SIBLING_RECIPES = 2048;
 // witness just leaves its recipe without a guard. ATM10 has 8 items above this
 // (up to 35k producers); the test graphs top out at 1985.
 constexpr size_t MAX_WITNESS_PRODUCERS = 2048;
+
+// Substitution budgets. The pass compares every pair of an item's recipes and
+// asks the cost relation about the pairs that could cover a deficit, so both
+// the query count and the memo it fills are bounded. Running out only leaves
+// recipes unpruned. A collapse also produces a stock guard: a real input is a
+// single item, but a tag expands into its members, and a catch-all tag is left
+// alone rather than recorded as a per-recipe guard list.
+constexpr uint64_t MAX_SUBSTITUTION_WORK = 64'000'000;
+constexpr uint64_t MAX_SUBSTITUTION_COST_WORK = 256'000'000;
+constexpr uint32_t MAX_SUBSTITUTION_DEPTH = 4;
+constexpr uint32_t MAX_COST_DEPTH = 16;
+constexpr size_t MAX_COST_MEMO = 1'000'000;
+constexpr size_t MAX_SUBSTITUTION_GUARD_ITEMS = 256;
+constexpr size_t MAX_SUBSTITUTION_GUARD_TOTAL = 1'000'000;
 
 void prefixSum(std::vector<uint>& v) noexcept {
   v.insert(v.begin(), 0);
@@ -1469,15 +1491,473 @@ void computeDirectDominancePruning(CraftingGraph& graph,
   }
 }
 
+// ---------------------------------------------------------------------------
+// Dominated-input substitution pruning
+// ---------------------------------------------------------------------------
+// A real recipe R: pX <- q·Y + Z is dominated by a sibling S once one of its
+// inputs Y is replaced by a real resource w that cost-dominates it: every way of
+// producing one unit of Y consumes at least one unit of w. Writing
+// `R_w = R` with the q·Y term moved to q·w,
+//
+//   v_{R_w} = v_R + q·(e_Y - e_w),
+//
+// every concrete inline of Y's production into R is componentwise at most R_w,
+// so `v_S >= v_{R_w}` implies S replaces the whole (produce q Y + R) chain. See
+// docs/algorithm.typ for the lemma and its guards. The motivating family is an
+// input that is only ever a smelted/recycled derivative of a cheaper resource
+// (a tag of tools whose members all cost an ingot), where the direct pass sees
+// two different input rows and the composite pass stops one level too early.
+//
+// The relation is the cost-only `costsRec`, not the tag pass's `alive`: a
+// column-cover justification says Y's recipes can be redirected into w's, which
+// does not bound how much w producing Y consumes. `costsRec` walks Y's recipes
+// (and a consumed tag's members) directly, so unlike the tag pass's candidate
+// closure it also follows real-input chains *upward*: a paxel is made from axes,
+// which is where the ingot enters.
+
+// Adds `delta` to the coefficient of `row` of a sorted sparse column, writing
+// the result to `outItems`/`outCoeffs`.
+void addToColumn(std::span<const NodeId> items, std::span<const Amount> coeffs,
+                 NodeId row, Amount delta, std::vector<NodeId>& outItems,
+                 std::vector<Amount>& outCoeffs) noexcept {
+  outItems.clear();
+  outCoeffs.clear();
+  size_t i = 0;
+  bool inserted = false;
+  while (i < items.size()) {
+    if (!inserted && row < items[i]) {
+      if (delta != 0) {
+        outItems.push_back(row);
+        outCoeffs.push_back(delta);
+      }
+      inserted = true;
+      continue;
+    }
+    if (items[i] == row) {
+      const Amount c = coeffs[i] + delta;
+      if (c != 0) {
+        outItems.push_back(row);
+        outCoeffs.push_back(c);
+      }
+      inserted = true;
+      i++;
+      continue;
+    }
+    outItems.push_back(items[i]);
+    outCoeffs.push_back(coeffs[i]);
+    i++;
+  }
+  if (!inserted && delta != 0) {
+    outItems.push_back(row);
+    outCoeffs.push_back(delta);
+  }
+}
+
+Amount coeffOf(std::span<const NodeId> items, std::span<const Amount> coeffs,
+               NodeId row) noexcept {
+  const auto it = std::lower_bound(items.begin(), items.end(), row);
+  if (it == items.end() || *it != row)
+    return 0;
+  return coeffs[it - items.begin()];
+}
+
+// Expands a collapsed input into the real items whose stock must be zero for
+// the substitution to apply: the item itself, or every member of a tag. A tag
+// wider than the cap is refused, because a catch-all tag is not worth a
+// per-recipe guard list.
+bool collectGuards(const CraftingGraph& graph, NodeId y,
+                   std::vector<NodeId>& out) noexcept {
+  out.clear();
+  if (y < graph.nReal) {
+    out.push_back(y);
+    return true;
+  }
+  const auto recipes = graph.i2r.targetsOf(y);
+  if (recipes.size() > MAX_SUBSTITUTION_GUARD_ITEMS)
+    return false;
+  for (NodeId recipeNode : recipes) {
+    const auto inputs = graph.r2i.targetsOf(recipeNode - graph.nItem);
+    if (inputs.size() != 1)
+      return false;
+    out.push_back(inputs[0]);
+  }
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  return true;
+}
+
+// Context of one cost query: a memo over (item, dominator) pairs and a work
+// budget. `costsRec(y, w)` is true when every way of producing one unit of y
+// consumes at least one unit of w. A pseudo-item is a simple tag, so the cost
+// is the AND over its members; a real item is the AND over its recipes, each of
+// which needs one amount-qualified input that is w or itself costs w. Cycles
+// are cut to `false`, which is the least fixpoint: it can only drop derivations,
+// so it prunes less.
+struct CostContext {
+  const CraftingGraph* graph = nullptr;
+  const std::vector<uint8_t>* simpleTag = nullptr;
+  const std::vector<std::vector<NodeId>>* tagMembers = nullptr;
+  // Exact mode only: an item whose producers can emit a batch has a surplus a
+  // plan can spend for free, so the per-unit bound is not enough. Requiring
+  // every item on the chain to be unit-output removes the surplus.
+  const std::vector<uint8_t>* unitOutput = nullptr;
+  bool requireUnit = false;
+  std::unordered_map<uint64_t, uint8_t>* memo = nullptr;  // 1=in progress, 2=false, 3=true
+  uint64_t work = 0;
+};
+
+bool costsRec(CostContext& ctx, NodeId y, NodeId w, uint32_t depth) noexcept {
+  if (ctx.work == 0)
+    return false;
+  ctx.work--;
+  if (y == w)
+    return true;
+  if (depth == 0)
+    return false;
+
+  const uint64_t key = ((uint64_t) y << 32) | (uint64_t) w;
+  const auto it = ctx.memo->find(key);
+  if (it != ctx.memo->end()) {
+    if (it->second == 1)
+      return false;  // on the current path: the least fixpoint has no cycle
+    return it->second == 3;
+  }
+  const bool memoize = ctx.memo->size() < MAX_COST_MEMO;
+  if (memoize)
+    (*ctx.memo)[key] = 1;
+
+  const CraftingGraph& graph = *ctx.graph;
+  bool result;
+  if (y >= graph.nReal) {
+    result = (*ctx.simpleTag)[y] != 0;
+    if (result)
+      for (NodeId z : (*ctx.tagMembers)[y]) {
+        if (ctx.requireUnit && !(*ctx.unitOutput)[z]) {
+          result = false;
+          break;
+        }
+        if (!costsRec(ctx, z, w, depth - 1)) {
+          result = false;
+          break;
+        }
+      }
+  } else {
+    if (ctx.requireUnit && !(*ctx.unitOutput)[y])
+      return false;
+    const auto recipes = graph.i2r.targetsOf(y);
+    // A raw material is gathered, so it does not consume a crafted w.
+    result = !recipes.empty();
+    for (NodeId recipeNode : recipes) {
+      if (!result)
+        break;
+      const uint r = recipeNode - graph.nItem;
+      const Amount out = graph.outputAmt[r];
+      const auto inputs = graph.r2i.targetsOf(r);
+      const auto weights = graph.r2i.weightsOf(r);
+      bool ok = false;
+      for (size_t k = 0; k < inputs.size(); k++) {
+        if (weights[k] < out)
+          continue;
+        const NodeId j = inputs[k];
+        if (j == w || costsRec(ctx, j, w, depth - 1)) {
+          ok = true;
+          break;
+        }
+      }
+      if (!ok) {
+        result = false;
+        break;
+      }
+    }
+  }
+
+  if (memoize)
+    (*ctx.memo)[key] = result ? 3 : 2;
+  return result;
+}
+
+// True when the column `cur` can be raised above the sibling column `s` by
+// moving demand from some of `cur`'s inputs onto a cost dominator. `collapses`
+// receives the inputs that were moved. The first row where `cur` exceeds `s` is
+// covered by moving `min(q_Y, deficit)` units from an input Y with
+// `costsRec(Y, d)`, then the next deficit is handled the same way.
+bool substitutionDominates(CostContext& ctx, std::span<const NodeId> curItems,
+                           std::span<const Amount> curCoeffs,
+                           std::span<const NodeId> sItems,
+                           std::span<const Amount> sCoeffs, uint32_t depth,
+                           uint64_t& work, std::vector<NodeId>& collapses) noexcept {
+  if (work == 0)
+    return false;
+  work--;
+
+  // The first row where `cur` exceeds `s`.
+  NodeId d = UINT32_MAX;
+  {
+    size_t i = 0, j = 0;
+    while (i < curItems.size() || j < sItems.size()) {
+      NodeId next = UINT32_MAX;
+      if (i < curItems.size())
+        next = std::min(next, curItems[i]);
+      if (j < sItems.size())
+        next = std::min(next, sItems[j]);
+      const Amount cu =
+          (i < curItems.size() && curItems[i] == next) ? curCoeffs[i++] : 0;
+      const Amount sv = (j < sItems.size() && sItems[j] == next) ? sCoeffs[j++] : 0;
+      if (cu > sv) {
+        d = next;
+        break;
+      }
+    }
+  }
+  if (d == UINT32_MAX)
+    return !collapses.empty();
+  if (depth == 0)
+    return false;
+  // A produced row cannot be fixed by paying with a dominator, and a dominator
+  // is always a real item, so a deficit on a pseudo-item row is out of reach.
+  if (coeffOf(curItems, curCoeffs, d) > 0 || d >= ctx.graph->nReal)
+    return false;
+
+  const Amount deficit = coeffOf(curItems, curCoeffs, d) - coeffOf(sItems, sCoeffs, d);
+  if (deficit <= 0)
+    return false;
+
+  std::vector<NodeId> tmpItems, nextItems;
+  std::vector<Amount> tmpCoeffs, nextCoeffs;
+
+  for (size_t k = 0; k < curItems.size(); k++) {
+    const NodeId y = curItems[k];
+    const Amount coeff = curCoeffs[k];
+    if (coeff >= 0 || y == d)
+      continue;
+    if (!costsRec(ctx, y, d, MAX_COST_DEPTH))
+      continue;
+    Amount t = std::min(-coeff, deficit);
+    // Moving t units of y onto d must not push y's own row into deficit.
+    const Amount room = coeffOf(sItems, sCoeffs, y) - coeff;
+    if (t > room)
+      t = room;
+    if (t <= 0)
+      continue;
+
+    addToColumn(curItems, curCoeffs, y, t, tmpItems, tmpCoeffs);
+    addToColumn(tmpItems, tmpCoeffs, d, -t, nextItems, nextCoeffs);
+
+    const size_t before = collapses.size();
+    collapses.push_back(y);
+    if (substitutionDominates(ctx, nextItems, nextCoeffs, sItems, sCoeffs,
+                              depth - 1, work, collapses))
+      return true;
+    collapses.resize(before);
+  }
+  return false;
+}
+
+// `compGuards[c]` is the union of the guards on every edge of every member of
+// component c and of every component reachable from it. Tarjan numbers the
+// components in reverse topological order, so a component's successors are
+// already final.
+void computeCompGuards(const std::vector<std::vector<uint32_t>>& adj,
+                       const std::vector<int32_t>& comp,
+                       const std::vector<std::vector<NodeId>>& edgeGuards,
+                       std::vector<std::vector<NodeId>>& compGuards) noexcept {
+  const uint32_t nComp = (uint32_t) compGuards.size();
+  std::vector<std::vector<uint32_t>> members(nComp);
+  for (uint32_t a = 0; a < adj.size(); a++)
+    members[comp[a]].push_back(a);
+  for (uint32_t c = 0; c < nComp; c++) {
+    std::vector<NodeId>& g = compGuards[c];
+    for (uint32_t a : members[c]) {
+      const std::vector<NodeId>& own = edgeGuards[a];
+      g.insert(g.end(), own.begin(), own.end());
+    }
+    for (uint32_t a : members[c])
+      for (uint32_t j : adj[a])
+        if ((uint32_t) comp[j] != c) {
+          const std::vector<NodeId>& succ = compGuards[comp[j]];
+          g.insert(g.end(), succ.begin(), succ.end());
+        }
+    std::sort(g.begin(), g.end());
+    g.erase(std::unique(g.begin(), g.end()), g.end());
+  }
+}
+
+void computeSubstitutionPruning(CraftingGraph& graph, const RecipeVectors& vec) noexcept {
+  graph.recipeSubstituted.assign(graph.nRecipe, 0);
+  graph.recipeSubstitutedGuards.assign(graph.nRecipe, {});
+  graph.recipeSubstitutedDominatorWorkstations.assign(graph.nRecipe, {});
+
+  const uint nReal = graph.nReal;
+  const uint nItem = graph.nItem;
+  if (nReal == 0 || graph.nRecipe == 0)
+    return;
+
+  // Simple tags and their members, matching the tag pass's definition: every
+  // synthetic recipe has exactly one real input and no workstation.
+  std::vector<uint8_t> simpleTag(nItem, 0);
+  std::vector<std::vector<NodeId>> tagMembers(nItem);
+  for (NodeId t = nReal; t < nItem; t++) {
+    const auto recipes = graph.i2r.targetsOf(t);
+    if (recipes.empty())
+      continue;
+    std::vector<NodeId> ms;
+    ms.reserve(recipes.size());
+    bool simple = true;
+    for (NodeId recipeNode : recipes) {
+      const uint r = recipeNode - graph.nItem;
+      const auto inputs = graph.r2i.targetsOf(r);
+      if (!graph.workstations.targetsOf(r).empty() || inputs.size() != 1 ||
+          inputs[0] >= nReal) {
+        simple = false;
+        break;
+      }
+      ms.push_back(inputs[0]);
+    }
+    if (!simple)
+      continue;
+    std::sort(ms.begin(), ms.end());
+    ms.erase(std::unique(ms.begin(), ms.end()), ms.end());
+    // A catch-all tag is neither worth a per-recipe guard list nor cheap to
+    // walk, so it is left out of the cost relation entirely.
+    if (ms.size() > MAX_SUBSTITUTION_GUARD_ITEMS)
+      continue;
+    simpleTag[t] = 1;
+    tagMembers[t] = std::move(ms);
+  }
+
+  std::unordered_map<uint64_t, uint8_t> memo;
+  CostContext ctx;
+  ctx.graph = &graph;
+  ctx.simpleTag = &simpleTag;
+  ctx.tagMembers = &tagMembers;
+  ctx.memo = &memo;
+  ctx.work = MAX_SUBSTITUTION_COST_WORK;
+
+  // Exact mode needs the batching guard; nonoptimal mode waives it, as the tag
+  // pass does.
+  std::vector<uint8_t> unitOutput;
+  if (!options().nonoptimal) {
+    unitOutput.assign(nItem, 1);
+    for (NodeId m = 0; m < nReal; m++)
+      for (NodeId recipeNode : graph.i2r.targetsOf(m))
+        if (graph.outputAmt[recipeNode - graph.nItem] != 1) {
+          unitOutput[m] = 0;
+          break;
+        }
+  }
+  ctx.unitOutput = &unitOutput;
+  ctx.requireUnit = !options().nonoptimal;
+
+  uint64_t work = MAX_SUBSTITUTION_WORK;
+  size_t guardTotal = 0;
+
+  std::vector<uint32_t> recs;
+  std::vector<std::vector<uint32_t>> adj;
+  std::vector<std::vector<NodeId>> edgeGuards;
+  std::vector<uint> adjOffsets;
+  std::vector<uint32_t> adjTargets;
+  std::vector<int32_t> comp;
+  std::vector<uint32_t> repOfComp;
+  std::vector<uint8_t> keep;
+  std::vector<std::vector<NodeId>> compWs;
+  std::vector<std::vector<NodeId>> compGuards;
+
+  std::vector<NodeId> collapses, resolved, tmpGuards;
+
+  for (NodeId X = 0; X < nReal && work != 0; X++) {
+    const auto recipeNodes = graph.i2r.targetsOf(X);
+    if (recipeNodes.size() < 2)
+      continue;
+    if (recipeNodes.size() > MAX_SIBLING_RECIPES)
+      continue;
+
+    recs.clear();
+    for (NodeId recipeNode : recipeNodes)
+      recs.push_back(recipeNode - graph.nItem);
+    const uint k = (uint) recs.size();
+
+    adj.assign(k, {});
+    edgeGuards.assign(k, {});
+
+    for (uint i = 0; i < k && work != 0; i++) {
+      const uint R = recs[i];
+      const auto uItems = vec.itemsOf(R);
+      const auto uCoeffs = vec.coeffsOf(R);
+      for (uint j = 0; j < k && work != 0; j++) {
+        if (i == j)
+          continue;
+        const uint S = recs[j];
+        collapses.clear();
+        if (!substitutionDominates(ctx, uItems, uCoeffs, vec.itemsOf(S),
+                                   vec.coeffsOf(S), MAX_SUBSTITUTION_DEPTH, work,
+                                   collapses))
+          continue;
+        // Resolve the guards; a collapsed tag too wide to list makes the edge
+        // unusable, so it is dropped along with the rest of this attempt.
+        tmpGuards.clear();
+        bool guardOk = true;
+        for (NodeId y : collapses) {
+          if (!collectGuards(graph, y, resolved)) {
+            guardOk = false;
+            break;
+          }
+          tmpGuards.insert(tmpGuards.end(), resolved.begin(), resolved.end());
+        }
+        if (!guardOk)
+          continue;
+        adj[i].push_back(j);
+        std::vector<NodeId>& eg = edgeGuards[i];
+        eg.insert(eg.end(), tmpGuards.begin(), tmpGuards.end());
+      }
+      std::vector<NodeId>& eg = edgeGuards[i];
+      std::sort(eg.begin(), eg.end());
+      eg.erase(std::unique(eg.begin(), eg.end()), eg.end());
+    }
+
+    bool any = false;
+    for (uint i = 0; i < k && !any; i++)
+      any = !adj[i].empty();
+    if (!any)
+      continue;
+
+    buildAdjacency(adj, adjOffsets, adjTargets);
+    const uint32_t nComp =
+        markSinkRepresentatives(k, adjOffsets, adjTargets, comp, repOfComp, keep);
+    compWs.assign(nComp, {});
+    computeCompWorkstations(graph, adj, comp, repOfComp, recs, compWs);
+    compGuards.assign(nComp, {});
+    computeCompGuards(adj, comp, edgeGuards, compGuards);
+
+    for (uint i = 0; i < k; i++) {
+      if (keep[i])
+        continue;
+      const std::vector<NodeId>& guards = compGuards[comp[i]];
+      // A path union wider than the per-recipe cap would make the query-time
+      // guard scan unbounded, so the recipe is left alive instead.
+      if (guards.size() > MAX_SUBSTITUTION_GUARD_ITEMS ||
+          guardTotal + guards.size() > MAX_SUBSTITUTION_GUARD_TOTAL)
+        continue;
+      const uint r = recs[i];
+      graph.recipeSubstituted[r] = 1;
+      graph.recipeSubstitutedGuards[r] = guards;
+      graph.recipeSubstitutedDominatorWorkstations[r] = compWs[comp[i]];
+      guardTotal += guards.size();
+    }
+  }
+}
+
 // Each recipe pass guarantees a surviving recipe per real item on its own, but
 // their keep sets need not overlap. If together they flag every recipe of an
-// item the item would have no producer at all, so clear both flags on one
+// item the item would have no producer at all, so clear every flag on one
 // recipe: keeping a recipe is always sound.
 void ensureRecipeSurvivors(CraftingGraph& graph) noexcept {
   const uint nReal = graph.nReal;
   const bool haveComposite = graph.recipeDominated.size() == graph.nRecipe &&
                              graph.recipeDominatorWorkstations.size() == graph.nRecipe;
   const bool haveDirect = graph.recipeDirectDominated.size() == graph.nRecipe;
+  const bool haveSubstitution =
+      graph.recipeSubstituted.size() == graph.nRecipe &&
+      graph.recipeSubstitutedGuards.size() == graph.nRecipe;
   for (NodeId X = 0; X < nReal; X++) {
     const auto recipeNodes = graph.i2r.targetsOf(X);
     if (recipeNodes.empty())
@@ -1487,7 +1967,8 @@ void ensureRecipeSurvivors(CraftingGraph& graph) noexcept {
       const uint r = recipeNode - graph.nItem;
       const bool composite = haveComposite && graph.recipeDominated[r];
       const bool direct = haveDirect && graph.recipeDirectDominated[r];
-      if (!composite && !direct) {
+      const bool substituted = haveSubstitution && graph.recipeSubstituted[r];
+      if (!composite && !direct && !substituted) {
         anyKept = true;
         break;
       }
@@ -1502,6 +1983,11 @@ void ensureRecipeSurvivors(CraftingGraph& graph) noexcept {
     }
     if (haveDirect)
       graph.recipeDirectDominated[r] = 0;
+    if (haveSubstitution) {
+      graph.recipeSubstituted[r] = 0;
+      graph.recipeSubstitutedGuards[r].clear();
+      graph.recipeSubstitutedDominatorWorkstations[r].clear();
+    }
   }
 }
 
@@ -1516,6 +2002,7 @@ void computePruning(CraftingGraph& graph) noexcept {
   buildRecipeVectors(graph, vec);
   computeRecipePruning(graph, vec);
   computeDirectDominancePruning(graph, vec);
+  computeSubstitutionPruning(graph, vec);
   ensureRecipeSurvivors(graph);
 
   computePackPruning(graph);
@@ -1543,6 +2030,14 @@ void setDirectDominancePruningEnabled(bool enabled) noexcept {
 
 bool isDirectDominancePruningEnabled() noexcept {
   return directPruning;
+}
+
+void setSubstitutionPruningEnabled(bool enabled) noexcept {
+  substitutionPruning = enabled;
+}
+
+bool isSubstitutionPruningEnabled() noexcept {
+  return substitutionPruning;
 }
 
 }  // namespace aw

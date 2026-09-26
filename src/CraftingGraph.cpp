@@ -794,6 +794,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   const bool pruneTag = isTagPruningEnabled();
   const bool pruneRecipe = isRecipePruningEnabled();
   const bool pruneDirect = isDirectDominancePruningEnabled();
+  const bool pruneSubstitution = isSubstitutionPruningEnabled();
   const bool prunePack = isPackPruningEnabled();
 
   std::vector<uint8_t> itemSeen(nItem, 0);
@@ -871,6 +872,33 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
           }
           if (runnable)
             continue;
+        }
+
+        // A substituted real recipe pays for one of its inputs with a
+        // cost-dominating resource, so it is only dropped when none of the
+        // collapsed inputs can be spent from stock and one of the replacements
+        // can run. The collapsed tag members make the guard a set.
+        if (pruneSubstitution && recipe < graph.recipeSubstituted.size() &&
+            graph.recipeSubstituted[recipe] &&
+            recipe < graph.recipeSubstitutedGuards.size()) {
+          bool stocked = false;
+          for (NodeId guard : graph.recipeSubstitutedGuards[recipe]) {
+            if (guard < inventory.size() && inventory[guard] != 0) {
+              stocked = true;
+              break;
+            }
+          }
+          if (!stocked && recipe < graph.recipeSubstitutedDominatorWorkstations.size()) {
+            bool runnable = false;
+            for (NodeId station : graph.recipeSubstitutedDominatorWorkstations[recipe]) {
+              if (station < allowed.size() && allowed[station]) {
+                runnable = true;
+                break;
+              }
+            }
+            if (runnable)
+              continue;
+          }
         }
 
         // A pseudo-resource's synthetic recipes don't need workstation.

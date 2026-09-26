@@ -244,6 +244,24 @@ struct CraftingGraph : BaseCraftingGraph {
   std::vector<uint8_t> packDominated;              // nRecipe entries
   std::vector<PackCertificate> packCertificates;   // nRecipe entries
 
+  // Dominated-input substitution. `recipeSubstituted[r] == 1` means recipe r
+  // outputs a real resource and loses to a sibling once one or more of its
+  // inputs is replaced by a resource that cost-dominates it: for every producer
+  // of the input Y, the execution consumes at least as much of w as it yields
+  // of Y, so `q` units of Y can be paid for with `q` units of w.
+  //
+  // Dropping r is only valid when none of the collapsed inputs can be spent
+  // from stock, so `recipeSubstitutedGuards[r]` lists the real items that must
+  // be out of stock (a collapsed tag expands into all of its members), and the
+  // replacement may need a workstation r does not, so
+  // `recipeSubstitutedDominatorWorkstations[r]` is the union of the kept
+  // replacements' workstations. See docs/algorithm.typ, section
+  // "基于支配的剪枝：支配输入的替换".
+  std::vector<uint8_t> recipeSubstituted;  // nRecipe entries
+  std::vector<std::vector<NodeId>> recipeSubstitutedGuards;  // nRecipe entries
+  std::vector<std::vector<NodeId>>
+      recipeSubstitutedDominatorWorkstations;  // nRecipe entries
+
   [[nodiscard]]
   static NodeId itemNode(Handle handle) noexcept {
     return handle - 1;
@@ -300,6 +318,12 @@ bool isRecipePruningEnabled() noexcept;
 // it can be switched off on its own.
 void setDirectDominancePruningEnabled(bool enabled) noexcept;
 bool isDirectDominancePruningEnabled() noexcept;
+
+// Dominated-input substitution is independent of the other recipe passes and
+// also on by default. It computes its own recursive cost relation at
+// registration time, so it can be switched off on its own.
+void setSubstitutionPruningEnabled(bool enabled) noexcept;
+bool isSubstitutionPruningEnabled() noexcept;
 
 // Integrality relaxation for the dominance passes now lives in Options.h as
 // `options().nonoptimal`. It is on by default, and read at registration time,

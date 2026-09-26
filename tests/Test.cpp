@@ -728,6 +728,74 @@ std::vector<std::byte> buildTransitiveClosureSample() {
   return w.out;
 }
 
+// Dominated-input substitution. `X <- T` loses to `X x9 <- w` once every member
+// of the tag T is paid for with w: A is made directly from w, and B only through
+// C, which is the real-input chain the substitution has to follow upward. T is a
+// simple tag of {A, B}.
+//
+//   handle 1 X <- r0 (x1, ws [6], T x1)
+//              <- r1 (x9, ws [6], w x1)
+//   handle 2 A <- r2 (x1, ws [6], w x4)
+//   handle 3 B <- r3 (x1, ws [6], C x1)
+//   handle 4 C <- r4 (x1, ws [6], w x3)
+//   handle 5 w <- r5 (x1, ws [6], u x1)
+//   handle 6 WS   (leaf)
+//   handle 7 z    (leaf)
+//   handle 8 u    (leaf)
+//   handle 9 T <- r6 (x1, no ws, A x1)   (synthetic)
+//              <- r7 (x1, no ws, B x1)   (synthetic)
+//
+// Recipe ids in file order: r0=0 .. r7=7. w has a producer on purpose, so the
+// composite pass leaves r1 alone and the substitution is the only reason r0 can
+// go. When `breakChain` is set, C is made from z instead of w, so B (and hence
+// T) does not cost w and r0 must survive.
+std::vector<std::byte> buildSubstitutionSample(bool breakChain = false) {
+  AwrWriter w;
+  w.header(8, 6);  // real handles 1..8; entries 1, 2, 3, 4, 5, 9
+  w.item(1, 2);
+  w.recipe(1, {6}, {{9, 1}});
+  w.recipe(9, {6}, {{5, 1}});
+  w.item(2, 1);
+  w.recipe(1, {6}, {{5, 4}});
+  w.item(3, 1);
+  w.recipe(1, {6}, {{4, 1}});
+  w.item(4, 1);
+  if (breakChain)
+    w.recipe(1, {6}, {{7, 1}});
+  else
+    w.recipe(1, {6}, {{5, 3}});
+  w.item(5, 1);
+  w.recipe(1, {6}, {{8, 1}});
+  w.item(9, 2);
+  w.recipe(1, {}, {{2, 1}});
+  w.recipe(1, {}, {{3, 1}});
+  return w.out;
+}
+
+// The same substitution with a real input: `X <- Y` loses to `X x9 <- w`
+// because Y <- w x4.
+//
+//   handle 1 X <- r0 (x1, ws [4], Y x1)
+//              <- r1 (x9, ws [4], w x1)
+//   handle 2 Y <- r2 (x1, ws [4], w x4)
+//   handle 3 w <- r3 (x1, ws [4], u x1)
+//   handle 4 WS   (leaf)
+//   handle 5 u    (leaf)
+// Recipe ids: r0=0, r1=1, r2=2, r3=3. w has a producer so r1 is not
+// composite-dominated and the substitution is the only reason r0 can go.
+std::vector<std::byte> buildSubstitutionRealSample() {
+  AwrWriter w;
+  w.header(5, 3);  // real handles 1..5; entries 1, 2, 3
+  w.item(1, 2);
+  w.recipe(1, {4}, {{2, 1}});
+  w.recipe(9, {4}, {{3, 1}});
+  w.item(2, 1);
+  w.recipe(1, {4}, {{3, 4}});
+  w.item(3, 1);
+  w.recipe(1, {4}, {{5, 1}});
+  return w.out;
+}
+
 // A batched member whose tag edge is a free sink for the batch surplus. The
 // guard in Prune.cpp must keep `T <- m` even though every recipe of m consumes
 // w at an equal rate: `m x4 <- w x6` emits four units per execution, so a plan
@@ -3124,6 +3192,85 @@ void testDirectDominancePruning() {
   aw::setDirectDominancePruningEnabled(true);
 }
 
+void testSubstitutionPruning() {
+  std::cout << "[Test] dominated-input substitution pruning\n";
+
+  aw::registerCraftingGraph(buildSubstitutionSample());
+  expect(aw::getCraftingError() == nullptr, "substitution sample parses");
+  {
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    expect(graph.nRecipe == 8 && graph.nReal == 8, "substitution sample shape");
+    expect(graph.recipeSubstituted.size() == graph.nRecipe &&
+               graph.recipeSubstitutedGuards.size() == graph.nRecipe &&
+               graph.recipeSubstitutedDominatorWorkstations.size() == graph.nRecipe,
+           "one substitution flag per recipe");
+    expect(graph.recipeSubstituted[0] == 1, "X <- T is substituted");
+    expect(graph.recipeSubstituted[1] == 0, "the dominator survives");
+    const std::vector<aw::NodeId> guards = {1, 2};  // A, B
+    expect(graph.recipeSubstitutedGuards[0] == guards,
+           "the tag expands into its members for the stock guard");
+    const std::vector<aw::NodeId> ws = {5};  // WS
+    expect(graph.recipeSubstitutedDominatorWorkstations[0] == ws,
+           "the dominator's workstation is recorded");
+  }
+
+  // Stocking a tag member keeps the recipe: the free member can still be spent
+  // on the tag instead of paying for it with w.
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  inventory[4] = 1000000000LL;  // w, so the sample is feasible
+  const aw::Handle all[] = {1, 2, 3, 4, 5, 6, 7, 8};
+  expect(!subgraphHasRecipe(aw::reachableSubgraph(1, all, inventory), 0),
+         "with no member stock the substituted recipe is dropped");
+  {
+    std::vector<aw::Amount> stocked = inventory;
+    stocked[1] = 1;  // A (handle 2)
+    expect(subgraphHasRecipe(aw::reachableSubgraph(1, all, stocked), 0),
+           "stocking a tag member keeps the substituted recipe");
+  }
+
+  // A chain that does not cost w leaves the recipe alone.
+  aw::registerCraftingGraph(buildSubstitutionSample(true));
+  expect(aw::getCraftingError() == nullptr, "broken chain sample parses");
+  expect(aw::getCraftingGraph().recipeSubstituted[0] == 0,
+         "a chain that bypasses w blocks the substitution");
+
+  // A real (non-tag) input collapses the same way.
+  aw::registerCraftingGraph(buildSubstitutionRealSample());
+  expect(aw::getCraftingError() == nullptr, "real substitution sample parses");
+  expect(aw::getCraftingGraph().recipeSubstituted[0] == 1,
+         "a real input that costs w is substituted");
+  expect(aw::getCraftingGraph().recipeSubstitutedGuards[0] ==
+             std::vector<aw::NodeId>{1},
+         "the real input is its own guard");
+
+  // Substitution preserves the optimum: leaves are free only through stock.
+  aw::registerCraftingGraph(buildSubstitutionSample());
+  const aw::CraftingGraph &g = aw::getCraftingGraph();
+  std::vector<aw::Amount> inv(g.nItem, 0);
+  for (aw::NodeId m = 0; m < g.nReal; m++)
+    if (g.i2r.targetsOf(m).empty())
+      inv[m] = 1000000000LL;
+  auto plan = [&](bool prune, aw::Amount amount) {
+    aw::setSubstitutionPruningEnabled(prune);
+    const aw::Handle all[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inv);
+    const aw::NodeId target = sub.translate(0);
+    const aw::PlanResult r = aw::planCrafting(sub, target, amount, inv);
+    int64_t total = 0;
+    for (int64_t x : r.exec)
+      total += x;
+    return std::pair<aw::PlanStatus, int64_t>(r.status, total);
+  };
+  for (aw::Amount amount : {1, 3, 9}) {
+    const auto full = plan(false, amount);
+    const auto pruned = plan(true, amount);
+    expect(full.first == pruned.first, "substitution preserves the status");
+    expect(full.second == pruned.second, "substitution preserves the optimum");
+  }
+  aw::setSubstitutionPruningEnabled(true);
+}
+
 void testReducedCostParity() {
   std::cout << "[Test] reduced-cost fixing preserves the plan optimum\n";
   aw::registerCraftingGraph(buildBlackCandleSample());
@@ -3552,6 +3699,7 @@ int main() {
   testRecipeDominatorWorkstations();
   testRecipePruningParity();
   testDirectDominancePruning();
+  testSubstitutionPruning();
   testReducedCostParity();
   testPackPruning();
   testPackPruningParity();

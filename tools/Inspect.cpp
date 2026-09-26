@@ -254,6 +254,7 @@ void printSummary(const aw::CraftingGraph& graph) {
   size_t pseudoRecipes = 0, tagDominated = 0, recipeDominated = 0;
   size_t domWsEntries = 0, domWsEmpty = 0;
   size_t directDominated = 0, directWsEntries = 0, directWsEmpty = 0;
+  size_t substituted = 0, substWsEntries = 0, substWsEmpty = 0, substGuards = 0;
   for (size_t r = 0; r < graph.nRecipe; ++r) {
     if (graph.output[r] >= graph.nReal) ++pseudoRecipes;
     if (r < graph.tagEdgeDominated.size() && graph.tagEdgeDominated[r]) ++tagDominated;
@@ -279,6 +280,19 @@ void printSummary(const aw::CraftingGraph& graph) {
         ++directWsEmpty;
       }
     }
+    if (r < graph.recipeSubstituted.size() && graph.recipeSubstituted[r]) {
+      ++substituted;
+      if (r < graph.recipeSubstitutedDominatorWorkstations.size()) {
+        if (graph.recipeSubstitutedDominatorWorkstations[r].empty())
+          ++substWsEmpty;
+        else
+          substWsEntries += graph.recipeSubstitutedDominatorWorkstations[r].size();
+      } else {
+        ++substWsEmpty;
+      }
+      if (r < graph.recipeSubstitutedGuards.size())
+        substGuards += graph.recipeSubstitutedGuards[r].size();
+    }
   }
   std::cout << "tag edges      : " << pseudoRecipes << " (" << tagDominated
         << " dominated)\n";
@@ -286,6 +300,9 @@ void printSummary(const aw::CraftingGraph& graph) {
         << " dominator workstations, " << domWsEmpty << " without any)\n";
   std::cout << "direct dominated : " << directDominated << " (" << directWsEntries
         << " dominator workstations, " << directWsEmpty << " without any)\n";
+  std::cout << "substituted      : " << substituted << " (" << substWsEntries
+        << " dominator workstations, " << substWsEmpty << " without any, "
+        << substGuards << " guard items)\n";
   if (graph.packDominated.size() == graph.nRecipe) {
     size_t packCerts = 0, packEdges = 0, packZero = 0;
     for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
@@ -500,7 +517,8 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         continue;
       if (!graph.recipeDirectDominated[r])
         kept[graph.output[r]] = 1;
-      if (!graph.recipeDirectDominated[r] && !graph.recipeDominated[r])
+      if (!graph.recipeDirectDominated[r] && !graph.recipeDominated[r] &&
+          !(r < graph.recipeSubstituted.size() && graph.recipeSubstituted[r]))
         keptEither[graph.output[r]] = 1;
     }
     for (size_t item = 0; item < graph.nReal; ++item) {
@@ -511,7 +529,49 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         break;
       }
       if (!keptEither[item]) {
-        report("direct and composite pruning together removed every recipe");
+        report("the recipe passes together removed every recipe");
+        break;
+      }
+    }
+  }
+
+  // A substituted recipe keeps a stock guard (real items, sorted) and a set of
+  // dominator workstations. The guard is the union of the collapsed inputs along
+  // the replacement path, so an intermediate edge's guard need not be an input
+  // of the recipe itself; only its range and ordering are checked.
+  if (graph.recipeSubstituted.size() != graph.nRecipe ||
+      graph.recipeSubstitutedGuards.size() != graph.nRecipe ||
+      graph.recipeSubstitutedDominatorWorkstations.size() != graph.nRecipe) {
+    report("substitution arrays do not match the recipe count");
+  } else {
+    for (size_t r = 0; r < graph.nRecipe; ++r) {
+      if (!graph.recipeSubstituted[r])
+        continue;
+      if (graph.output[r] >= graph.nReal) {
+        report("a pseudo-resource recipe is marked as substituted");
+        break;
+      }
+      const std::vector<aw::NodeId> &guards = graph.recipeSubstitutedGuards[r];
+      bool guardsOk = true;
+      for (size_t k = 0; k < guards.size(); ++k) {
+        if (guards[k] >= graph.nReal || (k > 0 && guards[k] <= guards[k - 1])) {
+          guardsOk = false;
+          break;
+        }
+      }
+      if (!guardsOk) {
+        report("a substituted recipe has a bad stock guard");
+        break;
+      }
+      const std::vector<aw::NodeId> &ws =
+          graph.recipeSubstitutedDominatorWorkstations[r];
+      bool wsOk = true;
+      for (size_t k = 0; k < ws.size(); ++k) {
+        if (ws[k] >= graph.nItem || (k > 0 && ws[k] <= ws[k - 1]))
+          wsOk = false;
+      }
+      if (!wsOk) {
+        report("a substituted recipe has a bad dominator workstation");
         break;
       }
     }
@@ -811,6 +871,7 @@ int main(int argc, char** argv) {
   bool noTagPrune = false;
   bool noRecipePrune = false;
   bool noDirectPrune = false;
+  bool noSubstitutionPrune = false;
   bool noPackPrune = false;
   bool noSatellitePrune = false;
   bool noDeadNodePrune = false;
@@ -833,6 +894,8 @@ int main(int argc, char** argv) {
       noRecipePrune = true;
     } else if (arg == "--no-direct-prune") {
       noDirectPrune = true;
+    } else if (arg == "--no-substitution-prune") {
+      noSubstitutionPrune = true;
     } else if (arg == "--no-pack-prune") {
       noPackPrune = true;
     } else if (arg == "--no-satellite-prune") {
@@ -940,7 +1003,7 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "-h" || arg == "--help") {
       std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
-                   "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune]\n"
+                   "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                    "                   [--no-pack-prune]\n"
                    "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
                    "                   [--no-dead-node-prune] [--optimal]\n"
@@ -960,7 +1023,7 @@ int main(int argc, char** argv) {
 
   if (path.empty()) {
     std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
-                 "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune]\n"
+                 "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                  "                   [--no-pack-prune]\n"
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
                  "                   [--no-dead-node-prune] [--optimal]\n"
@@ -1046,6 +1109,8 @@ int main(int argc, char** argv) {
     aw::setRecipePruningEnabled(false);
   if (noDirectPrune || noPrune)
     aw::setDirectDominancePruningEnabled(false);
+  if (noSubstitutionPrune || noPrune)
+    aw::setSubstitutionPruningEnabled(false);
 
   std::cout << "parsed " << bytes.size() << " bytes from " << path << '\n';
   printSummary(graph);
