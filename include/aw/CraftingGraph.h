@@ -193,7 +193,10 @@ struct CraftingGraph : BaseCraftingGraph {
   BaseSparseSets workstations;
 
   // Tag-edge pruning. `tagEdgeDominated[r] == 1` means recipe r is a synthetic
-  // tag edge `T <- m` whose member m is cost-dominated by another member of T;
+  // tag edge `T <- m` whose member m is cost-dominated by another member of T.
+  // A member that any recipe can produce in a batch (more than one unit per
+  // execution) is never marked: the batch surplus is a free way to satisfy T,
+  // so dropping the edge can cost real steps. See `Batching guard` in Prune.cpp.
   std::vector<uint8_t> tagEdgeDominated;  // nRecipe entries
 
   // Real-recipe (composite) pruning. `recipeDominated[r] == 1` means recipe r

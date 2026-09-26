@@ -4,7 +4,10 @@
 //
 //   1. Tag-edge pruning deletes synthetic `T <- m` edges whose member m is
 //      cost-dominated by another member of T. It only reasons about real
-//      recipes that consume the same resource they produce.
+//      recipes that consume the same resource they produce, and it keeps every
+//      member a recipe of which can emit more than one unit at a time: such a
+//      batch leaves surplus m that is a free way to satisfy T, so the edge may
+//      still be worth keeping ("Batching guard" in computeTagPruning).
 //
 //   2. Real-recipe (composite) pruning deletes a real recipe R: X <- Y, ...
 //      when a sibling recipe S of X is provably at least as good after
@@ -73,6 +76,10 @@ constexpr size_t MAX_TAG_MEMBERS = 1024;
 // so this bounds the whole per-tag cost. Tags are admitted smallest first, so
 // the budget buys as many of them as possible.
 constexpr uint64_t MAX_TAG_PAIRS = 4'000'000;
+
+// Global ceiling on the number of column-cover tests. The cover is only an
+// extra justification for a recipe, so running out of it just prunes less.
+constexpr uint64_t MAX_TAG_COVER_WORK = 64'000'000;
 
 // Ceiling on the gating pairs loop (a) contributes. Truncating it only drops
 // (m, w) candidates, which can only make `valid` reject more pairs.
@@ -620,6 +627,107 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
     }
   }
 
+  // ---- Batching guard ----------------------------------------------------
+  // Dropping `T <- m` is only safe when the plan can give up the m it consumes.
+  // Every justification below is a per-execution swap, which stops being
+  // equivalent once a producer of m emits several units at a time: a plan that
+  // runs `m x8 <- w x8` to satisfy some other consumer of m gets 7 units of m
+  // for free, and it spends one of them on `T <- m`. Deleting that edge then
+  // has to make the 7 units (and the one spent) up with a real w craft while
+  // the batch keeps running, so the optimum rises even though every recipe of
+  // m does consume w at an equal rate.
+  //
+  // Real witness in the ATM10 graph: `enderio:fused_quartz_d_black x3` costs 26
+  // real steps with tag pruning off and 27 with it, because
+  // `#12695 <- fused_quartz_d_black` is dropped while the batch
+  // `fused_quartz_d_black x8 <- black_dye + #12695 x8` still runs for the
+  // target's three units. `minecraft:stick x7` (3 vs 4) is the same effect on
+  // the column-cover branch, through `#12650 <- demonic_wooden_stairs` and
+  // `demonic_wooden_stairs x4 <- demonic_planks x6`.
+  //
+  // Requiring every producer of m to emit exactly one unit restores the
+  // per-execution argument: freeing k units of m demand then removes exactly k
+  // producer executions, and each of them consumed at least one unit of the
+  // dominator (or was covered by a single dominator execution), which pays for
+  // the k new `T <- w` edges. A member that does not qualify is simply kept, so
+  // the guard can only ever prune less.
+  std::vector<uint8_t> unitOutput(nItem, 1);
+  for (NodeId m = 0; m < nReal; m++)
+    for (NodeId recipeNode : graph.i2r.targetsOf(m))
+      if (graph.outputAmt[recipeNode - nItem] != 1) {
+        unitOutput[m] = 0;
+        break;
+      }
+
+  // ---- Column cover ------------------------------------------------------
+  // Besides consuming a dominator (directly or through a tag), a recipe of m
+  // can also be replaced by a recipe of the candidate dominator: it must yield
+  // at least as much and consume no more of every item, with a simple tag it
+  // consumes allowed to pick any member. Swapping the one execution that fed
+  // the dropped tag edge is free; the batching guard above is what keeps that
+  // from being read as "m can be dropped wholesale". It catches members whose
+  // concrete recipes have a dominator-free route (e.g.
+  // `_d <- amethyst + quartz_block`) but still consume at least what some
+  // dominator route does. The check is budgeted, because the fixpoint may ask
+  // for the same pair repeatedly.
+  uint64_t coverBudget = MAX_TAG_COVER_WORK;
+  std::vector<std::pair<NodeId, Amount>> cap;
+  auto covers = [&](uint s, uint r) -> bool {
+    if (coverBudget == 0)
+      return false;
+    coverBudget--;
+    if (graph.outputAmt[s] < graph.outputAmt[r])
+      return false;
+
+    cap.clear();
+    const auto ri = graph.r2i.targetsOf(r);
+    const auto rw = graph.r2i.weightsOf(r);
+    for (size_t j = 0; j < ri.size(); j++)
+      cap.emplace_back(ri[j], rw[j]);
+    std::sort(cap.begin(), cap.end(),
+              [](const auto& a, const auto& b) noexcept { return a.first < b.first; });
+
+    const auto si = graph.r2i.targetsOf(s);
+    const auto sw = graph.r2i.weightsOf(s);
+    for (size_t j = 0; j < si.size(); j++) {
+      const NodeId h = si[j];
+      Amount need = sw[j];
+
+      // An exact row first, so a tag consumed atomically matches itself.
+      auto it = std::lower_bound(
+          cap.begin(), cap.end(), h,
+          [](const auto& p, NodeId v) noexcept { return p.first < v; });
+      if (it != cap.end() && it->first == h) {
+        const Amount take = std::min(need, it->second);
+        it->second -= take;
+        need -= take;
+      }
+      if (need > 0 && h >= nReal && h < nItem && simpleTag[h]) {
+        for (NodeId z : members[h]) {
+          if (need <= 0)
+            break;
+          auto jt = std::lower_bound(
+              cap.begin(), cap.end(), z,
+              [](const auto& p, NodeId v) noexcept { return p.first < v; });
+          if (jt != cap.end() && jt->first == z) {
+            const Amount take = std::min(need, jt->second);
+            jt->second -= take;
+            need -= take;
+          }
+        }
+      }
+      if (need > 0)
+        return false;
+    }
+    return true;
+  };
+  auto colCover = [&](uint r, NodeId w) -> bool {
+    for (NodeId sNode : graph.i2r.targetsOf(w))
+      if (covers(sNode - nItem, r))
+        return true;
+    return false;
+  };
+
   auto valid = [&](NodeId m, NodeId w) -> bool {
     for (NodeId recipeNode : graph.i2r.targetsOf(m)) {
       const uint r = recipeNode - nItem;
@@ -647,7 +755,7 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
           }
         }
       }
-      if (!ok)
+      if (!ok && !colCover(r, w))
         return false;
     }
     return true;
@@ -771,6 +879,10 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
       if (keep[a])
         continue;
       const NodeId m = ms[a];
+      // A batched member keeps its tag edge: the batch surplus would otherwise
+      // be a free way to satisfy T, and dropping the edge costs real steps.
+      if (!unitOutput[m])
+        continue;
       for (NodeId recipeNode : graph.i2r.targetsOf(t)) {
         const uint r = recipeNode - nItem;
         const auto inputs = graph.r2i.targetsOf(r);

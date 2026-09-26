@@ -324,12 +324,14 @@ std::vector<std::byte> buildDuplicateSample() {
   return out;
 }
 
-// T = {glass, stained}. Stained glass is gated by glass (stained x8 <- glass
-// x8 + dye x1), so the synthetic edge `T <- stained` is dominated while
-// `T <- glass` is not.
+// T = {glass, stained}. Stained glass is gated by glass (stained x1 <- glass
+// x1 + dye x1), so the synthetic edge `T <- stained` is dominated while
+// `T <- glass` is not. The recipe yields one stained glass on purpose: a
+// producer that emits a batch keeps its tag edge, see
+// buildBatchRecycleSample() and the batching guard in Prune.cpp.
 //
 //   handle 1 glass   <- r0 (x1, ws [3], sand x1)
-//   handle 2 stained <- r1 (x8, ws [3], glass x8 + dye x1)
+//   handle 2 stained <- r1 (x1, ws [3], glass x1 + dye x1)
 //   handle 5 P       <- r2 (x1, ws [4], T x1)
 //   handle 6 T       <- r3 (x1, no ws, stained x1)   (synthetic)
 //                    <- r4 (x1, no ws, glass x1)     (synthetic)
@@ -352,11 +354,11 @@ std::vector<std::byte> buildGlassSample() {
   emitVarInt(out, 1);  // output delta -> handle 2 (stained glass)
   emitVarInt(out, 1);  // one recipe
   {
-    emitVarInt(out, 8);  // output amount
+    emitVarInt(out, 1);  // output amount
     emitVarInt(out, 1);  // one workstation
     emitVarInt(out, 3);
     emitVarInt(out, 2);  // two inputs
-    emitVarInt(out, 8);  // glass amount
+    emitVarInt(out, 1);  // glass amount
     emitVarInt(out, 1);  // -> handle 1
     emitVarInt(out, 1);  // dye amount
     emitVarInt(out, 2);  // -> handle 3
@@ -614,6 +616,103 @@ std::vector<std::byte> buildBulkSample() {
     emitVarInt(out, 1);
     emitVarInt(out, 1);
     emitVarInt(out, 2);  // -> handle 2 (w)
+  }
+  return out;
+}
+
+// A batched member whose tag edge is a free sink for the batch surplus. The
+// guard in Prune.cpp must keep `T <- m` even though every recipe of m consumes
+// w at an equal rate: `m x4 <- w x6` emits four units per execution, so a plan
+// that runs it for the target gets three units of m for free and spends one of
+// them on T.
+//
+//   handle 1 base <- r0 (x4, ws [1], T x1)     (T recycles back into base)
+//   handle 2 w    <- r1 (x6, ws [1], base x4)
+//   handle 3 m    <- r2 (x4, ws [1], w x6)     (the batch)
+//   handle 4 goal <- r3 (x9, ws [1], G x1)
+//   handle 5 T    <- r4 (x1, no ws, w x1)      (synthetic)
+//                 <- r5 (x1, no ws, m x1)      (synthetic)
+//   handle 6 G    <- r6 (x1, no ws, m x1)      (synthetic, single member)
+//
+// With `T <- m` the target needs r0 + r1 + r2 + r3 = 4 real crafts: the batch
+// makes four m, G eats one and `T <- m` eats one, and the T that r0 needs comes
+// back out of the surplus. Without it the T must come from w, which forces a
+// second r0/r1 pair, so the same target costs 6 real crafts and dropping the
+// edge raises the optimum.
+std::vector<std::byte> buildBatchRecycleSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 4);  // realResourceCount: base, w, m, goal
+  emitVarInt(out, 6);  // entries: handles 1..6
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (base)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 4);  // output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 5);  // -> handle 5 (T)
+  }
+
+  emitVarInt(out, 1);  // -> handle 2 (w)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 6);  // output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);
+    emitVarInt(out, 1);  // -> handle 1 (base)
+  }
+
+  emitVarInt(out, 1);  // -> handle 3 (m)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 4);  // output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 6);
+    emitVarInt(out, 2);  // -> handle 2 (w)
+  }
+
+  emitVarInt(out, 1);  // -> handle 4 (goal)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 9);  // output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 6);  // -> handle 6 (G)
+  }
+
+  emitVarInt(out, 1);  // -> handle 5 (T)
+  emitVarInt(out, 2);  // T <- w, T <- m
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 0);  // no workstation
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (w)
+  }
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 0);
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (m)
+  }
+
+  emitVarInt(out, 1);  // -> handle 6 (G)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 0);  // no workstation
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (m)
   }
   return out;
 }
@@ -2151,6 +2250,53 @@ void testTagPruningParity() {
          "pruning does not change the optimum");
 }
 
+// The batching guard's witness: a tag edge whose member is produced in batches
+// is a free sink for the surplus, so dropping it raises the optimum. Before the
+// guard, this sample planned in 6 real steps with tag pruning and 4 without.
+void testTagBatchingGuard() {
+  std::cout << "[Test] a batched member keeps its tag edge\n";
+  aw::registerCraftingGraph(buildBatchRecycleSample());
+  expect(aw::getCraftingError() == nullptr, "batch recycle sample parses");
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+
+  // `T <- m`: T is pseudo handle 5, m is handle 3. It has to stay flagged as
+  // undominated, because m's only recipe emits four units at a time.
+  bool batchedEdgeKept = false;
+  for (aw::NodeId recipeNode : graph.i2r.targetsOf(4)) {
+    const uint32_t r = recipeNode - graph.nItem;
+    const auto inputs = graph.r2i.targetsOf(r);
+    if (inputs.size() == 1 && inputs[0] == 2)
+      batchedEdgeKept = graph.tagEdgeDominated[r] == 0;
+  }
+  expect(batchedEdgeKept, "the batched member T <- m survives the guard");
+
+  const aw::Handle all[] = {1, 2, 3, 4};
+  std::vector<aw::Amount> inventory(graph.nItem, 0);
+
+  // Count only real recipes: the synthetic tag edges are free.
+  auto realSteps = [&](bool prune) {
+    aw::setTagPruningEnabled(prune);
+    const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
+    const aw::NodeId target = sub.translate(3);
+    const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
+    int64_t real = 0;
+    if (r.status == aw::PlanStatus::OK)
+      for (uint32_t i = 0; i < sub.graph.nRecipe; i++)
+        if (sub.graph.output[i] < sub.graph.nReal)
+          real += r.exec[i];
+    return std::pair<aw::PlanStatus, int64_t>(r.status, real);
+  };
+
+  const auto full = realSteps(false);
+  const auto pruned = realSteps(true);
+  aw::setTagPruningEnabled(true);
+  expect(full.first == aw::PlanStatus::OK && pruned.first == aw::PlanStatus::OK,
+         "both batch recycle variants are feasible");
+  expect(full.second == 4, "the unpruned batch recycle optimum is 4 real crafts");
+  expect(pruned.second == full.second,
+         "tag pruning does not change the batch recycle optimum");
+}
+
 void testTagInlining() {
   std::cout << "[Test] single-use tag inlining\n";
   const aw::Handle all[] = {1, 2, 3, 4, 5};
@@ -2976,6 +3122,7 @@ int main() {
   testTagPruning();
   testWideTagPruning();
   testTagPruningParity();
+  testTagBatchingGuard();
   testTagInlining();
   testFreeTagObjective();
   testRecipePruning();
