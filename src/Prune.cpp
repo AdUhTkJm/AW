@@ -10,13 +10,15 @@
 //      when a sibling recipe S of X is provably at least as good after
 //      inlining every producer of Y into R. The comparison is a sparse column
 //      vector inequality, see docs/algorithm.typ ("基于支配的剪枝：真实配方篇").
-//      S must also be usable on every workstation R can use, since the two
-//      recipes may run in completely different places.
+//      S may need a workstation R does not, so that condition is checked at
+//      query time instead of being folded into the preprocessing.
 //
 // Both passes can remove an edge that the player might usefully keep, because
-// a stocked input can always be spent directly. Each pass therefore records
-// the input the certificate relied on, and reachableSubgraph keeps the recipe
-// when that input is in the inventory.
+// a stocked input can always be spent directly, and a recipe whose replacement
+// needs an unavailable workstation must survive. Each pass therefore records
+// the input the certificate relied on, and the recipe pass additionally records
+// the workstations of the replacements, so reachableSubgraph can keep a recipe
+// whose guard is in the inventory or whose replacement cannot be run.
 
 #include "Prune.h"
 
@@ -242,17 +244,25 @@ bool leZero(std::span<const Amount> cc) noexcept {
 // ---------------------------------------------------------------------------
 // Marks one representative per sink SCC of a directed graph on `k` nodes.
 // `adjOffsets` has k + 1 entries and `adjTargets` has adjOffsets[k] entries.
-// `keep[a] == 1` exactly for the representatives. Every node with no outgoing
-// edge is its own sink SCC, so the result is never empty for k > 0.
-void markSinkRepresentatives(uint k, const std::vector<uint>& adjOffsets,
-                             const std::vector<uint32_t>& adjTargets,
-                             std::vector<uint8_t>& keep) noexcept {
+// `comp` is filled with the component id of every node and `repOfComp` with the
+// representative of every sink component (UINT32_MAX for a non-sink one).
+// Components are numbered in reverse topological order: an edge to a different
+// component always points at a smaller id. `keep[a] == 1` exactly for the
+// representatives. Every node with no outgoing edge is its own sink SCC, so the
+// result is never empty for k > 0. Returns the number of components.
+uint32_t markSinkRepresentatives(uint k, const std::vector<uint>& adjOffsets,
+                                 const std::vector<uint32_t>& adjTargets,
+                                 std::vector<int32_t>& comp,
+                                 std::vector<uint32_t>& repOfComp,
+                                 std::vector<uint8_t>& keep) noexcept {
   keep.assign(k, 0);
+  comp.assign(k, -1);
+  repOfComp.clear();
   if (k == 0)
-    return;
+    return 0;
 
   // Iterative Tarjan, so a deep graph cannot overflow the stack.
-  std::vector<int32_t> comp(k, -1), disc(k, -1), low(k, 0);
+  std::vector<int32_t> disc(k, -1), low(k, 0);
   std::vector<uint8_t> onStack(k, 0);
   std::vector<uint32_t> tstack, callNode, callEdge;
   int32_t timer = 0;
@@ -309,15 +319,16 @@ void markSinkRepresentatives(uint k, const std::vector<uint>& adjOffsets,
       if (comp[a] != comp[b])
         isSink[comp[a]] = 0;
     }
-  std::vector<uint32_t> rep(nComp, UINT32_MAX);
+  repOfComp.assign(nComp, UINT32_MAX);
   for (uint32_t a = 0; a < k; a++) {
     const uint32_t c = (uint32_t) comp[a];
-    if (isSink[c] && rep[c] == UINT32_MAX)
-      rep[c] = a;
+    if (isSink[c] && repOfComp[c] == UINT32_MAX)
+      repOfComp[c] = a;
   }
   for (uint32_t a = 0; a < k; a++)
-    if (rep[comp[a]] == a)
+    if (repOfComp[comp[a]] == a)
       keep[a] = 1;
+  return nComp;
 }
 
 // ---------------------------------------------------------------------------
@@ -710,6 +721,8 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
   // also keeps at least one member of every tag, including mutual-requirement
   // cycles, so no tag becomes unsatisfiable.
   std::vector<uint32_t> adjOffsets, adjTargets, cursor;
+  std::vector<int32_t> comp;
+  std::vector<uint32_t> repOfComp;
   std::vector<uint8_t> keep;
   for (NodeId t = nReal; t < nItem; t++) {
     if (!simpleTag[t])
@@ -744,7 +757,7 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
           adjTargets[cursor[a]++] = (uint32_t) b;
       }
 
-    markSinkRepresentatives((uint) k, adjOffsets, adjTargets, keep);
+    markSinkRepresentatives((uint) k, adjOffsets, adjTargets, comp, repOfComp, keep);
 
     for (uint32_t a = 0; a < k; a++) {
       if (keep[a])
@@ -772,38 +785,20 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
 // is a net loss). The keep set is one representative per sink SCC of the edge
 // graph, exactly as in the tag pass, so every item keeps at least one recipe.
 // A dominated recipe is only dropped by reachability when its witness input has
-// no inventory.
+// no inventory and a replacement can actually be run.
 //
 // Unlike the tag pass, the relation is a pure cost comparison, so R and S may
-// need disjoint workstations. Replacing R by S is only valid when S is usable
-// wherever R is: for every availability set A, A hitting workstations(R) must
-// hit workstations(S), which holds exactly when workstations(R) is a subset of
-// workstations(S). The tag pass does not need this because its `requires(m, w)`
-// relation already says m cannot be crafted without w.
-
-// True when every workstation of `r` is also a workstation of `s`. Both rows
-// are non-decreasing (the reader emits ascending deltas and canonicalize
-// sorts), so a linear merge suffices.
-bool workstationSubset(const CraftingGraph& graph, uint r, uint s) noexcept {
-  const auto a = graph.workstations.targetsOf(r);
-  const auto b = graph.workstations.targetsOf(s);
-  size_t i = 0, j = 0;
-  while (i < a.size() && j < b.size()) {
-    if (a[i] == b[j]) {
-      i++;
-      j++;
-    } else if (a[i] < b[j]) {
-      return false;
-    } else {
-      j++;
-    }
-  }
-  return i == a.size();
-}
+// need disjoint workstations and the edge is built regardless. Replacing R by S
+// is only valid when S is usable, which depends on the availability set of the
+// query, so the pass records the workstations of the kept representatives R can
+// reach and reachableSubgraph checks them. The tag pass does not need this
+// because its `requires(m, w)` relation already says m cannot be crafted
+// without w.
 
 void computeRecipePruning(CraftingGraph& graph) noexcept {
   graph.recipeDominated.assign(graph.nRecipe, 0);
   graph.recipeGuardInput.assign(graph.nRecipe, UINT32_MAX);
+  graph.recipeDominatorWorkstations.assign(graph.nRecipe, {});
 
   const uint nReal = graph.nReal;
   if (nReal == 0 || graph.nRecipe == 0)
@@ -821,7 +816,11 @@ void computeRecipePruning(CraftingGraph& graph) noexcept {
   std::vector<uint32_t> candidates;
   std::vector<uint> adjOffsets;
   std::vector<uint32_t> adjTargets;
+  std::vector<int32_t> comp;
+  std::vector<uint32_t> repOfComp;
   std::vector<uint8_t> keep;
+  std::vector<std::vector<uint32_t>> members;
+  std::vector<std::vector<NodeId>> compWs;
 
   for (NodeId X = 0; X < nReal; X++) {
     const auto recipeNodes = graph.i2r.targetsOf(X);
@@ -859,21 +858,19 @@ void computeRecipePruning(CraftingGraph& graph) noexcept {
         if (producers.size() > MAX_WITNESS_PRODUCERS)
           continue;
 
-        // Restrict the siblings to those S that can run on every workstation R
-        // can. Otherwise a player who has R's station but not S's would lose the
-        // only route to X. If no sibling qualifies this witness, try the next
-        // input rather than giving up on R.
+        // Every sibling is a candidate: the workstation condition is deferred
+        // to query time, where the availability set is known. If no sibling
+        // qualifies after the producer filter, try the next input rather than
+        // giving up on R.
         candidates.clear();
         for (uint j = 0; j < k; j++)
-          if (j != i && workstationSubset(graph, R, recs[j]))
+          if (j != i)
             candidates.push_back(j);
-        if (candidates.empty())
-          continue;
 
         if (producers.empty()) {
           // Y cannot be produced. Unless the player holds stock (which the
-          // query-time guard checks), R is unusable, so any
-          // workstation-compatible sibling is at least as good.
+          // query-time guard checks), R is unusable, so any sibling is at least
+          // as good.
           for (uint32_t j : candidates)
             adj[i].push_back(j);
           guard[i] = Y;
@@ -930,13 +927,41 @@ void computeRecipePruning(CraftingGraph& graph) noexcept {
         for (uint32_t j : adj[i])
           adjTargets[cursor[i]++] = j;
     }
-    markSinkRepresentatives(k, adjOffsets, adjTargets, keep);
+    const uint32_t nComp =
+        markSinkRepresentatives(k, adjOffsets, adjTargets, comp, repOfComp, keep);
+
+    // The union of the workstations of every kept representative a node can
+    // reach. Those are the replacements reachableSubgraph may fall back on, so
+    // it drops the node when one of them is available. Tarjan numbers
+    // components in reverse topological order, so a component's successors are
+    // already final when it is processed.
+    members.assign(nComp, {});
+    for (uint32_t a = 0; a < k; a++)
+      members[comp[a]].push_back(a);
+    compWs.assign(nComp, {});
+    for (uint32_t c = 0; c < nComp; c++) {
+      std::vector<NodeId>& ws = compWs[c];
+      if (repOfComp[c] != UINT32_MAX) {
+        const auto own = graph.workstations.targetsOf(recs[repOfComp[c]]);
+        ws.insert(ws.end(), own.begin(), own.end());
+      }
+      for (uint32_t a : members[c])
+        for (uint32_t j : adj[a])
+          if ((uint32_t) comp[j] != c) {
+            const std::vector<NodeId>& succ = compWs[comp[j]];
+            ws.insert(ws.end(), succ.begin(), succ.end());
+          }
+      std::sort(ws.begin(), ws.end());
+      ws.erase(std::unique(ws.begin(), ws.end()), ws.end());
+    }
 
     for (uint i = 0; i < k; i++) {
       if (keep[i])
         continue;
-      graph.recipeDominated[recs[i]] = 1;
-      graph.recipeGuardInput[recs[i]] = guard[i];
+      const uint r = recs[i];
+      graph.recipeDominated[r] = 1;
+      graph.recipeGuardInput[r] = guard[i];
+      graph.recipeDominatorWorkstations[r] = compWs[comp[i]];
     }
   }
 }

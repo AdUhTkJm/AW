@@ -933,6 +933,89 @@ std::vector<std::byte> buildWorkstationGuardSample(bool sSuperset) {
   return out;
 }
 
+// Two incomparable dominators for the same recipe. R's route to X goes through
+// Y1, and after inlining Y1's producer both S1 (X <- P, WS_B) and S2
+// (X <- Y2, WS_C) cost-dominate R, while neither dominates the other. They are
+// therefore two sink SCCs, i.e. two kept representatives, and the union of
+// their workstations decides whether R can be dropped.
+//
+//   handle 1 X  <- R  (x1, ws [7=A], Y1 x1 + Y2 x1)
+//               <- S1 (x1, ws [8=B], P x1)
+//               <- S2 (x1, ws [9=C], Y2 x1)
+//   handle 2 Y1 <- r1 (x1, ws [7], P x1)
+//   handle 3 Y2 <- r2 (x1, ws [7], Q x1)
+//   handle 4 P  <- p  (x1, ws [7], ORE x1)
+//   handles 5..9 ORE, Q, WS_A, WS_B, WS_C are leaves.
+// Recipe ids in file order: R=0, S1=1, S2=2, r1=3, r2=4, p=5.
+std::vector<std::byte> buildMultiDominatorSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 9);  // realResourceCount
+  emitVarInt(out, 4);  // entries: handles 1, 2, 3, 4
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (X)
+  emitVarInt(out, 3);  // R, S1, S2
+  {
+    emitVarInt(out, 1);  // R output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 7);  // WS_A
+    emitVarInt(out, 2);  // two inputs
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (Y1) x1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // -> handle 3 (Y2) x1
+  }
+  {
+    emitVarInt(out, 1);  // S1 output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 8);  // WS_B
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // -> handle 4 (P) x1
+  }
+  {
+    emitVarInt(out, 1);  // S2 output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 9);  // WS_C
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (Y2) x1
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (Y1)
+  emitVarInt(out, 1);  // r1
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 7);  // WS_A
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // -> handle 4 (P)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 3 (Y2)
+  emitVarInt(out, 1);  // r2
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 7);  // WS_A
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 6);  // -> handle 6 (Q)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 4 (P)
+  emitVarInt(out, 1);  // p
+  {
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 7);  // WS_A
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 5);  // -> handle 5 (ORE)
+  }
+  return out;
+}
+
 // The copper-pickaxe example from docs/algorithm.typ. The pack
 //
 //   r0: ingot  x1 <- nugget  x9
@@ -2004,11 +2087,20 @@ void testRecipePruning() {
          "the ceiling, not a rational alpha, decides domination");
 
   // S dominates R after inlining Y, but S runs only on WS_B while R runs on
-  // WS_A. A player holding WS_A must keep R.
+  // WS_A. The cost relation is still recorded; availability is deferred to the
+  // query, where a player holding only WS_A must keep R.
   aw::registerCraftingGraph(buildWorkstationGuardSample(false));
   expect(aw::getCraftingError() == nullptr, "workstation guard sample parses");
-  expect(aw::getCraftingGraph().recipeDominated[0] == 0,
-         "a disjoint workstation set blocks composite domination");
+  expect(aw::getCraftingGraph().recipeDominated[0] == 1,
+         "a disjoint workstation set no longer blocks composite domination");
+  {
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    bool hasB = false;
+    for (aw::NodeId station : graph.recipeDominatorWorkstations[0])
+      if (station == 4)  // handle 5 = WS_B, the only station of S
+        hasB = true;
+    expect(hasB, "the dominator workstations record S's station");
+  }
 
   // When S can run on everything R can, the drop is still sound.
   aw::registerCraftingGraph(buildWorkstationGuardSample(true));
@@ -2022,14 +2114,28 @@ void testRecipePruningWorkstations() {
   aw::registerCraftingGraph(buildWorkstationGuardSample(false));
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
   const aw::Handle onlyA[] = {4};
+  const aw::Handle both[] = {4, 5};
 
   // BASE (handle 6 -> item node 5) is the only leaf; the player holds it.
   std::vector<aw::Amount> inventory(graph.nItem, 0);
   inventory[5] = 100;
 
-  auto plan = [&](bool prune) {
+  // R (recipe 0) is dominated by S, which runs on WS_B only. A player who does
+  // not own WS_B keeps R; one who does can drop it, which the old
+  // workstation-subset gate never allowed.
+  auto keepsR = [&](std::span<const aw::Handle> ws) {
+    const aw::Subgraph sub = aw::reachableSubgraph(1, ws, inventory);
+    for (aw::NodeId r : sub.recipeOrigin)
+      if (r == 0)
+        return true;
+    return false;
+  };
+  expect(keepsR(onlyA), "a player without the dominator's station keeps R");
+  expect(!keepsR(both), "a player with the dominator's station drops R");
+
+  auto plan = [&](bool prune, std::span<const aw::Handle> ws) {
     aw::setRecipePruningEnabled(prune);
-    const aw::Subgraph sub = aw::reachableSubgraph(1, onlyA, inventory);
+    const aw::Subgraph sub = aw::reachableSubgraph(1, ws, inventory);
     const aw::NodeId target = sub.translate(0);
     const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
     int64_t total = 0;
@@ -2038,11 +2144,73 @@ void testRecipePruningWorkstations() {
     return std::pair<aw::PlanStatus, int64_t>(r.status, total);
   };
 
-  const auto full = plan(false);
-  const auto pruned = plan(true);
-  expect(full.first == aw::PlanStatus::OK, "the unpruned route plans on WS_A");
-  expect(pruned.first == full.first, "workstation guard preserves the plan status");
-  expect(pruned.second == full.second, "workstation guard preserves the optimum");
+  const std::vector<aw::Handle> cases[] = {{4}, {4, 5}};
+  for (const std::vector<aw::Handle> &ws : cases) {
+    const auto full = plan(false, ws);
+    const auto pruned = plan(true, ws);
+    expect(full.first == aw::PlanStatus::OK, "the unpruned route plans");
+    expect(pruned.first == full.first, "workstation guard preserves the plan status");
+    expect(pruned.second == full.second, "workstation guard preserves the optimum");
+  }
+  aw::setRecipePruningEnabled(true);
+}
+
+void testRecipeDominatorWorkstations() {
+  std::cout << "[Test] composite pruning unions dominator workstations\n";
+  aw::registerCraftingGraph(buildMultiDominatorSample());
+  expect(aw::getCraftingError() == nullptr, "multi-dominator sample parses");
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+  expect(graph.recipeDominated.size() == graph.nRecipe,
+         "the dominated flags are sized");
+  expect(graph.recipeDominated[0] == 1, "R is dominated by S1 and S2");
+  {
+    // WS_B is handle 8 -> node 7 and WS_C is handle 9 -> node 8. Both sink
+    // representatives contribute, so either station alone can drop R.
+    const std::vector<aw::NodeId> want = {7, 8};
+    expect(graph.recipeDominatorWorkstations[0] == want,
+           "both dominators contribute their stations");
+  }
+
+  // Leaves are free only through inventory.
+  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  for (aw::NodeId m = 0; m < graph.nReal; m++)
+    if (graph.i2r.targetsOf(m).empty())
+      inventory[m] = 1000000000LL;
+
+  const aw::Handle a[] = {7};
+  const aw::Handle ab[] = {7, 8};
+  const aw::Handle ac[] = {7, 9};
+
+  auto keepsR = [&](std::span<const aw::Handle> ws) {
+    const aw::Subgraph sub = aw::reachableSubgraph(1, ws, inventory);
+    for (aw::NodeId r : sub.recipeOrigin)
+      if (r == 0)
+        return true;
+    return false;
+  };
+  expect(keepsR(a), "without a dominator station R survives");
+  expect(!keepsR(ab), "WS_B alone lets S1 replace R");
+  expect(!keepsR(ac), "WS_C alone lets S2 replace R");
+
+  auto plan = [&](bool prune, std::span<const aw::Handle> ws) {
+    aw::setRecipePruningEnabled(prune);
+    const aw::Subgraph sub = aw::reachableSubgraph(1, ws, inventory);
+    const aw::NodeId target = sub.translate(0);
+    const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
+    int64_t total = 0;
+    for (int64_t x : r.exec)
+      total += x;
+    return std::pair<aw::PlanStatus, int64_t>(r.status, total);
+  };
+
+  const std::vector<aw::Handle> cases[] = {{7}, {7, 8}, {7, 9}, {7, 8, 9}};
+  for (const std::vector<aw::Handle> &ws : cases) {
+    const auto full = plan(false, ws);
+    const auto pruned = plan(true, ws);
+    expect(full.first == aw::PlanStatus::OK, "the unpruned route plans");
+    expect(pruned.first == full.first, "dominator stations preserve the plan status");
+    expect(pruned.second == full.second, "dominator stations preserve the optimum");
+  }
   aw::setRecipePruningEnabled(true);
 }
 
@@ -2492,6 +2660,7 @@ int main() {
   testFreeTagObjective();
   testRecipePruning();
   testRecipePruningWorkstations();
+  testRecipeDominatorWorkstations();
   testRecipePruningParity();
   testReducedCostParity();
   testPackPruning();

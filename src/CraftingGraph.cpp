@@ -747,13 +747,24 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
 
         // A composite-dominated real recipe is likewise only dropped when the
         // witness input has no stock, so held stock can still be spent through
-        // it.
+        // it. The replacement may need a workstation this query does not have,
+        // so it is only dropped when one of the dominator's workstations is
+        // available. Otherwise the player would lose the only route.
         if (pruneRecipe && recipe < graph.recipeDominated.size() &&
             graph.recipeDominated[recipe]) {
           const NodeId guard = graph.recipeGuardInput[recipe];
           const Amount held = guard < inventory.size() ? inventory[guard] : 0;
-          if (held == 0)
-            continue;
+          if (held == 0 && recipe < graph.recipeDominatorWorkstations.size()) {
+            bool runnable = false;
+            for (NodeId station : graph.recipeDominatorWorkstations[recipe]) {
+              if (station < allowed.size() && allowed[station]) {
+                runnable = true;
+                break;
+              }
+            }
+            if (runnable)
+              continue;
+          }
         }
 
         // A pseudo-resource's synthetic recipes don't need workstation.

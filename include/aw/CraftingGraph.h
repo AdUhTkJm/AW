@@ -199,15 +199,24 @@ struct CraftingGraph : BaseCraftingGraph {
   // Real-recipe (composite) pruning. `recipeDominated[r] == 1` means recipe r
   // outputs a real resource and is dominated by a sibling recipe of the same
   // output once every producer of the guard input is inlined.
-  // 
-  // The dominator must also run on every workstation `r` can run on to preserve
-  // reachability. This is taken care already.
+  //
+  // Dominance is a pure cost comparison, so the dominator may need a
+  // workstation r does not. The availability condition is therefore deferred to
+  // query time: r is only dropped when one of the dominators listed in
+  // `recipeDominatorWorkstations[r]` is available (and the guard has no stock).
   std::vector<uint8_t> recipeDominated;  // nRecipe entries
 
   // For a dominated recipe, the real input Y that the witness inlined. The
   // recipe is only dropped when inventory[Y] == 0, so stocked Y can still be
   // spent. UINT32_MAX otherwise.
   std::vector<NodeId> recipeGuardInput;  // nRecipe entries
+
+  // For a dominated recipe r, the union of the workstations of every kept
+  // sibling that dominates r (transitively). r may be dropped when one of them
+  // is available and the guard has no stock, because that sibling can then
+  // replace r. Empty for an undominated recipe, and also for a dominated recipe
+  // whose only replacements cannot be run at all, which is then never dropped.
+  std::vector<std::vector<NodeId>> recipeDominatorWorkstations;  // nRecipe entries
 
   // Multi-item "wasteful pack" certificates. `packDominated[r] == 1` means
   // recipe r carries the certificate in `packCertificates[r]` and is never
@@ -252,8 +261,9 @@ struct Subgraph {
 //
 // `inventory` is indexed by source item node (handle - 1), matching
 // `planCrafting`. A dominated tag edge or real recipe is only dropped when the
-// player holds none of the member / guard input, so existing stock can still
-// be spent.
+// player holds none of the member / guard input, so existing stock can still be
+// spent; a composite-dominated real recipe additionally needs one of its
+// recorded dominator workstations to be available.
 Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
                            std::span<const Amount> inventory = {}) noexcept;
 

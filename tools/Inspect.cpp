@@ -251,14 +251,26 @@ void printSummary(const aw::CraftingGraph& graph) {
           << " average\n";
   }
   size_t pseudoRecipes = 0, tagDominated = 0, recipeDominated = 0;
+  size_t domWsEntries = 0, domWsEmpty = 0;
   for (size_t r = 0; r < graph.nRecipe; ++r) {
     if (graph.output[r] >= graph.nReal) ++pseudoRecipes;
     if (r < graph.tagEdgeDominated.size() && graph.tagEdgeDominated[r]) ++tagDominated;
-    if (r < graph.recipeDominated.size() && graph.recipeDominated[r]) ++recipeDominated;
+    if (r < graph.recipeDominated.size() && graph.recipeDominated[r]) {
+      ++recipeDominated;
+      if (r < graph.recipeDominatorWorkstations.size()) {
+        if (graph.recipeDominatorWorkstations[r].empty())
+          ++domWsEmpty;
+        else
+          domWsEntries += graph.recipeDominatorWorkstations[r].size();
+      } else {
+        ++domWsEmpty;
+      }
+    }
   }
   std::cout << "tag edges      : " << pseudoRecipes << " (" << tagDominated
         << " dominated)\n";
-  std::cout << "recipes dominated: " << recipeDominated << '\n';
+  std::cout << "recipes dominated: " << recipeDominated << " (" << domWsEntries
+        << " dominator workstations, " << domWsEmpty << " without any)\n";
   if (graph.packDominated.size() == graph.nRecipe) {
     size_t packCerts = 0, packEdges = 0, packZero = 0;
     for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
@@ -391,7 +403,8 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
   // real guard input that it actually consumes. Every real item must also keep
   // at least one unflagged recipe, so composite pruning never erases one.
   if (graph.recipeDominated.size() != graph.nRecipe ||
-      graph.recipeGuardInput.size() != graph.nRecipe) {
+      graph.recipeGuardInput.size() != graph.nRecipe ||
+      graph.recipeDominatorWorkstations.size() != graph.nRecipe) {
     report("recipe pruning arrays do not match the recipe count");
   } else {
     for (size_t r = 0; r < graph.nRecipe; ++r) {
@@ -412,6 +425,20 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
           consumed = true;
       if (!consumed) {
         report("a composite-dominated recipe's guard is not one of its inputs");
+        break;
+      }
+      // The dominator workstations are a sorted set of item nodes. The list may
+      // be empty: a real recipe with no workstation can be a representative in
+      // graphs where that happens, and such a dominated recipe is simply never
+      // dropped.
+      const std::vector<aw::NodeId> &ws = graph.recipeDominatorWorkstations[r];
+      bool wsOk = true;
+      for (size_t k = 0; k < ws.size(); ++k) {
+        if (ws[k] >= graph.nItem || (k > 0 && ws[k] <= ws[k - 1]))
+          wsOk = false;
+      }
+      if (!wsOk) {
+        report("a composite-dominated recipe has a bad dominator workstation");
         break;
       }
     }
