@@ -7,7 +7,10 @@
 //      recipes that consume the same resource they produce, and it keeps every
 //      member a recipe of which can emit more than one unit at a time: such a
 //      batch leaves surplus m that is a free way to satisfy T, so the edge may
-//      still be worth keeping ("Batching guard" in computeTagPruning).
+//      still be worth keeping ("Batching guard" in computeTagPruning). In
+//      nonoptimal mode (Options.h) it also computes the transitive closure of
+//      the relation, which reaches members whose recipes only consume the
+//      dominator through another variant, such as EnderIO's fused quartz.
 //
 //   2. Real-recipe (composite) pruning deletes a real recipe R: X <- Y, ...
 //      when a sibling recipe S of X is provably at least as good after
@@ -20,7 +23,7 @@
 //      when a sibling S of X satisfies v_S >= v_R componentwise, i.e. S yields
 //      at least as much X and consumes no more of any input. Nothing is
 //      inlined, so no guard input applies; only the replacement's workstation
-//      is checked at query time. Under the integrality relaxation the columns
+//      is checked at query time. In nonoptimal mode the columns
 //      are compared per unit of output (v / out) and only a strict win creates
 //      an edge, so a slow but material-cheap recipe can beat a fast costly one
 //      without collapsing equal-ratio recipes of different batch size.
@@ -42,6 +45,7 @@
 #include <vector>
 
 #include "aw/CraftingGraph.h"
+#include "aw/Options.h"
 
 namespace aw {
 namespace {
@@ -53,10 +57,6 @@ using uint = uint32_t;
 bool tagPruning = true;
 bool recipePruning = true;
 bool directPruning = true;
-
-// Drop the integrality assumptions of both dominance passes: see the public
-// setter in CraftingGraph.h. On by default, read at registration time.
-bool integralRelaxation = true;
 
 // ---------------------------------------------------------------------------
 // Budgets
@@ -91,6 +91,14 @@ constexpr uint64_t MAX_TAG_COVER_WORK = 64'000'000;
 // Ceiling on the gating pairs loop (a) contributes. Truncating it only drops
 // (m, w) candidates, which can only make `valid` reject more pairs.
 constexpr uint64_t MAX_WITNESS_PAIRS = 4'000'000;
+
+// Ceiling on the pair universe. The seeds are always kept; the transitive
+// closure stops once the total reaches this. It is a heuristic bound: on the
+// 12k-item NAST pack it keeps registration near one second, and running out
+// only leaves pairs out of the relation, which can only make the pass prune
+// less. Paying more here mostly buys the deeper real-input chains, so the
+// marginal tag edges fall off quickly past this point.
+constexpr uint64_t MAX_PRUNE_PAIRS = 4'000'000;
 
 // A real item with more recipes than this is left unpruned. The composite pass
 // compares every pair of an item's recipes; ATM10 has items with 35k recipes,
@@ -270,7 +278,7 @@ bool leZero(std::span<const Amount> cc) noexcept {
 // one column compares against 0, as in leVector. On overflow both stay false,
 // which the caller treats as "cannot prove dominance".
 //
-// This is the integrality relaxation of direct dominance: it compares
+// This is the nonoptimal relaxation of direct dominance: it compares
 // fractional executions, so it can drop a recipe whose one execution is not
 // replaceable by one execution of a sibling, e.g.
 //
@@ -410,8 +418,15 @@ uint32_t markSinkRepresentatives(uint k, const std::vector<uint>& adjOffsets,
 // another member w is strictly cheaper, because then the tag edge `T <- m` can
 // be replaced by `T <- w`. The relation used here is `requires(m, w)`: for
 // every recipe r of m there is an amount-qualified input that is either w
-// itself or a simple tag all of whose other producible members require w. It
-// implies the per-unit cost of m exceeds that of w. See docs/algorithm.typ.
+// itself, a real item that in turn requires w, or a simple tag all of whose
+// producible members require w. It implies the per-unit cost of m exceeds that
+// of w. See docs/algorithm.typ.
+//
+// The real-item and all-members steps are the transitive closure of the
+// relation, and they are only taken in nonoptimal mode: in exact mode the input
+// has to be w itself, or a tag that literally contains w and whose other
+// members all require w. Both modes are computed as one greatest fixpoint over
+// the pair universe built below, where a tag pair is an AND over its members.
 //
 // A tag is "simple" when every one of its recipes is a member edge: exactly one
 // input, no workstation, and a real member. Everything the Java writer emits
@@ -439,6 +454,44 @@ void intersectSorted(const std::vector<NodeId>& a, const std::vector<NodeId>& b,
       j++;
     }
   }
+}
+
+// Merges the (unsorted, possibly duplicated) `cand` into the sorted-unique
+// `dst`, keeping `dst` sorted, and returns the keys that were not already in
+// it. The closure below inserts one frontier at a time, so appending a sorted
+// batch beats probing a hash table and matches the sort/unique style of the
+// rest of the pass.
+std::vector<PairKey> mergeNewPairs(std::vector<PairKey>& dst,
+                                   std::vector<PairKey>& cand) noexcept {
+  std::sort(cand.begin(), cand.end());
+  cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
+  std::vector<PairKey> added;
+  if (cand.empty())
+    return added;
+
+  std::vector<PairKey> merged;
+  merged.reserve(dst.size() + cand.size());
+  size_t i = 0, j = 0;
+  while (i < dst.size() && j < cand.size()) {
+    if (dst[i] < cand[j]) {
+      merged.push_back(dst[i++]);
+    } else if (cand[j] < dst[i]) {
+      added.push_back(cand[j]);
+      merged.push_back(cand[j++]);
+    } else {
+      merged.push_back(dst[i]);
+      i++;
+      j++;
+    }
+  }
+  while (i < dst.size())
+    merged.push_back(dst[i++]);
+  while (j < cand.size()) {
+    added.push_back(cand[j]);
+    merged.push_back(cand[j++]);
+  }
+  dst.swap(merged);
+  return added;
 }
 
 // Fills graph.tagEdgeDominated. Never fails; on malformed input it simply
@@ -558,12 +611,58 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
     }
   }
 
+  const bool nonoptimal = options().nonoptimal;
+
+  // ---- Amount-qualified inputs ------------------------------------------
+  // Per real item: the real items and simple tags that some recipe of it
+  // consumes in an amount at least equal to that recipe's output. Those are the
+  // inputs a single execution can rely on; `validItem` repeats the same scan
+  // recipe by recipe, and the closure below expands the whole relation.
+  std::vector<std::vector<NodeId>> qualReal(nReal), qualTags(nReal);
+  for (NodeId m = 0; m < nReal; m++) {
+    for (NodeId recipeNode : graph.i2r.targetsOf(m)) {
+      const uint r = recipeNode - nItem;
+      const Amount out = graph.outputAmt[r];
+      const auto inputs = graph.r2i.targetsOf(r);
+      const auto weights = graph.r2i.weightsOf(r);
+      for (size_t k = 0; k < inputs.size(); k++) {
+        if (weights[k] < out)
+          continue;
+        const NodeId j = inputs[k];
+        if (j < nReal) {
+          // A raw input is gathered, not crafted, so it never requires w.
+          if (producible[j])
+            qualReal[m].push_back(j);
+        } else if (j < nItem && simpleTag[j]) {
+          qualTags[m].push_back(j);
+        }
+      }
+    }
+    std::sort(qualReal[m].begin(), qualReal[m].end());
+    qualReal[m].erase(std::unique(qualReal[m].begin(), qualReal[m].end()),
+                      qualReal[m].end());
+    std::sort(qualTags[m].begin(), qualTags[m].end());
+    qualTags[m].erase(std::unique(qualTags[m].begin(), qualTags[m].end()),
+                      qualTags[m].end());
+  }
+
   // ---- The universe of candidate pairs ----------------------------------
-  // (a) witnesses for gating: w in the intersection of the amount-qualified
-  //     input sources over every recipe of m.
-  // (b) support pairs (z, w) for members of a common tag, so that the "all
-  //     other members require w" rule has something to count.
-  std::vector<PairKey> pairs;
+  // A pair (x, w) reads "x is dominated by w". x is a real item or a simple
+  // tag, w is always a real item. For an item pair `alive(x, w)` is the old
+  // one-step relation; for a tag pair it is the conjunction over the members,
+  // which is the general form of the tag rule: every member of the consumed
+  // tag has to require w, not merely contain it.
+  //
+  // (a) witness pairs: w is an amount-qualified input source of every recipe of
+  //     m, with tag inputs expanded to their members. These seed the relation.
+  // (b) support pairs (z, w) for members of a common tag.
+  // The closure then alternates: an item pair contributes a tag pair for each
+  // of its amount-qualified tag inputs, a tag pair contributes an item pair for
+  // each of its producible members, and an item pair contributes an item pair
+  // for each of its amount-qualified real inputs. The last two steps make the
+  // relation transitive; they only run in nonoptimal mode, and the exact pass
+  // only builds the tag pairs whose w really is a member.
+  std::vector<PairKey> itemPairs;
   {
     std::vector<NodeId> acc, next, scratch;
     uint64_t witnessPairs = 0;
@@ -605,7 +704,7 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
       for (NodeId w : acc) {
         if (w == m)
           continue;
-        pairs.push_back(packPair(m, w));
+        itemPairs.push_back(packPair(m, w));
         if (++witnessPairs >= MAX_WITNESS_PAIRS)
           break;
       }
@@ -620,19 +719,109 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
         continue;
       for (NodeId w : ms)
         if (z != w)
-          pairs.push_back(packPair(z, w));
+          itemPairs.push_back(packPair(z, w));
     }
   }
 
-  std::sort(pairs.begin(), pairs.end());
-  pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+  std::sort(itemPairs.begin(), itemPairs.end());
+  itemPairs.erase(std::unique(itemPairs.begin(), itemPairs.end()), itemPairs.end());
+
+  // ---- Tag pairs ---------------------------------------------------------
+  // An item pair contributes a tag pair (j, w) for every amount-qualified tag
+  // input j of some recipe of m. In exact mode only the tags that literally
+  // contain w are kept, which is the old one-step gate; the tag-pair lookup in
+  // validItem then enforces the member restriction for free.
+  std::vector<PairKey> tagPairs;
+  {
+    std::vector<PairKey> candTags;
+    for (PairKey key : itemPairs) {
+      const NodeId m = (NodeId) (key >> 32);
+      const NodeId w = (NodeId) (key & 0xFFFFFFFFu);
+      for (NodeId j : qualTags[m]) {
+        if (!nonoptimal &&
+            !std::binary_search(members[j].begin(), members[j].end(), w))
+          continue;
+        candTags.push_back(packPair(j, w));
+      }
+    }
+    mergeNewPairs(tagPairs, candTags);
+  }
+
+  // ---- Transitive closure -----------------------------------------------
+  // Only the frontier is expanded, so every pair is processed once and the
+  // closure costs one pass over the pairs it reaches. MAX_PRUNE_PAIRS caps what
+  // the closure adds; running out leaves pairs out of the relation, never in
+  // it. The tag pairs above are deliberately outside the budget: the exact mode
+  // gates through them, so they must survive however large the seeds are.
+  if (nonoptimal) {
+    uint64_t total = itemPairs.size() + tagPairs.size();
+    std::vector<PairKey> frontierItems = itemPairs;
+    std::vector<PairKey> frontierTags = tagPairs;
+    while ((!frontierItems.empty() || !frontierTags.empty()) &&
+           total < MAX_PRUNE_PAIRS) {
+      std::vector<PairKey> candTags;
+      for (PairKey key : frontierItems) {
+        const NodeId m = (NodeId) (key >> 32);
+        const NodeId w = (NodeId) (key & 0xFFFFFFFFu);
+        for (NodeId j : qualTags[m]) {
+          if (total + candTags.size() >= MAX_PRUNE_PAIRS)
+            break;
+          candTags.push_back(packPair(j, w));
+        }
+      }
+      const std::vector<PairKey> newTags = mergeNewPairs(tagPairs, candTags);
+      total += newTags.size();
+
+      std::vector<PairKey> candItems;
+      // A tag has to dominate w through all of its producible members.
+      for (PairKey key : frontierTags) {
+        const NodeId j = (NodeId) (key >> 32);
+        const NodeId w = (NodeId) (key & 0xFFFFFFFFu);
+        for (NodeId z : members[j]) {
+          if (z == w || !producible[z])
+            continue;
+          if (total + candItems.size() >= MAX_PRUNE_PAIRS)
+            break;
+          candItems.push_back(packPair(z, w));
+        }
+      }
+      // A real item m is dominated by w when its input j is; a raw input is
+      // gathered rather than crafted, so it never requires w and is skipped by
+      // the `producible` precomputation above.
+      for (PairKey key : frontierItems) {
+        const NodeId m = (NodeId) (key >> 32);
+        const NodeId w = (NodeId) (key & 0xFFFFFFFFu);
+        for (NodeId j : qualReal[m]) {
+          if (j == w)
+            continue;
+          if (total + candItems.size() >= MAX_PRUNE_PAIRS)
+            break;
+          candItems.push_back(packPair(j, w));
+        }
+      }
+      const std::vector<PairKey> newItems = mergeNewPairs(itemPairs, candItems);
+      total += newItems.size();
+      frontierItems = newItems;
+      frontierTags = newTags;
+    }
+  }
+
+  // ---- Final universe ---------------------------------------------------
+  std::vector<PairKey> pairs;
+  pairs.reserve(itemPairs.size() + tagPairs.size());
+  pairs.insert(pairs.end(), itemPairs.begin(), itemPairs.end());
+  pairs.insert(pairs.end(), tagPairs.begin(), tagPairs.end());
+  itemPairs.clear();
+  itemPairs.shrink_to_fit();
+  tagPairs.clear();
+  tagPairs.shrink_to_fit();
 
   const uint32_t universe = (uint32_t) pairs.size();
   if (universe == 0)
     return;
 
-  // Group the universe by witness. Sorting by (m, w) means a single scan fills
-  // each witness row in ascending m, so idOf can binary search the row.
+  // Group the universe by witness. Sorting by (x, w) means a single scan fills
+  // each witness row in ascending x, so idOf can binary search the row.
   std::vector<uint> byWOffsets(nItem, 0);
   for (PairKey key : pairs)
     byWOffsets[(uint32_t) (key & 0xFFFFFFFFu)]++;
@@ -643,45 +832,27 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
     std::vector<uint> cursor(byWOffsets.begin(), byWOffsets.end() - 1);
     for (PairKey key : pairs) {
       const NodeId w = (NodeId) (key & 0xFFFFFFFFu);
-      const NodeId m = (NodeId) (key >> 32);
+      const NodeId x = (NodeId) (key >> 32);
       const uint slot = cursor[w]++;
-      byWTargets[slot] = m;
+      byWTargets[slot] = x;
       pairW[slot] = w;
     }
   }
   pairs.clear();
   pairs.shrink_to_fit();
 
-  auto idOf = [&](NodeId m, NodeId w) -> uint32_t {
+  auto idOf = [&](NodeId x, NodeId w) -> uint32_t {
     const uint lo = byWOffsets[w], hi = byWOffsets[w + 1];
     const auto begin = byWTargets.begin() + lo;
     const auto end = byWTargets.begin() + hi;
-    const auto it = std::lower_bound(begin, end, m);
-    if (it == end || *it != m)
+    const auto it = std::lower_bound(begin, end, x);
+    if (it == end || *it != x)
       return UINT32_MAX;
     return (uint32_t) (it - byWTargets.begin());
   };
 
-  // ---- Counters for the tag rule ----------------------------------------
-  // cnt[t][i] counts members z != M[i] that currently require M[i]. The tag may
-  // gate through M[i] exactly when the counter reaches |M| - 1; a member with
-  // no recipe contributes nothing, so a leaf member always blocks the gate.
-  std::vector<std::vector<uint32_t>> cnt(nItem);
-  std::vector<uint32_t> threshold(nItem, 0);
-  for (NodeId t = nReal; t < nItem; t++) {
-    if (!simpleTag[t])
-      continue;
-    const std::vector<NodeId>& ms = members[t];
-    cnt[t].assign(ms.size(), 0);
-    threshold[t] = (uint32_t) ms.size() - 1;
-    for (size_t idx = 0; idx < ms.size(); idx++) {
-      uint32_t c = 0;
-      for (size_t k = 0; k < ms.size(); k++)
-        if (k != idx && producible[ms[k]])
-          c++;
-      cnt[t][idx] = c;
-    }
-  }
+  // Declared before the validation lambdas, which read it; filled in below.
+  std::vector<uint8_t> alive(universe, 1);
 
   // ---- Batching guard ----------------------------------------------------
   // Dropping `T <- m` is only safe when the plan can give up the m it consumes.
@@ -708,12 +879,12 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
   // the k new `T <- w` edges. A member that does not qualify is simply kept, so
   // the guard can only ever prune less.
   //
-  // Under the integrality relaxation the guard is skipped, so a batched member
-  // can be marked dominated: dropping its tag edge then relies on "m is a
-  // better co-member than w" even though a plan may have to keep a batch
-  // running. Skipping the guard also means the scan below is not needed.
+  // Nonoptimal mode skips the guard, so a batched member can be marked
+  // dominated: dropping its tag edge then relies on "m is a better co-member
+  // than w" even though a plan may have to keep a batch running. Skipping the
+  // guard also means the scan below is not needed.
   std::vector<uint8_t> unitOutput;
-  if (!integralRelaxation) {
+  if (!nonoptimal) {
     unitOutput.assign(nItem, 1);
     for (NodeId m = 0; m < nReal; m++)
       for (NodeId recipeNode : graph.i2r.targetsOf(m))
@@ -792,7 +963,25 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
     return false;
   };
 
-  auto valid = [&](NodeId m, NodeId w) -> bool {
+  // A tag pair (t, w) holds when every producible member of t is dominated by
+  // w. A member with no recipe is gathered directly, so it never requires w and
+  // it blocks the gate: it has no pair, so the lookup fails.
+  auto validTag = [&](NodeId t, NodeId w) -> bool {
+    for (NodeId z : members[t]) {
+      if (z == w)
+        continue;
+      const uint32_t q = idOf(z, w);
+      if (q == UINT32_MAX || !alive[q])
+        return false;
+    }
+    return true;
+  };
+
+  // A real item m is dominated by w when every recipe of m has an
+  // amount-qualified input that is w itself, an item pair in turn dominated by
+  // w, or a tag pair dominated by w. The column-cover rule is the same escape
+  // hatch as before.
+  auto validItem = [&](NodeId m, NodeId w) -> bool {
     for (NodeId recipeNode : graph.i2r.targetsOf(m)) {
       const uint r = recipeNode - nItem;
       const Amount out = graph.outputAmt[r];
@@ -807,16 +996,19 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
           ok = true;
           break;
         }
-        if (j >= nReal && j < nItem && simpleTag[j]) {
-          const std::vector<NodeId>& ms = members[j];
-          const auto it = std::lower_bound(ms.begin(), ms.end(), w);
-          if (it != ms.end() && *it == w) {
-            const size_t idx = (size_t) (it - ms.begin());
-            if (cnt[j][idx] == threshold[j]) {
-              ok = true;
-              break;
-            }
-          }
+        if (j < nReal) {
+          // Chaining real inputs is the transitive closure; exact mode only
+          // accepts the direct w above. A raw input has no pair, so it fails
+          // the lookup below, which is what we want.
+          if (!nonoptimal)
+            continue;
+        } else if (j >= nItem || !simpleTag[j]) {
+          continue;
+        }
+        const uint32_t q = idOf(j, w);
+        if (q != UINT32_MAX && alive[q]) {
+          ok = true;
+          break;
         }
       }
       if (!ok && !colCover(r, w))
@@ -827,9 +1019,9 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
 
   // ---- Greatest fixpoint ------------------------------------------------
   // Every pair starts alive and is killed once when it loses its justification.
-  // A kill can only invalidate pairs that gate through a shared tag, so those
-  // consumers are re-queued; the result is the greatest fixpoint.
-  std::vector<uint8_t> alive(universe, 1);
+  // Killing an item pair can invalidate the tag pairs that contain it as a
+  // member, and killing a tag pair invalidates the recipes that gated through
+  // it; both are re-queued, which yields the greatest fixpoint.
   std::vector<uint32_t> queue(universe);
   std::vector<uint8_t> queued(universe, 0);
   size_t head = 0, tail = 0, pending = 0;
@@ -856,41 +1048,29 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
     if (!alive[id])
       continue;
 
-    const NodeId m = byWTargets[id];
+    const NodeId x = byWTargets[id];
     const NodeId w = pairW[id];
-    if (valid(m, w))
+    // A first component at or above nReal is a simple tag: its pair is the AND
+    // over its members, not a recipe scan.
+    const bool tagPair = x >= nReal;
+    if (tagPair ? validTag(x, w) : validItem(x, w))
       continue;
 
-    // Kill (m, w). Every tag containing both loses one supporting member.
-    // m and w are always real here: the universe is built from real items.
     alive[id] = 0;
-    const auto ta = std::span(itemTagTargets.data() + itemTagOffsets[m],
-                              itemTagOffsets[m + 1] - itemTagOffsets[m]);
-    const auto tb = std::span(itemTagTargets.data() + itemTagOffsets[w],
-                              itemTagOffsets[w + 1] - itemTagOffsets[w]);
-    size_t i = 0, j = 0;
-    while (i < ta.size() && j < tb.size()) {
-      if (ta[i] < tb[j]) {
-        i++;
-      } else if (tb[j] < ta[i]) {
-        j++;
-      } else {
-        const NodeId tag = ta[i];
-        const std::vector<NodeId>& ms = members[tag];
-        const auto it = std::lower_bound(ms.begin(), ms.end(), w);
-        const size_t idx = (size_t) (it - ms.begin());
-        const uint32_t c = --cnt[tag][idx];
-        // cnt only ever decreases, so the drop from a full gate (threshold) to
-        // a broken one happens at most once per (tag, witness).
-        if (c + 1 == threshold[tag]) {
-          for (uint e = tagConsumerOffsets[tag]; e < tagConsumerOffsets[tag + 1]; e++) {
-            const uint32_t q = idOf(tagConsumerTargets[e], w);
-            if (q != UINT32_MAX)
-              push(q);
-          }
-        }
-        i++;
-        j++;
+    if (tagPair) {
+      // The tag lost a member, so every real recipe that consumed it may no
+      // longer gate through it.
+      for (uint e = tagConsumerOffsets[x]; e < tagConsumerOffsets[x + 1]; e++) {
+        const uint32_t q = idOf(tagConsumerTargets[e], w);
+        if (q != UINT32_MAX)
+          push(q);
+      }
+    } else {
+      // The item lost, so every tag that contains it lost a supporting member.
+      for (uint e = itemTagOffsets[x]; e < itemTagOffsets[x + 1]; e++) {
+        const uint32_t q = idOf(itemTagTargets[e], w);
+        if (q != UINT32_MAX)
+          push(q);
       }
     }
   }
@@ -945,8 +1125,8 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
       const NodeId m = ms[a];
       // A batched member keeps its tag edge: the batch surplus would otherwise
       // be a free way to satisfy T, and dropping the edge costs real steps.
-      // The integrality relaxation waives the guard, see above.
-      if (!integralRelaxation && !unitOutput[m])
+      // Nonoptimal mode waives the guard, see above.
+      if (!nonoptimal && !unitOutput[m])
         continue;
       for (NodeId recipeNode : graph.i2r.targetsOf(t)) {
         const uint r = recipeNode - nItem;
@@ -972,7 +1152,7 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
 // A dominated recipe is only dropped by reachability when its witness input has
 // no inventory and a replacement can actually be run.
 //
-// Under the integrality relaxation the inline count is floored instead of
+// In nonoptimal mode the inline count is floored instead of
 // rounded up, so a producer that overshoots q is treated as if the excess came
 // for free and more recipes are dominated.
 //
@@ -1120,7 +1300,7 @@ void computeRecipePruning(CraftingGraph& graph, const RecipeVectors& vec) noexce
             break;
           }
           Amount alpha = q / p;
-          if (!integralRelaxation && q % p != 0)
+          if (!options().nonoptimal && q % p != 0)
             alpha++;
           if (!buildComposite(alpha, vec, r, R, cItems, cCoeffs)) {
             candidates.clear();
@@ -1183,7 +1363,7 @@ void computeRecipePruning(CraftingGraph& graph, const RecipeVectors& vec) noexce
 // at least as high while the step count is unchanged, so no optimal plan needs
 // r.
 //
-// Under the integrality relaxation the columns are compared after normalizing
+// In nonoptimal mode the columns are compared after normalizing
 // their output amount to 1 instead of per execution (`compareNormalized`). That
 // subsumes the raw comparison for recipes that do not consume their own output,
 // but it compares fractional executions: a slow recipe that is cheaper per unit
@@ -1192,7 +1372,7 @@ void computeRecipePruning(CraftingGraph& graph, const RecipeVectors& vec) noexce
 //
 // Unlike the composite pass nothing is inlined, so no guard input is recorded
 // and held stock never makes r preferable. The comparison is a partial order on
-// columns (on per-unit columns under the relaxation), so keeping one
+// columns (on per-unit columns in nonoptimal mode), so keeping one
 // representative per sink SCC keeps exactly the maximal columns. The raw
 // relation puts equal columns in one SCC; the relaxed one is strict and leaves
 // equal per-unit columns of different batch size as separate sinks. Either way
@@ -1247,7 +1427,7 @@ void computeDirectDominancePruning(CraftingGraph& graph,
         const auto ji = vec.itemsOf(recs[j]);
         const auto jc = vec.coeffsOf(recs[j]);
 
-        if (integralRelaxation) {
+        if (options().nonoptimal) {
           // Per-unit-output comparison. A non-positive output amount has no
           // meaningful normalization, so such a pair stays incomparable.
           bool iLeJ = false, jLeI = false;
@@ -1363,14 +1543,6 @@ void setDirectDominancePruningEnabled(bool enabled) noexcept {
 
 bool isDirectDominancePruningEnabled() noexcept {
   return directPruning;
-}
-
-void setIntegralRelaxationEnabled(bool enabled) noexcept {
-  integralRelaxation = enabled;
-}
-
-bool isIntegralRelaxationEnabled() noexcept {
-  return integralRelaxation;
 }
 
 }  // namespace aw

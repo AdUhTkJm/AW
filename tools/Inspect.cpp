@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "aw/CraftingGraph.h"
+#include "aw/Options.h"
 #include "aw/Plan.h"
 #include "aw/Profiler.h"
 
@@ -813,7 +814,7 @@ int main(int argc, char** argv) {
   bool noPackPrune = false;
   bool noSatellitePrune = false;
   bool noDeadNodePrune = false;
-  bool soundPruning = false;
+  bool optimalPruning = false;
   bool doReach = false;
   bool doTree = false;
   bool doPlan = false;
@@ -838,8 +839,12 @@ int main(int argc, char** argv) {
       noSatellitePrune = true;
     } else if (arg == "--no-dead-node-prune") {
       noDeadNodePrune = true;
+    } else if (arg == "--optimal") {
+      optimalPruning = true;
     } else if (arg == "--sound") {
-      soundPruning = true;
+      // Deprecated spelling of --optimal, from when the flag only meant the
+      // integrality relaxation.
+      optimalPruning = true;
     } else if (arg == "--satellite-seconds") {
       if (i + 1 >= argc || !parseDouble(argv[++i], satelliteSeconds)) {
         std::cerr << "--satellite-seconds needs a number of seconds\n";
@@ -938,7 +943,7 @@ int main(int argc, char** argv) {
                    "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune]\n"
                    "                   [--no-pack-prune]\n"
                    "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
-                   "                   [--no-dead-node-prune] [--sound]\n"
+                   "                   [--no-dead-node-prune] [--optimal]\n"
                    "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                    "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
@@ -958,7 +963,7 @@ int main(int argc, char** argv) {
                  "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune]\n"
                  "                   [--no-pack-prune]\n"
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
-                 "                   [--no-dead-node-prune] [--sound]\n"
+                 "                   [--no-dead-node-prune] [--optimal]\n"
                  "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                  "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
@@ -987,9 +992,9 @@ int main(int argc, char** argv) {
   else
     aw::setTagInliningMode(aw::TagInlineMode::OFF);
 
-  // Integrality relaxation is read at registration time. It is on by default;
-  // --sound restores the exact (but slower) pruning.
-  aw::setIntegralRelaxationEnabled(!soundPruning);
+  // Nonoptimal mode is on by default; --optimal restores the exact (but
+  // slower) pruning.
+  aw::options().nonoptimal = !optimalPruning;
 
   // The certificate pass runs at registration time, so its options have to be
   // installed before the graph is registered.

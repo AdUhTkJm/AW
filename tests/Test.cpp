@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "aw/CraftingGraph.h"
+#include "aw/Options.h"
 #include "aw/Plan.h"
 #include "aw/Solver.h"
 
@@ -33,6 +34,45 @@ void emitVarInt(std::vector<std::byte>& out, std::uint64_t value) {
   }
   out.push_back(static_cast<std::byte>(value));
 }
+
+// Compact writer for the tag-pruning samples below. Handles must be emitted in
+// ascending order, exactly as the Java writer does. `ws` and `inputs` are in
+// ascending handle order; the writer stores deltas. A real recipe with no
+// workstation is dropped by registerCraftingGraph, so every real recipe here
+// names one.
+struct AwrWriter {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  std::uint32_t previousHandle = 0;
+
+  void header(std::uint32_t nReal, std::uint32_t entries) {
+    emitVarInt(out, nReal);
+    emitVarInt(out, entries);
+  }
+
+  void item(std::uint32_t handle, std::uint32_t recipes) {
+    emitVarInt(out, handle - previousHandle);
+    previousHandle = handle;
+    emitVarInt(out, recipes);
+  }
+
+  void recipe(std::int64_t amount, std::initializer_list<std::uint32_t> ws,
+              std::initializer_list<std::pair<std::uint32_t, std::int64_t>> inputs) {
+    emitVarInt(out, (std::uint64_t) amount);
+    emitVarInt(out, ws.size());
+    std::uint32_t previous = 0;
+    for (std::uint32_t w : ws) {
+      emitVarInt(out, w - previous);
+      previous = w;
+    }
+    emitVarInt(out, inputs.size());
+    previous = 0;
+    for (const auto& [handle, inputAmount] : inputs) {
+      emitVarInt(out, (std::uint64_t) inputAmount);
+      emitVarInt(out, handle - previous);
+      previous = handle;
+    }
+  }
+};
 
 // A dump that exercises: an item with several recipes, an item with none, a
 // pseudo-resource, an empty-input recipe and the workstation encoding the
@@ -620,6 +660,74 @@ std::vector<std::byte> buildBulkSample() {
   return out;
 }
 
+// The EnderIO fused-quartz shape: two variants that require each other and a
+// tag that does not itself contain the dominator. Only the nonoptimal general
+// tag gate can close this.
+//
+//   handle 1 W     <- r0 (x1, ws [4], base x1)
+//   handle 2 M     <- r1 (x1, ws [4], N x1)
+//                  <- r2 (x1, ws [4], W x1)
+//                  <- r3 (x1, ws [4], T_A x1)
+//   handle 3 N     <- r4 (x1, ws [4], M x1)
+//                  <- r5 (x1, ws [4], T_N x1)
+//   handle 5 T_A   <- r6 (x1, no ws, M x1)      (synthetic)
+//   handle 6 T_N   <- r7 (x1, no ws, N x1)      (synthetic)
+//   handle 7 T_ALL <- r8 (x1, no ws, W x1)      (synthetic)
+//                  <- r9 (x1, no ws, M x1)
+//                  <- r10 (x1, no ws, N x1)
+std::vector<std::byte> buildFusedQuartzSample() {
+  AwrWriter w;
+  w.header(4, 6);  // real handles 1..4; entries 1, 2, 3, 5, 6, 7
+  w.item(1, 1);
+  w.recipe(1, {4}, {{4, 1}});
+  w.item(2, 3);
+  w.recipe(1, {4}, {{3, 1}});
+  w.recipe(1, {4}, {{1, 1}});
+  w.recipe(1, {4}, {{5, 1}});
+  w.item(3, 2);
+  w.recipe(1, {4}, {{2, 1}});
+  w.recipe(1, {4}, {{6, 1}});
+  w.item(5, 1);
+  w.recipe(1, {}, {{2, 1}});
+  w.item(6, 1);
+  w.recipe(1, {}, {{3, 1}});
+  w.item(7, 3);
+  w.recipe(1, {}, {{1, 1}});
+  w.recipe(1, {}, {{2, 1}});
+  w.recipe(1, {}, {{3, 1}});
+  return w.out;
+}
+
+// A chain whose middle pair is neither a witness pair nor a common-tag pair, so
+// it only enters the relation once the closure materializes it. `M` consumes
+// `J`, and `J` only requires `W` through the single-member tag `K`.
+//
+//   handle 1 W <- r0 (x1, ws [4], base x1)
+//   handle 2 M <- r1 (x1, ws [4], J x1)
+//   handle 3 J <- r2 (x1, ws [4], K x1)
+//   handle 5 Z <- r3 (x1, ws [4], W x1)      (makes (Z, W) a witness pair)
+//   handle 6 T <- r4 (x1, no ws, W x1)       (synthetic; T = {W, M})
+//              <- r5 (x1, no ws, M x1)
+//   handle 7 K <- r6 (x1, no ws, Z x1)       (synthetic)
+std::vector<std::byte> buildTransitiveClosureSample() {
+  AwrWriter w;
+  w.header(5, 6);  // real handles 1..5; entries 1, 2, 3, 5, 6, 7
+  w.item(1, 1);
+  w.recipe(1, {4}, {{4, 1}});
+  w.item(2, 1);
+  w.recipe(1, {4}, {{3, 1}});
+  w.item(3, 1);
+  w.recipe(1, {4}, {{7, 1}});
+  w.item(5, 1);
+  w.recipe(1, {4}, {{1, 1}});
+  w.item(6, 2);
+  w.recipe(1, {}, {{1, 1}});
+  w.recipe(1, {}, {{2, 1}});
+  w.item(7, 1);
+  w.recipe(1, {}, {{5, 1}});
+  return w.out;
+}
+
 // A batched member whose tag edge is a free sink for the batch surplus. The
 // guard in Prune.cpp must keep `T <- m` even though every recipe of m consumes
 // w at an equal rate: `m x4 <- w x6` emits four units per execution, so a plan
@@ -1065,7 +1173,7 @@ std::vector<std::byte> buildIntegerScalingSample() {
 //   handle 4 W is a leaf.
 //
 // ceil(3 / 2) = 2, so `2 Y + R` leaves a spare Y and is not bounded by S. The
-// integrality relaxation floors to 1, which wrongly bounds R by S. Recipe ids:
+// nonoptimal relaxation floors to 1, which wrongly bounds R by S. Recipe ids:
 // R=0, S=1, r=2, z=3.
 std::vector<std::byte> buildRelaxedCompositeSample() {
   std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
@@ -2372,6 +2480,50 @@ void testWideTagPruning() {
   expect(dominated == 0, "an oversized tag is skipped instead of expanded");
 }
 
+// The general tag gate and the transitive closure. Both samples leave the
+// domination relation one step short unless nonoptimal mode closes it, so the
+// exact run has to keep the tag edges.
+void testTagTransitiveClosure() {
+  std::cout << "[Test] tag transitive closure\n";
+
+  // Sample A: M and N require each other, and N only requires W through T_N,
+  // which does not contain W.
+  aw::options().nonoptimal = true;
+  aw::registerCraftingGraph(buildFusedQuartzSample());
+  expect(aw::getCraftingError() == nullptr, "fused quartz sample parses");
+  {
+    const aw::CraftingGraph &g = aw::getCraftingGraph();
+    expect(g.nRecipe == 11, "fused quartz sample shape");
+    expect(g.tagEdgeDominated[8] == 0, "the dominator keeps its tag edge");
+    expect(g.tagEdgeDominated[9] == 1, "the mutual member is dropped");
+    expect(g.tagEdgeDominated[10] == 1, "the other mutual member is dropped");
+  }
+  aw::options().nonoptimal = false;
+  aw::registerCraftingGraph(buildFusedQuartzSample());
+  {
+    const aw::CraftingGraph &g = aw::getCraftingGraph();
+    expect(g.tagEdgeDominated[9] == 0 && g.tagEdgeDominated[10] == 0,
+           "the one-step relation keeps both mutual members");
+  }
+
+  // Sample B: (J, W) is neither a witness pair nor a common-tag pair, so only
+  // the closure can put it into the relation.
+  aw::options().nonoptimal = true;
+  aw::registerCraftingGraph(buildTransitiveClosureSample());
+  expect(aw::getCraftingError() == nullptr, "closure sample parses");
+  {
+    const aw::CraftingGraph &g = aw::getCraftingGraph();
+    expect(g.nRecipe == 7, "closure sample shape");
+    expect(g.tagEdgeDominated[4] == 0, "the dominator keeps its tag edge");
+    expect(g.tagEdgeDominated[5] == 1, "the chained member is dropped");
+  }
+  aw::options().nonoptimal = false;
+  aw::registerCraftingGraph(buildTransitiveClosureSample());
+  expect(aw::getCraftingGraph().tagEdgeDominated[5] == 0,
+         "without the closure the chained member survives");
+  aw::options().nonoptimal = false;
+}
+
 void testTagPruningParity() {
   std::cout << "[Test] tag pruning preserves the optimum\n";
   aw::registerCraftingGraph(buildGlassSample());
@@ -2451,17 +2603,18 @@ void testTagBatchingGuard() {
          "tag pruning does not change the batch recycle optimum");
 }
 
-// The integrality relaxation is unsound on purpose. These are the samples that
-// witness the two guards it drops, so the relaxed run must actually mark the
-// edge/recipe -- and, for the batch sample, plan worse.
-void testIntegralRelaxation() {
-  std::cout << "[Test] integrality relaxation (unsound)\n";
+// Nonoptimal mode is on purpose: it may plan worse, but it must never break
+// feasibility. These are the samples that witness the guards it drops, so the
+// relaxed run must actually mark the edge/recipe -- and, for the batch sample,
+// plan worse.
+void testNonoptimal() {
+  std::cout << "[Test] nonoptimal mode\n";
   const aw::Handle all[] = {1, 2, 3, 4};
 
   // A batched member: without the guard `T <- m` is marked dominated and the
   // batch surplus is no longer a free sink, so the real optimum rises from 4
   // to 6.
-  aw::setIntegralRelaxationEnabled(true);
+  aw::options().nonoptimal = true;
   aw::registerCraftingGraph(buildBatchRecycleSample());
   expect(aw::getCraftingError() == nullptr, "batch recycle sample parses");
   {
@@ -2489,27 +2642,27 @@ void testIntegralRelaxation() {
   }
 
   // The composite ceiling: R needs 3 Y but the only producer emits 2, so
-  // floor(3 / 2) = 1 wrongly dominates R. The sound run leaves R alone.
+  // floor(3 / 2) = 1 wrongly dominates R. The exact run leaves R alone.
   aw::registerCraftingGraph(buildRelaxedCompositeSample());
   expect(aw::getCraftingError() == nullptr, "relaxed composite sample parses");
   expect(aw::getCraftingGraph().recipeDominated[0] == 1,
-         "the relaxed pass floors the inline count");
+         "the nonoptimal pass floors the inline count");
 
-  aw::setIntegralRelaxationEnabled(false);
+  aw::options().nonoptimal = false;
   aw::registerCraftingGraph(buildRelaxedCompositeSample());
   expect(aw::getCraftingGraph().recipeDominated[0] == 0,
-         "the ceiling keeps R undominated in sound mode");
+         "the ceiling keeps R undominated in exact mode");
 
   // Output normalization in the direct pass: the free single-output recipe is
   // cheaper per unit than the six-output recipe that eats an essence, so the
   // relaxed pass drops the latter although one execution of it is not
   // replaceable by one execution of the former.
-  aw::setIntegralRelaxationEnabled(true);
+  aw::options().nonoptimal = true;
   aw::registerCraftingGraph(buildNormalizedDominanceSample());
   expect(aw::getCraftingError() == nullptr, "normalized dominance sample parses");
   expect(aw::getCraftingGraph().recipeDirectDominated[1] == 1,
          "the relaxed pass normalizes the direct comparison");
-  aw::setIntegralRelaxationEnabled(false);
+  aw::options().nonoptimal = false;
   aw::registerCraftingGraph(buildNormalizedDominanceSample());
   expect(aw::getCraftingGraph().recipeDirectDominated[1] == 0,
          "raw column dominance keeps the six-output recipe");
@@ -2520,7 +2673,7 @@ void testIntegralRelaxation() {
   {
     const aw::Handle all[] = {1, 2, 3, 4};
     auto plan = [&](bool relaxed) {
-      aw::setIntegralRelaxationEnabled(relaxed);
+      aw::options().nonoptimal = relaxed;
       aw::registerCraftingGraph(buildNormalizedDominanceSample());
       const aw::CraftingGraph &g = aw::getCraftingGraph();
       std::vector<aw::Amount> inventory(g.nItem, 0);
@@ -2534,7 +2687,7 @@ void testIntegralRelaxation() {
     };
     expect(plan(false) == 4, "the raw plan batches the six-output recipe");
     expect(plan(true) == 6, "the normalized plan falls back to single crafts");
-    aw::setIntegralRelaxationEnabled(false);
+    aw::options().nonoptimal = false;
   }
 
   // Equal per-unit columns must not collapse: a coarse batch cannot replace a
@@ -2542,7 +2695,7 @@ void testIntegralRelaxation() {
   // one nether brick wall into six.
   {
     const aw::Handle all[] = {1, 2, 3, 4};
-    aw::setIntegralRelaxationEnabled(true);
+    aw::options().nonoptimal = true;
     aw::registerCraftingGraph(buildEqualRatioSample());
     const aw::CraftingGraph &g = aw::getCraftingGraph();
     expect(g.recipeDirectDominated[0] == 0 && g.recipeDirectDominated[1] == 0,
@@ -2555,7 +2708,7 @@ void testIntegralRelaxation() {
     for (int64_t x : r.exec)
       total += x;
     expect(total == 2, "the finer recipe serves a single X");
-    aw::setIntegralRelaxationEnabled(false);
+    aw::options().nonoptimal = false;
   }
 }
 
@@ -3370,10 +3523,10 @@ void testSatellitePruningParity() {
 }  // namespace
 
 int main() {
-  // The integrality relaxation is unsound, so the parity tests below -- which
-  // assert that pruning preserves the optimum -- must run with it off. The
-  // dedicated testIntegralRelaxation exercises the relaxed behaviour.
-  aw::setIntegralRelaxationEnabled(false);
+  // Nonoptimal mode may prune more than the optimum allows, so the parity tests
+  // below -- which assert that pruning preserves the optimum -- must run with
+  // it off. The dedicated testNonoptimal exercises the relaxed behaviour.
+  aw::options().nonoptimal = false;
 
   testSample();
   testRejectsBadInput();
@@ -3388,9 +3541,10 @@ int main() {
   testDuplicateRecipes();
   testTagPruning();
   testWideTagPruning();
+  testTagTransitiveClosure();
   testTagPruningParity();
   testTagBatchingGuard();
-  testIntegralRelaxation();
+  testNonoptimal();
   testTagInlining();
   testFreeTagObjective();
   testRecipePruning();

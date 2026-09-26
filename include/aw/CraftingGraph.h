@@ -301,33 +301,10 @@ bool isRecipePruningEnabled() noexcept;
 void setDirectDominancePruningEnabled(bool enabled) noexcept;
 bool isDirectDominancePruningEnabled() noexcept;
 
-// Integrality relaxation for the dominance passes. On by default, and read at
-// registration time, so it must be set before registerCraftingGraph.
-//
-// Both pruning passes are sound only because they reason about whole recipe
-// executions: a plan runs a recipe an integer number of times. Three guards bake
-// that assumption in, and they are exactly what this flag drops:
-//
-//   * the tag pass keeps a tag edge `T <- m` whenever some recipe of m emits
-//     more than one unit at a time, because the batch surplus is a free way to
-//     satisfy T ("Batching guard" in Prune.cpp);
-//   * the composite pass inlines a producer of the witness Y with
-//     `alpha = ceil(q / p)`, because running it once may overshoot the q units
-//     of Y that R actually consumes;
-//   * the direct pass compares raw columns, so one of its executions must be
-//     replaceable by one of the dominator. Relaxed, it compares columns after
-//     normalizing the output amount to 1, which can drop a slow but
-//     material-cheap recipe in favor of nothing and a fast but costly one.
-//
-// Relaxing the integrality drops the batch guard, rounds the inline count down
-// to `floor(q / p)`, and normalizes the direct comparison. Pruning then marks
-// more edges and recipes dominated, so the query-time subgraph is smaller and
-// the solver has less to do -- at the cost of sometimes deleting a recipe that
-// an optimal integer plan needs, which leaves the planner with a feasible but
-// suboptimal plan (docs/algorithm.typ, the black glass example). Disable this
-// when the optimum has to be exact, e.g. in the unit tests.
-void setIntegralRelaxationEnabled(bool enabled) noexcept;
-bool isIntegralRelaxationEnabled() noexcept;
+// Integrality relaxation for the dominance passes now lives in Options.h as
+// `options().nonoptimal`. It is on by default, and read at registration time,
+// so it must be set before registerCraftingGraph. See the field's comment for
+// exactly which guards it drops and which relation it computes instead.
 
 // Certificate pruning is on by default. It is computed during
 // registerCraftingGraph, so options must be set before registering a graph.
