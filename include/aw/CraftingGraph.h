@@ -305,7 +305,7 @@ bool isDirectDominancePruningEnabled() noexcept;
 // registration time, so it must be set before registerCraftingGraph.
 //
 // Both pruning passes are sound only because they reason about whole recipe
-// executions: a plan runs a recipe an integer number of times. Two guards bake
+// executions: a plan runs a recipe an integer number of times. Three guards bake
 // that assumption in, and they are exactly what this flag drops:
 //
 //   * the tag pass keeps a tag edge `T <- m` whenever some recipe of m emits
@@ -313,15 +313,19 @@ bool isDirectDominancePruningEnabled() noexcept;
 //     satisfy T ("Batching guard" in Prune.cpp);
 //   * the composite pass inlines a producer of the witness Y with
 //     `alpha = ceil(q / p)`, because running it once may overshoot the q units
-//     of Y that R actually consumes.
+//     of Y that R actually consumes;
+//   * the direct pass compares raw columns, so one of its executions must be
+//     replaceable by one of the dominator. Relaxed, it compares columns after
+//     normalizing the output amount to 1, which can drop a slow but
+//     material-cheap recipe in favor of nothing and a fast but costly one.
 //
-// Relaxing the integrality drops the batch guard and rounds the inline count
-// down to `floor(q / p)`. Pruning then marks more edges and recipes dominated,
-// so the query-time subgraph is smaller and the solver has less to do -- at the
-// cost of sometimes deleting a recipe that an optimal integer plan needs, which
-// leaves the planner with a feasible but suboptimal plan (docs/algorithm.typ,
-// the black glass example). Disable this when the optimum has to be exact, e.g.
-// in the unit tests.
+// Relaxing the integrality drops the batch guard, rounds the inline count down
+// to `floor(q / p)`, and normalizes the direct comparison. Pruning then marks
+// more edges and recipes dominated, so the query-time subgraph is smaller and
+// the solver has less to do -- at the cost of sometimes deleting a recipe that
+// an optimal integer plan needs, which leaves the planner with a feasible but
+// suboptimal plan (docs/algorithm.typ, the black glass example). Disable this
+// when the optimum has to be exact, e.g. in the unit tests.
 void setIntegralRelaxationEnabled(bool enabled) noexcept;
 bool isIntegralRelaxationEnabled() noexcept;
 

@@ -20,7 +20,10 @@
 //      when a sibling S of X satisfies v_S >= v_R componentwise, i.e. S yields
 //      at least as much X and consumes no more of any input. Nothing is
 //      inlined, so no guard input applies; only the replacement's workstation
-//      is checked at query time.
+//      is checked at query time. Under the integrality relaxation the columns
+//      are compared per unit of output (v / out) and only a strict win creates
+//      an edge, so a slow but material-cheap recipe can beat a fast costly one
+//      without collapsing equal-ratio recipes of different batch size.
 //
 // The passes can remove an edge that the player might usefully keep, because
 // a stocked input can always be spent directly, and a recipe whose replacement
@@ -256,6 +259,55 @@ bool leZero(std::span<const Amount> cc) noexcept {
     if (c > 0)
       return false;
   return true;
+}
+
+// Compares two sibling columns after normalizing their output amount to 1: a
+// recipe that yields `out` units has the per-unit column `v / out`. `iLeJ` is
+// set when every coefficient of i / outI is at most the matching coefficient
+// of j / outJ, and `jLeI` is the reverse; both set means the per-unit columns
+// are equal. Cross multiplying turns the test into `c_i * outJ <= c_j * outI`,
+// which avoids the division and stays exact in integers. A row present in only
+// one column compares against 0, as in leVector. On overflow both stay false,
+// which the caller treats as "cannot prove dominance".
+//
+// This is the integrality relaxation of direct dominance: it compares
+// fractional executions, so it can drop a recipe whose one execution is not
+// replaceable by one execution of a sibling, e.g.
+//
+//   X x1 <- (nothing)      per unit: no input
+//   X x6 <- essence x3     per unit: 0.5 essence
+//
+// The second is dominated per unit by the first although six X need six
+// executions of it.
+void compareNormalized(std::span<const NodeId> ii, std::span<const Amount> ic,
+                       Amount outI, std::span<const NodeId> ji,
+                       std::span<const Amount> jc, Amount outJ, bool& iLeJ,
+                       bool& jLeI) noexcept {
+  iLeJ = true;
+  jLeI = true;
+  size_t a = 0, b = 0;
+  while (a < ii.size() || b < ji.size()) {
+    NodeId next = UINT32_MAX;
+    if (a < ii.size())
+      next = std::min(next, ii[a]);
+    if (b < ji.size())
+      next = std::min(next, ji[b]);
+
+    const Amount ci = (a < ii.size() && ii[a] == next) ? ic[a++] : 0;
+    const Amount cj = (b < ji.size() && ji[b] == next) ? jc[b++] : 0;
+    Amount lhs = 0, rhs = 0;
+    if (mulOverflow(ci, outJ, lhs) || mulOverflow(cj, outI, rhs)) {
+      iLeJ = false;
+      jLeI = false;
+      return;
+    }
+    if (lhs > rhs)
+      iLeJ = false;
+    if (rhs > lhs)
+      jLeI = false;
+    if (!iLeJ && !jLeI)
+      return;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,14 +1183,23 @@ void computeRecipePruning(CraftingGraph& graph, const RecipeVectors& vec) noexce
 // at least as high while the step count is unchanged, so no optimal plan needs
 // r.
 //
+// Under the integrality relaxation the columns are compared after normalizing
+// their output amount to 1 instead of per execution (`compareNormalized`). That
+// subsumes the raw comparison for recipes that do not consume their own output,
+// but it compares fractional executions: a slow recipe that is cheaper per unit
+// can then dominate a fast one that consumes more per unit. For the player this
+// trades steps for materials, so it is a deliberate deviation from optimality.
+//
 // Unlike the composite pass nothing is inlined, so no guard input is recorded
 // and held stock never makes r preferable. The comparison is a partial order on
-// columns; equal columns collapse into one SCC, so keeping one representative
-// per sink SCC keeps exactly the maximal columns. The relation is transitive,
-// so every representative above r dominates r directly, and the union of their
-// workstations is a valid replacement set. As in the composite pass the
-// dominator may need a workstation r does not, so availability is deferred to
-// the query.
+// columns (on per-unit columns under the relaxation), so keeping one
+// representative per sink SCC keeps exactly the maximal columns. The raw
+// relation puts equal columns in one SCC; the relaxed one is strict and leaves
+// equal per-unit columns of different batch size as separate sinks. Either way
+// the relation is transitive, so every representative above r dominates r
+// directly, and the union of their workstations is a valid replacement set. As
+// in the composite pass the dominator may need a workstation r does not, so
+// availability is deferred to the query.
 void computeDirectDominancePruning(CraftingGraph& graph,
                                    const RecipeVectors& vec) noexcept {
   graph.recipeDirectDominated.assign(graph.nRecipe, 0);
@@ -1176,7 +1237,7 @@ void computeDirectDominancePruning(CraftingGraph& graph,
     }
     const uint k = (uint) recs.size();
 
-    // adj[i] holds every sibling j with v_j >= v_i, so the sink SCC
+    // adj[i] holds every sibling j whose column dominates i's, so the sink SCC
     // representatives are the maximal columns.
     adj.assign(k, {});
     for (uint i = 0; i < k; i++) {
@@ -1185,12 +1246,30 @@ void computeDirectDominancePruning(CraftingGraph& graph,
       for (uint j = i + 1; j < k; j++) {
         const auto ji = vec.itemsOf(recs[j]);
         const auto jc = vec.coeffsOf(recs[j]);
-        // out_i <= out_j is necessary for v_i <= v_j, so it skips most pairs
-        // when the outputs differ; it is not sufficient on its own.
-        if (outAmt[i] <= outAmt[j] && leVector(ii, ic, ji, jc))
-          adj[i].push_back(j);
-        if (outAmt[j] <= outAmt[i] && leVector(ji, jc, ii, ic))
-          adj[j].push_back(i);
+
+        if (integralRelaxation) {
+          // Per-unit-output comparison. A non-positive output amount has no
+          // meaningful normalization, so such a pair stays incomparable.
+          bool iLeJ = false, jLeI = false;
+          if (outAmt[i] > 0 && outAmt[j] > 0)
+            compareNormalized(ii, ic, outAmt[i], ji, jc, outAmt[j], iLeJ, jLeI);
+          // Only a strict per-unit win creates an edge. Equal per-unit
+          // columns differ only in batch size, and an integer target may need
+          // the finer batch (a wall x1 and a wall x6 from the same per-unit
+          // ratio are not interchangeable when one wall is wanted), so they
+          // stay incomparable and both survive.
+          if (iLeJ && !jLeI)
+            adj[i].push_back(j);
+          if (jLeI && !iLeJ)
+            adj[j].push_back(i);
+        } else {
+          // out_i <= out_j is necessary for v_i <= v_j, so it skips most pairs
+          // when the outputs differ; it is not sufficient on its own.
+          if (outAmt[i] <= outAmt[j] && leVector(ii, ic, ji, jc))
+            adj[i].push_back(j);
+          if (outAmt[j] <= outAmt[i] && leVector(ji, jc, ii, ic))
+            adj[j].push_back(i);
+        }
       }
     }
 

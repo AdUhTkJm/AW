@@ -1310,6 +1310,99 @@ std::vector<std::byte> buildDirectDominanceSample() {
   return out;
 }
 
+// Output-amount normalization for the relaxed direct pass. The free X recipe is
+// cheaper per unit than the six-output recipe that eats an essence, so the
+// normalized comparison drops the latter although one execution of it yields
+// six X and one execution of the former only one:
+//
+//   handle 1 X <- r0 (x1, ws [4], nothing)
+//               <- r1 (x6, ws [4], essence x3)
+//   handle 2 essence <- r2 (x1, ws [4], Z x1)
+//   handle 3 Z is a leaf, handle 4 is WS.
+//
+// essence has a producer on purpose, so the composite pass leaves r1 alone and
+// the direct flag below is the only thing under test.
+std::vector<std::byte> buildNormalizedDominanceSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 4);  // realResourceCount: X, essence, Z, WS
+  emitVarInt(out, 2);  // entries: handles 1, 2
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (X)
+  emitVarInt(out, 2);  // r0, r1
+  {
+    emitVarInt(out, 1);  // r0 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // WS
+    emitVarInt(out, 0);  // no inputs
+  }
+  {
+    emitVarInt(out, 6);  // r1 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // WS
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);
+    emitVarInt(out, 2);  // -> handle 2 (essence) x3
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (essence)
+  emitVarInt(out, 1);  // r2
+  {
+    emitVarInt(out, 1);  // r2 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // WS
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (Z) x1
+  }
+  return out;
+}
+
+// Two recipes with the same per-unit column but different batch sizes. The
+// normalized comparison must leave both alive: for a single X the finer recipe
+// is far cheaper, so collapsing the two into one SCC (what a non-strict
+// comparison does) would overproduce X and blow the plan up.
+//
+//   handle 1 X <- r0 (x1, ws [4], A x1)
+//               <- r1 (x6, ws [4], A x6)   ; same A per X
+//   handle 2 A <- r2 (x1, ws [4], Z x1)
+//   handle 3 Z is a leaf, handle 4 is WS.
+std::vector<std::byte> buildEqualRatioSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 4);  // realResourceCount: X, A, Z, WS
+  emitVarInt(out, 2);  // entries: handles 1, 2
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (X)
+  emitVarInt(out, 2);  // r0, r1
+  {
+    emitVarInt(out, 1);  // r0 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // WS
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (A) x1
+  }
+  {
+    emitVarInt(out, 6);  // r1 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // WS
+    emitVarInt(out, 1);
+    emitVarInt(out, 6);
+    emitVarInt(out, 2);  // -> handle 2 (A) x6
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (A)
+  emitVarInt(out, 1);  // r2
+  {
+    emitVarInt(out, 1);  // r2 output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // WS
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (Z) x1
+  }
+  return out;
+}
+
 // The copper-pickaxe example from docs/algorithm.typ. The pack
 //
 //   r0: ingot  x1 <- nugget  x9
@@ -2406,6 +2499,64 @@ void testIntegralRelaxation() {
   aw::registerCraftingGraph(buildRelaxedCompositeSample());
   expect(aw::getCraftingGraph().recipeDominated[0] == 0,
          "the ceiling keeps R undominated in sound mode");
+
+  // Output normalization in the direct pass: the free single-output recipe is
+  // cheaper per unit than the six-output recipe that eats an essence, so the
+  // relaxed pass drops the latter although one execution of it is not
+  // replaceable by one execution of the former.
+  aw::setIntegralRelaxationEnabled(true);
+  aw::registerCraftingGraph(buildNormalizedDominanceSample());
+  expect(aw::getCraftingError() == nullptr, "normalized dominance sample parses");
+  expect(aw::getCraftingGraph().recipeDirectDominated[1] == 1,
+         "the relaxed pass normalizes the direct comparison");
+  aw::setIntegralRelaxationEnabled(false);
+  aw::registerCraftingGraph(buildNormalizedDominanceSample());
+  expect(aw::getCraftingGraph().recipeDirectDominated[1] == 0,
+         "raw column dominance keeps the six-output recipe");
+
+  // End to end the relaxed pass trades steps for materials: six X cost one r1
+  // plus three essence crafts (4 steps), but with r1 dropped they cost six free
+  // r0 crafts (6 steps) and no essence.
+  {
+    const aw::Handle all[] = {1, 2, 3, 4};
+    auto plan = [&](bool relaxed) {
+      aw::setIntegralRelaxationEnabled(relaxed);
+      aw::registerCraftingGraph(buildNormalizedDominanceSample());
+      const aw::CraftingGraph &g = aw::getCraftingGraph();
+      std::vector<aw::Amount> inventory(g.nItem, 0);
+      inventory[2] = 1000;  // Z, the leaf behind essence
+      const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+      const aw::PlanResult r = aw::planCrafting(sub, sub.translate(0), 6, inventory);
+      int64_t total = 0;
+      for (int64_t x : r.exec)
+        total += x;
+      return total;
+    };
+    expect(plan(false) == 4, "the raw plan batches the six-output recipe");
+    expect(plan(true) == 6, "the normalized plan falls back to single crafts");
+    aw::setIntegralRelaxationEnabled(false);
+  }
+
+  // Equal per-unit columns must not collapse: a coarse batch cannot replace a
+  // fine one without overproducing, which is how the relaxed pass once turned
+  // one nether brick wall into six.
+  {
+    const aw::Handle all[] = {1, 2, 3, 4};
+    aw::setIntegralRelaxationEnabled(true);
+    aw::registerCraftingGraph(buildEqualRatioSample());
+    const aw::CraftingGraph &g = aw::getCraftingGraph();
+    expect(g.recipeDirectDominated[0] == 0 && g.recipeDirectDominated[1] == 0,
+           "equal per-unit columns stay incomparable");
+    std::vector<aw::Amount> inventory(g.nItem, 0);
+    inventory[2] = 1000;  // Z
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    const aw::PlanResult r = aw::planCrafting(sub, sub.translate(0), 1, inventory);
+    int64_t total = 0;
+    for (int64_t x : r.exec)
+      total += x;
+    expect(total == 2, "the finer recipe serves a single X");
+    aw::setIntegralRelaxationEnabled(false);
+  }
 }
 
 void testTagInlining() {
