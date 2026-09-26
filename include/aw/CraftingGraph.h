@@ -301,6 +301,30 @@ bool isRecipePruningEnabled() noexcept;
 void setDirectDominancePruningEnabled(bool enabled) noexcept;
 bool isDirectDominancePruningEnabled() noexcept;
 
+// Integrality relaxation for the dominance passes. On by default, and read at
+// registration time, so it must be set before registerCraftingGraph.
+//
+// Both pruning passes are sound only because they reason about whole recipe
+// executions: a plan runs a recipe an integer number of times. Two guards bake
+// that assumption in, and they are exactly what this flag drops:
+//
+//   * the tag pass keeps a tag edge `T <- m` whenever some recipe of m emits
+//     more than one unit at a time, because the batch surplus is a free way to
+//     satisfy T ("Batching guard" in Prune.cpp);
+//   * the composite pass inlines a producer of the witness Y with
+//     `alpha = ceil(q / p)`, because running it once may overshoot the q units
+//     of Y that R actually consumes.
+//
+// Relaxing the integrality drops the batch guard and rounds the inline count
+// down to `floor(q / p)`. Pruning then marks more edges and recipes dominated,
+// so the query-time subgraph is smaller and the solver has less to do -- at the
+// cost of sometimes deleting a recipe that an optimal integer plan needs, which
+// leaves the planner with a feasible but suboptimal plan (docs/algorithm.typ,
+// the black glass example). Disable this when the optimum has to be exact, e.g.
+// in the unit tests.
+void setIntegralRelaxationEnabled(bool enabled) noexcept;
+bool isIntegralRelaxationEnabled() noexcept;
+
 // Certificate pruning is on by default. It is computed during
 // registerCraftingGraph, so options must be set before registering a graph.
 void setPackPruningEnabled(bool enabled) noexcept;

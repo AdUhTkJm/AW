@@ -51,6 +51,10 @@ bool tagPruning = true;
 bool recipePruning = true;
 bool directPruning = true;
 
+// Drop the integrality assumptions of both dominance passes: see the public
+// setter in CraftingGraph.h. On by default, read at registration time.
+bool integralRelaxation = true;
+
 // ---------------------------------------------------------------------------
 // Budgets
 // ---------------------------------------------------------------------------
@@ -651,13 +655,21 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
   // dominator (or was covered by a single dominator execution), which pays for
   // the k new `T <- w` edges. A member that does not qualify is simply kept, so
   // the guard can only ever prune less.
-  std::vector<uint8_t> unitOutput(nItem, 1);
-  for (NodeId m = 0; m < nReal; m++)
-    for (NodeId recipeNode : graph.i2r.targetsOf(m))
-      if (graph.outputAmt[recipeNode - nItem] != 1) {
-        unitOutput[m] = 0;
-        break;
-      }
+  //
+  // Under the integrality relaxation the guard is skipped, so a batched member
+  // can be marked dominated: dropping its tag edge then relies on "m is a
+  // better co-member than w" even though a plan may have to keep a batch
+  // running. Skipping the guard also means the scan below is not needed.
+  std::vector<uint8_t> unitOutput;
+  if (!integralRelaxation) {
+    unitOutput.assign(nItem, 1);
+    for (NodeId m = 0; m < nReal; m++)
+      for (NodeId recipeNode : graph.i2r.targetsOf(m))
+        if (graph.outputAmt[recipeNode - nItem] != 1) {
+          unitOutput[m] = 0;
+          break;
+        }
+  }
 
   // ---- Column cover ------------------------------------------------------
   // Besides consuming a dominator (directly or through a tag), a recipe of m
@@ -881,7 +893,8 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
       const NodeId m = ms[a];
       // A batched member keeps its tag edge: the batch surplus would otherwise
       // be a free way to satisfy T, and dropping the edge costs real steps.
-      if (!unitOutput[m])
+      // The integrality relaxation waives the guard, see above.
+      if (!integralRelaxation && !unitOutput[m])
         continue;
       for (NodeId recipeNode : graph.i2r.targetsOf(t)) {
         const uint r = recipeNode - nItem;
@@ -906,6 +919,10 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
 // graph, exactly as in the tag pass, so every item keeps at least one recipe.
 // A dominated recipe is only dropped by reachability when its witness input has
 // no inventory and a replacement can actually be run.
+//
+// Under the integrality relaxation the inline count is floored instead of
+// rounded up, so a producer that overshoots q is treated as if the excess came
+// for free and more recipes are dominated.
 //
 // Unlike the tag pass, the relation is a pure cost comparison, so R and S may
 // need disjoint workstations and the edge is built regardless. Replacing R by S
@@ -1051,7 +1068,7 @@ void computeRecipePruning(CraftingGraph& graph, const RecipeVectors& vec) noexce
             break;
           }
           Amount alpha = q / p;
-          if (q % p != 0)
+          if (!integralRelaxation && q % p != 0)
             alpha++;
           if (!buildComposite(alpha, vec, r, R, cItems, cCoeffs)) {
             candidates.clear();
@@ -1267,6 +1284,14 @@ void setDirectDominancePruningEnabled(bool enabled) noexcept {
 
 bool isDirectDominancePruningEnabled() noexcept {
   return directPruning;
+}
+
+void setIntegralRelaxationEnabled(bool enabled) noexcept {
+  integralRelaxation = enabled;
+}
+
+bool isIntegralRelaxationEnabled() noexcept {
+  return integralRelaxation;
 }
 
 }  // namespace aw

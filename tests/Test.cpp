@@ -1054,6 +1054,67 @@ std::vector<std::byte> buildIntegerScalingSample() {
   return out;
 }
 
+// The same shape as buildIntegerScalingSample, but Z can be crafted from a leaf
+// W. That keeps S undominated in both modes, so R is the only recipe the
+// ceiling (or the floored inline count) can affect:
+//
+//   handle 1 X <- R (x1, ws [1], Y x3)
+//              <- S (x1, ws [1], Z x1)
+//   handle 2 Y <- r (x2, ws [1], Z x1)
+//   handle 3 Z <- z (x1, ws [1], W x1)
+//   handle 4 W is a leaf.
+//
+// ceil(3 / 2) = 2, so `2 Y + R` leaves a spare Y and is not bounded by S. The
+// integrality relaxation floors to 1, which wrongly bounds R by S. Recipe ids:
+// R=0, S=1, r=2, z=3.
+std::vector<std::byte> buildRelaxedCompositeSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 4);  // realResourceCount
+  emitVarInt(out, 3);  // entries: handles 1, 2, 3
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (X)
+  emitVarInt(out, 2);  // R and S
+  {
+    emitVarInt(out, 1);  // R output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);
+    emitVarInt(out, 2);  // Y x3
+  }
+  {
+    emitVarInt(out, 1);  // S output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // Z x1
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (Y)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 2);  // output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // Z x1
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 3 (Z)
+  emitVarInt(out, 1);
+  {
+    emitVarInt(out, 1);  // output amount
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // workstation handle 1
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);
+    emitVarInt(out, 4);  // W x1
+  }
+  return out;
+}
+
 // The workstation counterexample for composite dominance. R and S both produce
 // X, but S needs a workstation R does not; after inlining Y, S still
 // cost-dominates R. Dropping R is only sound when S can run on every
@@ -2297,6 +2358,56 @@ void testTagBatchingGuard() {
          "tag pruning does not change the batch recycle optimum");
 }
 
+// The integrality relaxation is unsound on purpose. These are the samples that
+// witness the two guards it drops, so the relaxed run must actually mark the
+// edge/recipe -- and, for the batch sample, plan worse.
+void testIntegralRelaxation() {
+  std::cout << "[Test] integrality relaxation (unsound)\n";
+  const aw::Handle all[] = {1, 2, 3, 4};
+
+  // A batched member: without the guard `T <- m` is marked dominated and the
+  // batch surplus is no longer a free sink, so the real optimum rises from 4
+  // to 6.
+  aw::setIntegralRelaxationEnabled(true);
+  aw::registerCraftingGraph(buildBatchRecycleSample());
+  expect(aw::getCraftingError() == nullptr, "batch recycle sample parses");
+  {
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    bool batchedEdgeDominated = false;
+    for (aw::NodeId recipeNode : graph.i2r.targetsOf(4)) {
+      const uint32_t r = recipeNode - graph.nItem;
+      const auto inputs = graph.r2i.targetsOf(r);
+      if (inputs.size() == 1 && inputs[0] == 2)
+        batchedEdgeDominated = graph.tagEdgeDominated[r] == 1;
+    }
+    expect(batchedEdgeDominated, "the relaxed pass drops the batched tag edge");
+
+    std::vector<aw::Amount> inventory(graph.nItem, 0);
+    const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
+    const aw::NodeId target = sub.translate(3);
+    const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
+    int64_t real = 0;
+    if (r.status == aw::PlanStatus::OK)
+      for (uint32_t i = 0; i < sub.graph.nRecipe; i++)
+        if (sub.graph.output[i] < sub.graph.nReal)
+          real += r.exec[i];
+    expect(r.status == aw::PlanStatus::OK, "the relaxed batch plan stays feasible");
+    expect(real == 6, "dropping the batched edge costs two real crafts");
+  }
+
+  // The composite ceiling: R needs 3 Y but the only producer emits 2, so
+  // floor(3 / 2) = 1 wrongly dominates R. The sound run leaves R alone.
+  aw::registerCraftingGraph(buildRelaxedCompositeSample());
+  expect(aw::getCraftingError() == nullptr, "relaxed composite sample parses");
+  expect(aw::getCraftingGraph().recipeDominated[0] == 1,
+         "the relaxed pass floors the inline count");
+
+  aw::setIntegralRelaxationEnabled(false);
+  aw::registerCraftingGraph(buildRelaxedCompositeSample());
+  expect(aw::getCraftingGraph().recipeDominated[0] == 0,
+         "the ceiling keeps R undominated in sound mode");
+}
+
 void testTagInlining() {
   std::cout << "[Test] single-use tag inlining\n";
   const aw::Handle all[] = {1, 2, 3, 4, 5};
@@ -3108,6 +3219,11 @@ void testSatellitePruningParity() {
 }  // namespace
 
 int main() {
+  // The integrality relaxation is unsound, so the parity tests below -- which
+  // assert that pruning preserves the optimum -- must run with it off. The
+  // dedicated testIntegralRelaxation exercises the relaxed behaviour.
+  aw::setIntegralRelaxationEnabled(false);
+
   testSample();
   testRejectsBadInput();
   testNetLossRecipes();
@@ -3123,6 +3239,7 @@ int main() {
   testWideTagPruning();
   testTagPruningParity();
   testTagBatchingGuard();
+  testIntegralRelaxation();
   testTagInlining();
   testFreeTagObjective();
   testRecipePruning();
