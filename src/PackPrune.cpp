@@ -766,6 +766,9 @@ void computePackPruning(CraftingGraph &graph) noexcept {
       continue;
     if (graph.recipeDominated.size() == graph.nRecipe && graph.recipeDominated[r])
       continue;
+    if (graph.recipeDirectDominated.size() == graph.nRecipe &&
+        graph.recipeDirectDominated[r])
+      continue;
     // A recipe whose output nothing consumes can never close A z <= 0.
     if (graph.output[r] < graph.nItem && search.unconsumed[graph.output[r]])
       continue;

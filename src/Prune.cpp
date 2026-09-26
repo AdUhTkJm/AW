@@ -1,6 +1,6 @@
 // Dominance pruning for the canonical crafting graph.
 //
-// Two independent passes run once, at registration time:
+// Three independent passes run once, at registration time:
 //
 //   1. Tag-edge pruning deletes synthetic `T <- m` edges whose member m is
 //      cost-dominated by another member of T. It only reasons about real
@@ -13,12 +13,19 @@
 //      S may need a workstation R does not, so that condition is checked at
 //      query time instead of being folded into the preprocessing.
 //
-// Both passes can remove an edge that the player might usefully keep, because
+//   3. Direct (column) dominance pruning deletes a real recipe R: o X <- ...
+//      when a sibling S of X satisfies v_S >= v_R componentwise, i.e. S yields
+//      at least as much X and consumes no more of any input. Nothing is
+//      inlined, so no guard input applies; only the replacement's workstation
+//      is checked at query time.
+//
+// The passes can remove an edge that the player might usefully keep, because
 // a stocked input can always be spent directly, and a recipe whose replacement
-// needs an unavailable workstation must survive. Each pass therefore records
-// the input the certificate relied on, and the recipe pass additionally records
-// the workstations of the replacements, so reachableSubgraph can keep a recipe
-// whose guard is in the inventory or whose replacement cannot be run.
+// needs an unavailable workstation must survive. The tag and composite passes
+// therefore record the input the certificate relied on, and the two real-recipe
+// passes record the workstations of the replacements, so reachableSubgraph can
+// keep a recipe whose guard is in the inventory or whose replacement cannot be
+// run.
 
 #include "Prune.h"
 
@@ -39,6 +46,7 @@ using uint = uint32_t;
 // and the unit tests can A/B a plan against the unpruned graph.
 bool tagPruning = true;
 bool recipePruning = true;
+bool directPruning = true;
 
 // ---------------------------------------------------------------------------
 // Budgets
@@ -795,7 +803,57 @@ void computeTagPruning(CraftingGraph& graph) noexcept {
 // because its `requires(m, w)` relation already says m cannot be crafted
 // without w.
 
-void computeRecipePruning(CraftingGraph& graph) noexcept {
+// Fills `adjOffsets` / `adjTargets` from a per-node adjacency list.
+void buildAdjacency(const std::vector<std::vector<uint32_t>>& adj,
+                    std::vector<uint>& adjOffsets,
+                    std::vector<uint32_t>& adjTargets) noexcept {
+  const uint k = (uint) adj.size();
+  adjOffsets.assign(k + 1, 0);
+  for (uint i = 0; i < k; i++)
+    adjOffsets[i + 1] = (uint) adj[i].size();
+  for (uint i = 0; i < k; i++)
+    adjOffsets[i + 1] += adjOffsets[i];
+  adjTargets.resize(adjOffsets[k]);
+  std::vector<uint> cursor(adjOffsets.begin(), adjOffsets.end() - 1);
+  for (uint i = 0; i < k; i++)
+    for (uint32_t j : adj[i])
+      adjTargets[cursor[i]++] = j;
+}
+
+// Fills `compWs[c]` with the union of the workstations of every sink-SCC
+// representative reachable from component c, assuming Tarjan numbered the
+// components in reverse topological order (an edge a -> b across components
+// has comp[b] < comp[a]). `compWs` must already be sized to the component
+// count. Those representatives are the replacements a dropped recipe can fall
+// back on, so the query keeps it only when one of their stations is available.
+void computeCompWorkstations(const CraftingGraph& graph,
+                             const std::vector<std::vector<uint32_t>>& adj,
+                             const std::vector<int32_t>& comp,
+                             const std::vector<uint32_t>& repOfComp,
+                             const std::vector<uint32_t>& recs,
+                             std::vector<std::vector<NodeId>>& compWs) noexcept {
+  const uint32_t nComp = (uint32_t) compWs.size();
+  std::vector<std::vector<uint32_t>> members(nComp);
+  for (uint32_t a = 0; a < adj.size(); a++)
+    members[comp[a]].push_back(a);
+  for (uint32_t c = 0; c < nComp; c++) {
+    std::vector<NodeId>& ws = compWs[c];
+    if (repOfComp[c] != UINT32_MAX) {
+      const auto own = graph.workstations.targetsOf(recs[repOfComp[c]]);
+      ws.insert(ws.end(), own.begin(), own.end());
+    }
+    for (uint32_t a : members[c])
+      for (uint32_t j : adj[a])
+        if ((uint32_t) comp[j] != c) {
+          const std::vector<NodeId>& succ = compWs[comp[j]];
+          ws.insert(ws.end(), succ.begin(), succ.end());
+        }
+    std::sort(ws.begin(), ws.end());
+    ws.erase(std::unique(ws.begin(), ws.end()), ws.end());
+  }
+}
+
+void computeRecipePruning(CraftingGraph& graph, const RecipeVectors& vec) noexcept {
   graph.recipeDominated.assign(graph.nRecipe, 0);
   graph.recipeGuardInput.assign(graph.nRecipe, UINT32_MAX);
   graph.recipeDominatorWorkstations.assign(graph.nRecipe, {});
@@ -803,9 +861,6 @@ void computeRecipePruning(CraftingGraph& graph) noexcept {
   const uint nReal = graph.nReal;
   if (nReal == 0 || graph.nRecipe == 0)
     return;
-
-  RecipeVectors vec;
-  buildRecipeVectors(graph, vec);
 
   std::vector<uint32_t> recs;
   std::vector<std::vector<uint32_t>> adj;
@@ -819,7 +874,6 @@ void computeRecipePruning(CraftingGraph& graph) noexcept {
   std::vector<int32_t> comp;
   std::vector<uint32_t> repOfComp;
   std::vector<uint8_t> keep;
-  std::vector<std::vector<uint32_t>> members;
   std::vector<std::vector<NodeId>> compWs;
 
   for (NodeId X = 0; X < nReal; X++) {
@@ -915,18 +969,7 @@ void computeRecipePruning(CraftingGraph& graph) noexcept {
     }
 
     // One representative per sink SCC.
-    adjOffsets.assign(k + 1, 0);
-    for (uint i = 0; i < k; i++)
-      adjOffsets[i + 1] = (uint) adj[i].size();
-    for (uint i = 0; i < k; i++)
-      adjOffsets[i + 1] += adjOffsets[i];
-    adjTargets.resize(adjOffsets[k]);
-    {
-      std::vector<uint> cursor(adjOffsets.begin(), adjOffsets.end() - 1);
-      for (uint i = 0; i < k; i++)
-        for (uint32_t j : adj[i])
-          adjTargets[cursor[i]++] = j;
-    }
+    buildAdjacency(adj, adjOffsets, adjTargets);
     const uint32_t nComp =
         markSinkRepresentatives(k, adjOffsets, adjTargets, comp, repOfComp, keep);
 
@@ -935,25 +978,8 @@ void computeRecipePruning(CraftingGraph& graph) noexcept {
     // it drops the node when one of them is available. Tarjan numbers
     // components in reverse topological order, so a component's successors are
     // already final when it is processed.
-    members.assign(nComp, {});
-    for (uint32_t a = 0; a < k; a++)
-      members[comp[a]].push_back(a);
     compWs.assign(nComp, {});
-    for (uint32_t c = 0; c < nComp; c++) {
-      std::vector<NodeId>& ws = compWs[c];
-      if (repOfComp[c] != UINT32_MAX) {
-        const auto own = graph.workstations.targetsOf(recs[repOfComp[c]]);
-        ws.insert(ws.end(), own.begin(), own.end());
-      }
-      for (uint32_t a : members[c])
-        for (uint32_t j : adj[a])
-          if ((uint32_t) comp[j] != c) {
-            const std::vector<NodeId>& succ = compWs[comp[j]];
-            ws.insert(ws.end(), succ.begin(), succ.end());
-          }
-      std::sort(ws.begin(), ws.end());
-      ws.erase(std::unique(ws.begin(), ws.end()), ws.end());
-    }
+    computeCompWorkstations(graph, adj, comp, repOfComp, recs, compWs);
 
     for (uint i = 0; i < k; i++) {
       if (keep[i])
@@ -966,11 +992,144 @@ void computeRecipePruning(CraftingGraph& graph) noexcept {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Direct (column) dominance pruning
+// ---------------------------------------------------------------------------
+// A recipe r producing a real item X is dominated when a sibling recipe s of X
+// has a componentwise larger column: v_s >= v_r over every item. Because both
+// produce X, that is exactly `out_s >= out_r` and `in_s(j) <= in_r(j)` for
+// every input j. Replacing one execution of r by one of s keeps every balance
+// at least as high while the step count is unchanged, so no optimal plan needs
+// r.
+//
+// Unlike the composite pass nothing is inlined, so no guard input is recorded
+// and held stock never makes r preferable. The comparison is a partial order on
+// columns; equal columns collapse into one SCC, so keeping one representative
+// per sink SCC keeps exactly the maximal columns. The relation is transitive,
+// so every representative above r dominates r directly, and the union of their
+// workstations is a valid replacement set. As in the composite pass the
+// dominator may need a workstation r does not, so availability is deferred to
+// the query.
+void computeDirectDominancePruning(CraftingGraph& graph,
+                                   const RecipeVectors& vec) noexcept {
+  graph.recipeDirectDominated.assign(graph.nRecipe, 0);
+  graph.recipeDirectDominatorWorkstations.assign(graph.nRecipe, {});
+
+  const uint nReal = graph.nReal;
+  if (nReal == 0 || graph.nRecipe == 0)
+    return;
+
+  std::vector<uint32_t> recs;
+  std::vector<Amount> outAmt;
+  std::vector<std::vector<uint32_t>> adj;
+  std::vector<uint> adjOffsets;
+  std::vector<uint32_t> adjTargets;
+  std::vector<int32_t> comp;
+  std::vector<uint32_t> repOfComp;
+  std::vector<uint8_t> keep;
+  std::vector<std::vector<NodeId>> compWs;
+
+  for (NodeId X = 0; X < nReal; X++) {
+    const auto recipeNodes = graph.i2r.targetsOf(X);
+    if (recipeNodes.size() < 2)
+      continue;
+    // The same budget as the composite pass: a quadratic scan of an item with
+    // an absurd fan-out is not worth the memory it would need.
+    if (recipeNodes.size() > MAX_SIBLING_RECIPES)
+      continue;
+
+    recs.clear();
+    outAmt.clear();
+    for (NodeId recipeNode : recipeNodes) {
+      const uint r = recipeNode - graph.nItem;
+      recs.push_back(r);
+      outAmt.push_back(graph.outputAmt[r]);
+    }
+    const uint k = (uint) recs.size();
+
+    // adj[i] holds every sibling j with v_j >= v_i, so the sink SCC
+    // representatives are the maximal columns.
+    adj.assign(k, {});
+    for (uint i = 0; i < k; i++) {
+      const auto ii = vec.itemsOf(recs[i]);
+      const auto ic = vec.coeffsOf(recs[i]);
+      for (uint j = i + 1; j < k; j++) {
+        const auto ji = vec.itemsOf(recs[j]);
+        const auto jc = vec.coeffsOf(recs[j]);
+        // out_i <= out_j is necessary for v_i <= v_j, so it skips most pairs
+        // when the outputs differ; it is not sufficient on its own.
+        if (outAmt[i] <= outAmt[j] && leVector(ii, ic, ji, jc))
+          adj[i].push_back(j);
+        if (outAmt[j] <= outAmt[i] && leVector(ji, jc, ii, ic))
+          adj[j].push_back(i);
+      }
+    }
+
+    buildAdjacency(adj, adjOffsets, adjTargets);
+    const uint32_t nComp =
+        markSinkRepresentatives(k, adjOffsets, adjTargets, comp, repOfComp, keep);
+    compWs.assign(nComp, {});
+    computeCompWorkstations(graph, adj, comp, repOfComp, recs, compWs);
+
+    for (uint i = 0; i < k; i++) {
+      if (keep[i])
+        continue;
+      const uint r = recs[i];
+      graph.recipeDirectDominated[r] = 1;
+      graph.recipeDirectDominatorWorkstations[r] = compWs[comp[i]];
+    }
+  }
+}
+
+// Each recipe pass guarantees a surviving recipe per real item on its own, but
+// their keep sets need not overlap. If together they flag every recipe of an
+// item the item would have no producer at all, so clear both flags on one
+// recipe: keeping a recipe is always sound.
+void ensureRecipeSurvivors(CraftingGraph& graph) noexcept {
+  const uint nReal = graph.nReal;
+  const bool haveComposite = graph.recipeDominated.size() == graph.nRecipe &&
+                             graph.recipeDominatorWorkstations.size() == graph.nRecipe;
+  const bool haveDirect = graph.recipeDirectDominated.size() == graph.nRecipe;
+  for (NodeId X = 0; X < nReal; X++) {
+    const auto recipeNodes = graph.i2r.targetsOf(X);
+    if (recipeNodes.empty())
+      continue;
+    bool anyKept = false;
+    for (NodeId recipeNode : recipeNodes) {
+      const uint r = recipeNode - graph.nItem;
+      const bool composite = haveComposite && graph.recipeDominated[r];
+      const bool direct = haveDirect && graph.recipeDirectDominated[r];
+      if (!composite && !direct) {
+        anyKept = true;
+        break;
+      }
+    }
+    if (anyKept)
+      continue;
+    const uint r = recipeNodes.front() - graph.nItem;
+    if (haveComposite) {
+      graph.recipeDominated[r] = 0;
+      graph.recipeGuardInput[r] = UINT32_MAX;
+      graph.recipeDominatorWorkstations[r].clear();
+    }
+    if (haveDirect)
+      graph.recipeDirectDominated[r] = 0;
+  }
+}
+
 }  // namespace
 
 void computePruning(CraftingGraph& graph) noexcept {
   computeTagPruning(graph);
-  computeRecipePruning(graph);
+
+  // Both recipe passes compare the raw column vectors, so they share one
+  // construction.
+  RecipeVectors vec;
+  buildRecipeVectors(graph, vec);
+  computeRecipePruning(graph, vec);
+  computeDirectDominancePruning(graph, vec);
+  ensureRecipeSurvivors(graph);
+
   computePackPruning(graph);
 }
 
@@ -988,6 +1147,14 @@ void setRecipePruningEnabled(bool enabled) noexcept {
 
 bool isRecipePruningEnabled() noexcept {
   return recipePruning;
+}
+
+void setDirectDominancePruningEnabled(bool enabled) noexcept {
+  directPruning = enabled;
+}
+
+bool isDirectDominancePruningEnabled() noexcept {
+  return directPruning;
 }
 
 }  // namespace aw

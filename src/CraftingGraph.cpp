@@ -793,6 +793,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
 
   const bool pruneTag = isTagPruningEnabled();
   const bool pruneRecipe = isRecipePruningEnabled();
+  const bool pruneDirect = isDirectDominancePruningEnabled();
   const bool prunePack = isPackPruningEnabled();
 
   std::vector<uint8_t> itemSeen(nItem, 0);
@@ -852,6 +853,24 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
             if (runnable)
               continue;
           }
+        }
+
+        // A direct-dominated real recipe has a sibling with a componentwise
+        // larger column, so one execution of the sibling replaces it with no
+        // worse balance. Nothing is inlined, so stock never makes it
+        // preferable, but the replacement may need a workstation this query
+        // does not have.
+        if (pruneDirect && recipe < graph.recipeDirectDominated.size() &&
+            graph.recipeDirectDominated[recipe]) {
+          bool runnable = false;
+          for (NodeId station : graph.recipeDirectDominatorWorkstations[recipe]) {
+            if (station < allowed.size() && allowed[station]) {
+              runnable = true;
+              break;
+            }
+          }
+          if (runnable)
+            continue;
         }
 
         // A pseudo-resource's synthetic recipes don't need workstation.

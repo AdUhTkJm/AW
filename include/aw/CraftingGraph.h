@@ -218,6 +218,22 @@ struct CraftingGraph : BaseCraftingGraph {
   // whose only replacements cannot be run at all, which is then never dropped.
   std::vector<std::vector<NodeId>> recipeDominatorWorkstations;  // nRecipe entries
 
+  // Direct (column) dominance. `recipeDirectDominated[r] == 1` means recipe r
+  // outputs a real resource and a sibling recipe of the same output has a
+  // componentwise larger column vector: it produces at least as much of the
+  // output and consumes no more of every input. Replacing one execution of r by
+  // one of the dominator keeps every balance at least as high and the step
+  // count unchanged, so no optimal plan needs r.
+  //
+  // Unlike the composite relation nothing is inlined, so there is no guard
+  // input and stock never makes r preferable. The dominator may still need a
+  // workstation r does not, so -- exactly as for the composite pass -- the
+  // drop is deferred to query time. `recipeDirectDominatorWorkstations[r]` is
+  // the union of the workstations of every maximal-column sibling that
+  // dominates r; r is dropped when one of them is available.
+  std::vector<uint8_t> recipeDirectDominated;  // nRecipe entries
+  std::vector<std::vector<NodeId>> recipeDirectDominatorWorkstations;  // nRecipe entries
+
   // Multi-item "wasteful pack" certificates. `packDominated[r] == 1` means
   // recipe r carries the certificate in `packCertificates[r]` and is never
   // executed by an optimal plan, provided the certificate's zero-stock items
@@ -260,10 +276,12 @@ struct Subgraph {
 // Handles in `workstations` outside the item range are ignored.
 //
 // `inventory` is indexed by source item node (handle - 1), matching
-// `planCrafting`. A dominated tag edge or real recipe is only dropped when the
-// player holds none of the member / guard input, so existing stock can still be
-// spent; a composite-dominated real recipe additionally needs one of its
-// recorded dominator workstations to be available.
+// `planCrafting`. A dominated tag edge or composite-dominated real recipe is
+// only dropped when the player holds none of the member / guard input, so
+// existing stock can still be spent; both it and a directly dominated recipe
+// additionally need one of their recorded dominator workstations to be
+// available. A directly dominated recipe is dropped without a stock check:
+// nothing is inlined, so the dominator replaces it whatever the inventory.
 Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
                            std::span<const Amount> inventory = {}) noexcept;
 
@@ -273,6 +291,12 @@ void setTagPruningEnabled(bool enabled) noexcept;
 bool isTagPruningEnabled() noexcept;
 void setRecipePruningEnabled(bool enabled) noexcept;
 bool isRecipePruningEnabled() noexcept;
+
+// Direct (column) dominance pruning is independent of the composite pass and
+// also on by default. It is a query-time pass over registration-time flags, so
+// it can be switched off on its own.
+void setDirectDominancePruningEnabled(bool enabled) noexcept;
+bool isDirectDominancePruningEnabled() noexcept;
 
 // Certificate pruning is on by default. It is computed during
 // registerCraftingGraph, so options must be set before registering a graph.

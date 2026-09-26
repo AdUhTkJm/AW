@@ -252,6 +252,7 @@ void printSummary(const aw::CraftingGraph& graph) {
   }
   size_t pseudoRecipes = 0, tagDominated = 0, recipeDominated = 0;
   size_t domWsEntries = 0, domWsEmpty = 0;
+  size_t directDominated = 0, directWsEntries = 0, directWsEmpty = 0;
   for (size_t r = 0; r < graph.nRecipe; ++r) {
     if (graph.output[r] >= graph.nReal) ++pseudoRecipes;
     if (r < graph.tagEdgeDominated.size() && graph.tagEdgeDominated[r]) ++tagDominated;
@@ -266,11 +267,24 @@ void printSummary(const aw::CraftingGraph& graph) {
         ++domWsEmpty;
       }
     }
+    if (r < graph.recipeDirectDominated.size() && graph.recipeDirectDominated[r]) {
+      ++directDominated;
+      if (r < graph.recipeDirectDominatorWorkstations.size()) {
+        if (graph.recipeDirectDominatorWorkstations[r].empty())
+          ++directWsEmpty;
+        else
+          directWsEntries += graph.recipeDirectDominatorWorkstations[r].size();
+      } else {
+        ++directWsEmpty;
+      }
+    }
   }
   std::cout << "tag edges      : " << pseudoRecipes << " (" << tagDominated
         << " dominated)\n";
   std::cout << "recipes dominated: " << recipeDominated << " (" << domWsEntries
         << " dominator workstations, " << domWsEmpty << " without any)\n";
+  std::cout << "direct dominated : " << directDominated << " (" << directWsEntries
+        << " dominator workstations, " << directWsEmpty << " without any)\n";
   if (graph.packDominated.size() == graph.nRecipe) {
     size_t packCerts = 0, packEdges = 0, packZero = 0;
     for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
@@ -449,6 +463,54 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
     for (size_t item = 0; item < graph.nReal; ++item) {
       if (!graph.i2r.targetsOf(item).empty() && !kept[item]) {
         report("composite pruning removed every recipe of a real item");
+        break;
+      }
+    }
+  }
+
+  // Only real recipes may be flagged as directly dominated, and each records a
+  // sorted set of valid dominator workstations. The direct pass on its own must
+  // also keep at least one recipe of every real item.
+  if (graph.recipeDirectDominated.size() != graph.nRecipe ||
+      graph.recipeDirectDominatorWorkstations.size() != graph.nRecipe) {
+    report("direct dominance arrays do not match the recipe count");
+  } else {
+    for (size_t r = 0; r < graph.nRecipe; ++r) {
+      if (!graph.recipeDirectDominated[r])
+        continue;
+      if (graph.output[r] >= graph.nReal) {
+        report("a pseudo-resource recipe is marked as directly dominated");
+        break;
+      }
+      const std::vector<aw::NodeId> &ws = graph.recipeDirectDominatorWorkstations[r];
+      bool wsOk = true;
+      for (size_t k = 0; k < ws.size(); ++k) {
+        if (ws[k] >= graph.nItem || (k > 0 && ws[k] <= ws[k - 1]))
+          wsOk = false;
+      }
+      if (!wsOk) {
+        report("a directly dominated recipe has a bad dominator workstation");
+        break;
+      }
+    }
+    std::vector<uint8_t> kept(graph.nItem, 0), keptEither(graph.nItem, 0);
+    for (size_t r = 0; r < graph.nRecipe; ++r) {
+      if (graph.output[r] >= graph.nReal)
+        continue;
+      if (!graph.recipeDirectDominated[r])
+        kept[graph.output[r]] = 1;
+      if (!graph.recipeDirectDominated[r] && !graph.recipeDominated[r])
+        keptEither[graph.output[r]] = 1;
+    }
+    for (size_t item = 0; item < graph.nReal; ++item) {
+      if (graph.i2r.targetsOf(item).empty())
+        continue;
+      if (!kept[item]) {
+        report("direct dominance removed every recipe of a real item");
+        break;
+      }
+      if (!keptEither[item]) {
+        report("direct and composite pruning together removed every recipe");
         break;
       }
     }
@@ -747,6 +809,7 @@ int main(int argc, char** argv) {
   bool noPrune = false;
   bool noTagPrune = false;
   bool noRecipePrune = false;
+  bool noDirectPrune = false;
   bool noPackPrune = false;
   bool noSatellitePrune = false;
   bool noDeadNodePrune = false;
@@ -766,6 +829,8 @@ int main(int argc, char** argv) {
       noTagPrune = true;
     } else if (arg == "--no-recipe-prune") {
       noRecipePrune = true;
+    } else if (arg == "--no-direct-prune") {
+      noDirectPrune = true;
     } else if (arg == "--no-pack-prune") {
       noPackPrune = true;
     } else if (arg == "--no-satellite-prune") {
@@ -867,7 +932,8 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "-h" || arg == "--help") {
       std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
-                   "                   [--no-prune] [--no-recipe-prune] [--no-pack-prune]\n"
+                   "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune]\n"
+                   "                   [--no-pack-prune]\n"
                    "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
                    "                   [--no-dead-node-prune]\n"
                    "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
@@ -886,7 +952,8 @@ int main(int argc, char** argv) {
 
   if (path.empty()) {
     std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
-                 "                   [--no-prune] [--no-recipe-prune] [--no-pack-prune]\n"
+                 "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune]\n"
+                 "                   [--no-pack-prune]\n"
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
                  "                   [--no-dead-node-prune]\n"
                  "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
@@ -965,6 +1032,8 @@ int main(int argc, char** argv) {
     aw::setTagPruningEnabled(false);
   if (noRecipePrune || noPrune)
     aw::setRecipePruningEnabled(false);
+  if (noDirectPrune || noPrune)
+    aw::setDirectDominancePruningEnabled(false);
 
   std::cout << "parsed " << bytes.size() << " bytes from " << path << '\n';
   printSummary(graph);

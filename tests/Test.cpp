@@ -1104,6 +1104,52 @@ std::vector<std::byte> buildMultiDominatorSample() {
   return out;
 }
 
+// Direct (column) dominance: r1 yields the same X as r0 with less of the same
+// input, and the composite pass cannot see it because A's only producer makes
+// the inlined column of r0 no worse than r1.
+//
+//   handle 1 X <- r0 (x2, ws [4], A x2)
+//               <- r1 (x2, ws [5], A x1)   ; v_r1 = 2X - A >= 2X - 2A = v_r0
+//   handle 2 A <- r2 (x1, ws [4], B x1)
+//   handle 3 B    (leaf)
+//   handles 4, 5 are WS_A and WS_B.
+std::vector<std::byte> buildDirectDominanceSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 5);  // realResourceCount
+  emitVarInt(out, 2);  // entries: handles 1, 2
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (X)
+  emitVarInt(out, 2);  // r0, r1
+  {
+    emitVarInt(out, 2);  // r0 output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 4);  // WS_A
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 2);
+    emitVarInt(out, 2);  // -> handle 2 (A) x2
+  }
+  {
+    emitVarInt(out, 2);  // r1 output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 5);  // WS_B
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (A) x1
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (A)
+  emitVarInt(out, 1);  // r2
+  {
+    emitVarInt(out, 1);  // r2 output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 4);  // WS_A
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);
+    emitVarInt(out, 3);  // -> handle 3 (B) x1
+  }
+  return out;
+}
+
 // The copper-pickaxe example from docs/algorithm.typ. The pack
 //
 //   r0: ingot  x1 <- nugget  x9
@@ -1669,10 +1715,12 @@ void testDuplicateRecipes() {
   // own. Satellite elimination is off for the same reason: the same leaf would
   // make the whole component dead.
   aw::setRecipePruningEnabled(false);
+  aw::setDirectDominancePruningEnabled(false);
   aw::setSatellitePruningEnabled(false);
   const aw::Handle all[] = {1, 2, 3};
   const aw::Subgraph sub = aw::reachableSubgraph(1, all);
   aw::setSatellitePruningEnabled(true);
+  aw::setDirectDominancePruningEnabled(true);
   aw::setRecipePruningEnabled(true);
   expect(sub.graph.nItem == 2, "only the output and its leaf are reachable");
   expect(sub.graph.nRecipe == 3, "the subgraph keeps every surviving recipe");
@@ -1738,6 +1786,7 @@ void testNetLossRecipes() {
   // The drop is baked into the graph, so no query can resurrect the losses,
   // not even one that holds stock of the item.
   aw::setRecipePruningEnabled(false);
+  aw::setDirectDominancePruningEnabled(false);
   aw::setSatellitePruningEnabled(false);
   aw::setDeadNodePruningEnabled(false);
   const aw::Handle all[] = {1};
@@ -1745,6 +1794,7 @@ void testNetLossRecipes() {
   inventory[0] = 100;
   const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
   aw::setDeadNodePruningEnabled(true);
+  aw::setDirectDominancePruningEnabled(true);
   aw::setSatellitePruningEnabled(true);
   aw::setRecipePruningEnabled(true);
   expect(sub.graph.nRecipe == 1 && sub.graph.outputAmt[0] == 3,
@@ -1838,6 +1888,7 @@ void testDeadNodePruning() {
   std::cout << "[Test] dead-node cleanup\n";
   aw::setTagPruningEnabled(false);
   aw::setRecipePruningEnabled(false);
+  aw::setDirectDominancePruningEnabled(false);
   aw::setPackPruningEnabled(false);
   aw::setSatellitePruningEnabled(false);
 
@@ -1912,6 +1963,7 @@ void testDeadNodePruning() {
 
   aw::setTagPruningEnabled(true);
   aw::setRecipePruningEnabled(true);
+  aw::setDirectDominancePruningEnabled(true);
   aw::setPackPruningEnabled(true);
   aw::setSatellitePruningEnabled(true);
 }
@@ -2448,6 +2500,69 @@ void testRecipePruningParity() {
   aw::setRecipePruningEnabled(true);
 }
 
+void testDirectDominancePruning() {
+  std::cout << "[Test] direct column dominance pruning\n";
+  aw::registerCraftingGraph(buildDirectDominanceSample());
+  expect(aw::getCraftingError() == nullptr, "direct dominance sample parses");
+  {
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    expect(graph.nRecipe == 3 && graph.nReal == 5, "direct dominance sample shape");
+    expect(graph.recipeDirectDominated.size() == graph.nRecipe &&
+               graph.recipeDirectDominatorWorkstations.size() == graph.nRecipe,
+           "one direct pruning flag per recipe");
+    expect(graph.recipeDirectDominated[0] == 1,
+           "the column with more input is directly dominated");
+    expect(graph.recipeDirectDominated[1] == 0, "the maximal column survives");
+    expect(graph.recipeDominated[0] == 0 && graph.recipeDominated[1] == 0,
+           "the composite pass cannot see this pair");
+    const std::vector<aw::NodeId> want = {4};  // node 4 = handle 5 = WS_B
+    expect(graph.recipeDirectDominatorWorkstations[0] == want,
+           "the dominator's workstation is recorded");
+  }
+
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+  // B (handle 3 -> node 2) is a leaf, so the inventory must hold it.
+  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  inventory[2] = 100;
+
+  const aw::Handle onlyA[] = {4};    // WS_A
+  const aw::Handle both[] = {4, 5};  // WS_A and WS_B
+
+  expect(!subgraphHasRecipe(aw::reachableSubgraph(1, both, inventory), 0),
+         "with the dominator's station the dominated recipe is dropped");
+  expect(subgraphHasRecipe(aw::reachableSubgraph(1, onlyA, inventory), 0),
+         "without the dominator's station the dominated recipe survives");
+  {
+    // Nothing is inlined, so holding the shared input never revives it.
+    std::vector<aw::Amount> stocked = inventory;
+    stocked[1] = 100;  // A
+    expect(!subgraphHasRecipe(aw::reachableSubgraph(1, both, stocked), 0),
+           "stock of the shared input does not keep the dominated recipe");
+  }
+
+  auto plan = [&](bool prune, std::span<const aw::Handle> ws, aw::Amount amount) {
+    aw::setDirectDominancePruningEnabled(prune);
+    const aw::Subgraph sub = aw::reachableSubgraph(1, ws, inventory);
+    const aw::NodeId target = sub.translate(0);
+    const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
+    int64_t total = 0;
+    for (int64_t x : r.exec)
+      total += x;
+    return std::pair<aw::PlanStatus, int64_t>(r.status, total);
+  };
+
+  const std::vector<aw::Handle> cases[] = {{4}, {4, 5}};
+  for (const std::vector<aw::Handle> &ws : cases) {
+    for (aw::Amount amount : {2, 3, 8}) {
+      const auto full = plan(false, ws, amount);
+      const auto pruned = plan(true, ws, amount);
+      expect(full.first == pruned.first, "direct dominance preserves the status");
+      expect(full.second == pruned.second, "direct dominance preserves the optimum");
+    }
+  }
+  aw::setDirectDominancePruningEnabled(true);
+}
+
 void testReducedCostParity() {
   std::cout << "[Test] reduced-cost fixing preserves the plan optimum\n";
   aw::registerCraftingGraph(buildBlackCandleSample());
@@ -2653,6 +2768,7 @@ void testSatellitePruning() {
   // what *this* pass does on its own.
   aw::setTagPruningEnabled(false);
   aw::setRecipePruningEnabled(false);
+  aw::setDirectDominancePruningEnabled(false);
   aw::setPackPruningEnabled(false);
 
   auto stockedOre = []() {
@@ -2716,6 +2832,7 @@ void testSatellitePruning() {
   aw::setSatellitePruningEnabled(true);
   aw::setTagPruningEnabled(true);
   aw::setRecipePruningEnabled(true);
+  aw::setDirectDominancePruningEnabled(true);
   aw::setPackPruningEnabled(true);
 }
 
@@ -2728,6 +2845,7 @@ void testSatelliteLeakPruning() {
 
   aw::setTagPruningEnabled(false);
   aw::setRecipePruningEnabled(false);
+  aw::setDirectDominancePruningEnabled(false);
   aw::setPackPruningEnabled(false);
 
   auto keepsIsland = [&](const aw::Subgraph &sub) {
@@ -2767,6 +2885,7 @@ void testSatelliteLeakPruning() {
   aw::setSatellitePruningEnabled(true);
   aw::setTagPruningEnabled(true);
   aw::setRecipePruningEnabled(true);
+  aw::setDirectDominancePruningEnabled(true);
   aw::setPackPruningEnabled(true);
 }
 
@@ -2863,6 +2982,7 @@ int main() {
   testRecipePruningWorkstations();
   testRecipeDominatorWorkstations();
   testRecipePruningParity();
+  testDirectDominancePruning();
   testReducedCostParity();
   testPackPruning();
   testPackPruningParity();
