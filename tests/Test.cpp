@@ -64,7 +64,7 @@ std::vector<std::byte> buildSample() {
     emitVarInt(out, 1);  // +1 -> handle 2
     emitVarInt(out, 1);  // one input
     emitVarInt(out, 5);
-    emitVarInt(out, 1);  // -> item 1
+    emitVarInt(out, 2);  // -> item 2
   }
 
   emitVarInt(out, 2);  // output delta -> handle 3 (pseudo)
@@ -77,6 +77,46 @@ std::vector<std::byte> buildSample() {
     emitVarInt(out, 1);  // -> item 1
     emitVarInt(out, 1);
     emitVarInt(out, 2);  // -> item 3
+  }
+  return out;
+}
+
+// A dump with three real recipes for handle 1, all with a workstation:
+//
+//   r0: item 1 x1 <- item 1 x1      (consumes as much as it makes)
+//   r1: item 1 x1 <- item 1 x2      (consumes more than it makes)
+//   r2: item 1 x3 <- item 1 x1      (the only net producer)
+//
+// Registration must drop r0 and r1 and keep r2, with no query involved.
+std::vector<std::byte> buildLossySample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 1);  // realResourceCount
+  emitVarInt(out, 1);  // entryCount
+  emitVarInt(out, 1);  // output delta -> handle 1
+  emitVarInt(out, 3);  // three recipes
+  {
+    emitVarInt(out, 1);  // r0 output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);  // handle 1
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);  // input amount
+    emitVarInt(out, 1);  // -> item 1
+  }
+  {
+    emitVarInt(out, 1);  // r1 output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);  // handle 1
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 2);  // input amount
+    emitVarInt(out, 1);  // -> item 1
+  }
+  {
+    emitVarInt(out, 3);  // r2 output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);  // handle 1
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);  // input amount
+    emitVarInt(out, 1);  // -> item 1
   }
   return out;
 }
@@ -1648,7 +1688,8 @@ void testSample() {
   expect(graph.nItem == 3, "itemCount");
   // r0 is a real recipe with an empty workstation set: it can never be entered
   // by the walk, so registration drops it. r2 produces the pseudo-resource and
-  // is kept even though its workstation set is empty too.
+  // is kept even though its workstation set is empty too, and even though it
+  // consumes its own pseudo output: the net-loss rule only touches real items.
   expect(graph.nRecipe == 2, "recipeCount");
   expect(!graph.isRealItem(2), "handle 3 is a pseudo-resource");
   expect(graph.isRealItem(0) && graph.isRealItem(1), "handles 1 and 2 are real");
@@ -1663,7 +1704,7 @@ void testSample() {
   expect(pseudo.size() == 1 && pseudo[0] == 4, "item 3 -> recipe 1");
 
   const auto r0Targets = graph.r2i.targetsOf(0);
-  expect(r0Targets.size() == 1 && r0Targets[0] == 0, "recipe 0 input is item 1");
+  expect(r0Targets.size() == 1 && r0Targets[0] == 1, "recipe 0 input is item 2");
   const auto r0Weights = graph.r2i.weightsOf(0);
   expect(r0Weights.size() == 1 && r0Weights[0] == 5, "recipe 0 amount");
   const auto r1Targets = graph.r2i.targetsOf(1);
@@ -1677,6 +1718,37 @@ void testSample() {
   const auto ws0 = graph.workstations.targetsOf(0);
   expect(ws0.size() == 2 && ws0[0] == 0 && ws0[1] == 1, "recipe 0 workstations");
   expect(graph.workstations.targetsOf(1).empty(), "recipe 1 has no workstations");
+}
+
+void testNetLossRecipes() {
+  std::cout << "[Test] net-loss recipe drop\n";
+  aw::registerCraftingGraph(buildLossySample());
+  expect(aw::getCraftingError() == nullptr, "lossy sample parses");
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+
+  // The two recipes that consume at least as much as they make are gone, even
+  // though each has a workstation. Only the net producer survives.
+  expect(graph.nRecipe == 1, "net-loss recipes are dropped at registration");
+  expect(graph.output[0] == 0 && graph.outputAmt[0] == 3, "the survivor is r2");
+  const auto inputs = graph.r2i.targetsOf(0);
+  const auto weights = graph.r2i.weightsOf(0);
+  expect(inputs.size() == 1 && inputs[0] == 0 && weights[0] == 1,
+         "the survivor keeps its input");
+
+  // The drop is baked into the graph, so no query can resurrect the losses,
+  // not even one that holds stock of the item.
+  aw::setRecipePruningEnabled(false);
+  aw::setSatellitePruningEnabled(false);
+  aw::setDeadNodePruningEnabled(false);
+  const aw::Handle all[] = {1};
+  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  inventory[0] = 100;
+  const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+  aw::setDeadNodePruningEnabled(true);
+  aw::setSatellitePruningEnabled(true);
+  aw::setRecipePruningEnabled(true);
+  expect(sub.graph.nRecipe == 1 && sub.graph.outputAmt[0] == 3,
+         "stock cannot resurrect a dropped net-loss recipe");
 }
 
 void testReachability() {
@@ -2773,6 +2845,7 @@ void testSatellitePruningParity() {
 int main() {
   testSample();
   testRejectsBadInput();
+  testNetLossRecipes();
   testReachability();
   testDeadNodePruning();
   testSolver();

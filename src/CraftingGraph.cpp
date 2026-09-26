@@ -565,20 +565,57 @@ void rebuildFromRecipes(CraftingGraph& graph, std::vector<MutableRecipe>& recipe
   canonicalizeRecipes();
 }
 
-// Drops every real recipe that has no workstation. A real recipe needs an
-// available station to be entered by the reachability walk, so a station-less
-// one is never reachable; removing it at registration time only spares the
-// later passes the work. Synthetic tag edges keep an empty workstation set on
-// purpose (their output is a pseudo-resource), so they are left alone. Returns
-// true when anything was dropped; the rebuild ends with canonicalizeRecipes(),
-// so the caller can skip its own call in that case.
-bool dropWorkstationlessRecipes(CraftingGraph& graph) noexcept {
+// The amount of a recipe's own output that the recipe also consumes.
+Amount selfConsumption(const MutableRecipe& rec) noexcept {
+  Amount self = 0;
+  for (size_t k = 0; k < rec.inputs.size(); k++)
+    if (rec.inputs[k] == rec.out)
+      self += rec.amounts[k];
+  return self;
+}
+
+// The same quantity read off the CSR form, without materializing the recipes.
+Amount selfConsumptionAt(const CraftingGraph& graph, uint r) noexcept {
+  const auto inputs = graph.r2i.targetsOf(r);
+  const auto amounts = graph.r2i.weightsOf(r);
+  Amount self = 0;
+  for (size_t k = 0; k < inputs.size(); k++)
+    if (inputs[k] == graph.output[r])
+      self += amounts[k];
+  return self;
+}
+
+// Drops the recipes that can never appear in an optimal plan, before any pass
+// sees the graph. Two classes of real recipe qualify:
+//
+//   * A recipe that consumes at least as much of its own output as it produces
+//     has a column v_r <= 0: the output row is `p - c <= 0` and every other row
+//     is a consumption. It is therefore dominated by doing nothing -- deleting
+//     one of its executions from any feasible plan keeps the plan feasible and
+//     strictly cheaper -- so no optimal plan uses it, for any target and any
+//     inventory. This needs no stock or workstation guard. It covers the
+//     synthetic self-loops and the per-output copies of multi-output recipes.
+//   * A recipe with no workstation can never be entered by the reachability
+//     walk, so it is unreachable.
+//
+// A synthetic tag edge outputs a pseudo-resource, so it is exempt from both:
+// its empty workstation set is deliberate, and the tag pass owns its structure.
+//
+// Returns true when anything was dropped; the rebuild ends with
+// canonicalizeRecipes(), so the caller can skip its own call in that case.
+bool dropUselessRecipes(CraftingGraph& graph) noexcept {
+  const auto netLoss = [&](const MutableRecipe& rec) noexcept {
+    return rec.out < graph.nReal && selfConsumption(rec) >= rec.outAmt;
+  };
+  const auto netLossAt = [&](uint r) noexcept {
+    return graph.output[r] < graph.nReal &&
+           selfConsumptionAt(graph, r) >= graph.outputAmt[r];
+  };
+
   bool any = false;
-  for (uint r = 0; r < graph.nRecipe; r++) {
-    if (graph.output[r] < graph.nReal && graph.workstations.targetsOf(r).empty()) {
-      any = true;
-      break;
-    }
+  for (uint r = 0; r < graph.nRecipe && !any; r++) {
+    any = netLossAt(r) ||
+          (graph.output[r] < graph.nReal && graph.workstations.targetsOf(r).empty());
   }
   if (!any)
     return false;
@@ -587,7 +624,8 @@ bool dropWorkstationlessRecipes(CraftingGraph& graph) noexcept {
   extractRecipes(graph, recipes);
   size_t kept = 0;
   for (size_t i = 0; i < recipes.size(); i++) {
-    if (recipes[i].out < graph.nReal && recipes[i].ws.empty())
+    const MutableRecipe& rec = recipes[i];
+    if (netLoss(rec) || (rec.out < graph.nReal && rec.ws.empty()))
       continue;
     // Guard the self-move: `kept == i` for every recipe that survives, and a
     // self-move-assignment may legally empty the source vector.
@@ -695,9 +733,10 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
     }
   }
 
-  // A 0-workstation real recipe can never be entered by the walk, so drop it
-  // before the passes see the graph. The rebuild canonicalizes for us.
-  if (!dropWorkstationlessRecipes(graph))
+  // Recipes that are net losses on their own output, and real recipes with no
+  // workstation, can never appear in an optimal plan, so drop them before the
+  // passes see the graph. The rebuild canonicalizes for us.
+  if (!dropUselessRecipes(graph))
     canonicalizeRecipes();
   const TagInlineMode inlineMode = tagInlineMode;
   // PRE flattens every single-use tag before the dominance passes see the

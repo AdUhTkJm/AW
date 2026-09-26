@@ -735,22 +735,24 @@ int main(int argc, char** argv) {
   std::string profilePath;
   std::string inlineTags = "off";
   ProfileGuard profileGuard;
-  bool check = false;
-  bool dump = false;
-  bool noPrune = false;
-  bool noRecipePrune = false;
-  bool noPackPrune = false;
   double packSeconds = -1.0;
-  bool noSatellitePrune = false;
   double satelliteSeconds = -1.0;
-  bool noDeadNodePrune = false;
-  bool doReach = false;
-  bool doTree = false;
-  bool doPlan = false;
   uint64_t planAmount = 1;
   aw::solver::Options solverOptions;
   aw::Handle reach = 0;
   std::vector<aw::Handle> workstations;
+
+  bool check = false;
+  bool dump = false;
+  bool noPrune = false;
+  bool noTagPrune = false;
+  bool noRecipePrune = false;
+  bool noPackPrune = false;
+  bool noSatellitePrune = false;
+  bool noDeadNodePrune = false;
+  bool doReach = false;
+  bool doTree = false;
+  bool doPlan = false;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -760,6 +762,8 @@ int main(int argc, char** argv) {
       dump = true;
     } else if (arg == "--no-prune") {
       noPrune = true;
+    } else if (arg == "--no-tag-prune") {
+      noTagPrune = true;
     } else if (arg == "--no-recipe-prune") {
       noRecipePrune = true;
     } else if (arg == "--no-pack-prune") {
@@ -917,7 +921,7 @@ int main(int argc, char** argv) {
   // installed before the graph is registered.
   {
     aw::PackPruneOptions packOptions = aw::getPackPruningOptions();
-    if (noPackPrune)
+    if (noPackPrune || noPrune)
       packOptions.enabled = false;
     if (packSeconds >= 0.0)
       packOptions.maxSeconds = packSeconds;
@@ -927,7 +931,7 @@ int main(int argc, char** argv) {
   // Satellite elimination runs per query, on the reachable subgraph.
   {
     aw::SatellitePruneOptions satelliteOptions = aw::getSatellitePruningOptions();
-    if (noSatellitePrune)
+    if (noSatellitePrune || noPrune)
       satelliteOptions.enabled = false;
     if (satelliteSeconds >= 0.0)
       satelliteOptions.maxSeconds = satelliteSeconds;
@@ -935,7 +939,7 @@ int main(int argc, char** argv) {
   }
 
   // Dead-node cleanup runs per query, after the walk and every pruning pass.
-  aw::setDeadNodePruningEnabled(!noDeadNodePrune);
+  aw::setDeadNodePruningEnabled(!noDeadNodePrune && !noPrune);
 
   // Profile the whole run: decode + canonicalize + prune precompute, the
   // reachability pass, the LP/CP-SAT solve, and the report. Started before the
@@ -957,9 +961,9 @@ int main(int argc, char** argv) {
     return EXIT_SUCCESS;
   }
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
-  if (noPrune)
+  if (noTagPrune || noPrune)
     aw::setTagPruningEnabled(false);
-  if (noRecipePrune)
+  if (noRecipePrune || noPrune)
     aw::setRecipePruningEnabled(false);
 
   std::cout << "parsed " << bytes.size() << " bytes from " << path << '\n';

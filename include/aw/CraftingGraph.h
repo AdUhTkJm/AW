@@ -123,7 +123,7 @@ struct PackPruneOptions {
   uint32_t maxZeroStockItems = 32;
 
   // Wall-clock budget for the whole pass. <= 0 means no limit.
-  double maxSeconds = 2.0;
+  double maxSeconds = 60.0;
 };
 
 // Budget for the satellite-elimination pass (docs/algorithm.typ, "孤岛消除").
