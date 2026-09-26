@@ -13,6 +13,8 @@ const char *error;
 // Single-use tag inlining mode. Global and read at registration time, matching
 // the other registration-time knobs.
 TagInlineMode tagInlineMode = TagInlineMode::OFF;
+// Dead-node cleanup. Query-time, global like the satellite toggle.
+bool deadNodePruningEnabled = true;
 
 namespace {
 
@@ -563,6 +565,41 @@ void rebuildFromRecipes(CraftingGraph& graph, std::vector<MutableRecipe>& recipe
   canonicalizeRecipes();
 }
 
+// Drops every real recipe that has no workstation. A real recipe needs an
+// available station to be entered by the reachability walk, so a station-less
+// one is never reachable; removing it at registration time only spares the
+// later passes the work. Synthetic tag edges keep an empty workstation set on
+// purpose (their output is a pseudo-resource), so they are left alone. Returns
+// true when anything was dropped; the rebuild ends with canonicalizeRecipes(),
+// so the caller can skip its own call in that case.
+bool dropWorkstationlessRecipes(CraftingGraph& graph) noexcept {
+  bool any = false;
+  for (uint r = 0; r < graph.nRecipe; r++) {
+    if (graph.output[r] < graph.nReal && graph.workstations.targetsOf(r).empty()) {
+      any = true;
+      break;
+    }
+  }
+  if (!any)
+    return false;
+
+  std::vector<MutableRecipe> recipes;
+  extractRecipes(graph, recipes);
+  size_t kept = 0;
+  for (size_t i = 0; i < recipes.size(); i++) {
+    if (recipes[i].out < graph.nReal && recipes[i].ws.empty())
+      continue;
+    // Guard the self-move: `kept == i` for every recipe that survives, and a
+    // self-move-assignment may legally empty the source vector.
+    if (kept != i)
+      recipes[kept] = std::move(recipes[i]);
+    kept++;
+  }
+  recipes.resize(kept);
+  rebuildFromRecipes(graph, recipes);
+  return true;
+}
+
 // Registration-time inliner: flatten every single-use tag, using every member
 // edge, before the dominance passes run.
 void inlineSingleUseTags(CraftingGraph& graph) noexcept {
@@ -658,7 +695,10 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
     }
   }
 
-  canonicalizeRecipes();
+  // A 0-workstation real recipe can never be entered by the walk, so drop it
+  // before the passes see the graph. The rebuild canonicalizes for us.
+  if (!dropWorkstationlessRecipes(graph))
+    canonicalizeRecipes();
   const TagInlineMode inlineMode = tagInlineMode;
   // PRE flattens every single-use tag before the dominance passes see the
   // graph. The query-time spot (QUERY_TIME / BOTH) runs later, inside
@@ -686,6 +726,14 @@ void setTagInliningMode(TagInlineMode mode) noexcept {
 
 TagInlineMode getTagInliningMode() noexcept {
   return tagInlineMode;
+}
+
+void setDeadNodePruningEnabled(bool enabled) noexcept {
+  deadNodePruningEnabled = enabled;
+}
+
+bool isDeadNodePruningEnabled() noexcept {
+  return deadNodePruningEnabled;
 }
 
 Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
@@ -851,6 +899,86 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
         disabled[recipe] |= drop[recipe];
       walk();
     }
+  }
+
+  // Dead-node cleanup. Reachability keeps an item when a surviving recipe
+  // consumes it, even if no surviving recipe can produce it. When the player
+  // holds none of it and the source graph has a producer, the item is usable by
+  // nothing: every recipe that consumes it is dead, and dropping those can
+  // expose further such items. Items with no producer in the source graph are
+  // raw materials the player is expected to gather, so they are kept.
+  if (deadNodePruningEnabled) {
+    const NodeId target = CraftingGraph::itemNode(output);
+
+    // How many surviving recipes produce each item.
+    std::vector<uint> produced(nItem, 0);
+    for (uint r = 0; r < nRecipe; r++)
+      if (recipeSeen[r])
+        produced[graph.output[r]]++;
+
+    // Item -> surviving recipes that consume it, as a CSR.
+    std::vector<uint> consOffsets(nItem + 1, 0);
+    for (uint r = 0; r < nRecipe; r++) {
+      if (!recipeSeen[r])
+        continue;
+      for (NodeId input : graph.r2i.targetsOf(r))
+        consOffsets[input + 1]++;
+    }
+    for (NodeId item = 0; item < nItem; item++)
+      consOffsets[item + 1] += consOffsets[item];
+    std::vector<uint> consTargets(consOffsets.back());
+    {
+      std::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
+      for (uint r = 0; r < nRecipe; r++) {
+        if (!recipeSeen[r])
+          continue;
+        for (NodeId input : graph.r2i.targetsOf(r))
+          consTargets[cursor[input]++] = r;
+      }
+    }
+
+    auto usable = [&](NodeId item) {
+      if (item == target || produced[item] != 0)
+        return true;
+      const Amount held = item < inventory.size() ? inventory[item] : 0;
+      if (held != 0)
+        return true;
+      // No producer anywhere in the source graph: a raw material.
+      return graph.i2r.targetsOf(item).empty();
+    };
+
+    std::vector<NodeId> dead;
+    std::vector<uint8_t> queued(nItem, 0);
+    for (NodeId item = 0; item < nItem; item++) {
+      if (itemSeen[item] && !usable(item)) {
+        queued[item] = 1;
+        dead.push_back(item);
+      }
+    }
+
+    bool changed = false;
+    for (size_t q = 0; q < dead.size(); q++) {
+      const NodeId item = dead[q];
+      for (uint slot = consOffsets[item]; slot < consOffsets[item + 1]; slot++) {
+        const uint r = consTargets[slot];
+        if (disabled[r])
+          continue;
+        disabled[r] = 1;
+        recipeSeen[r] = 0;
+        changed = true;
+        const NodeId out = graph.output[r];
+        if (produced[out] > 0)
+          produced[out]--;
+        if (produced[out] == 0 && itemSeen[out] && !queued[out] && !usable(out)) {
+          queued[out] = 1;
+          dead.push_back(out);
+        }
+      }
+    }
+    // Rebuild the walk so items only needed by the dropped recipes disappear
+    // too; the closure above guarantees no new producer-less item appears.
+    if (changed)
+      walk();
   }
 
   // Collect the surviving recipes as an explicit, rewritable list. Everything

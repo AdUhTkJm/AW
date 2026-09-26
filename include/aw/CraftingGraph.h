@@ -288,6 +288,21 @@ bool isSatellitePruningEnabled() noexcept;
 void setSatellitePruningOptions(const SatellitePruneOptions &options) noexcept;
 SatellitePruneOptions getSatellitePruningOptions() noexcept;
 
+// Dead-node cleanup is on by default. Like satellite elimination it is a
+// query-time pass, so it is switched off independently of the registration-time
+// passes above.
+//
+// Reachability keeps an item when some surviving recipe consumes it, even if no
+// surviving recipe can produce it. When the player holds none of that item and
+// the source graph does have a producer, the item can only appear as a zero
+// column: every recipe that consumes it is dead too, and dropping those can
+// expose further such items. This pass removes that closure and re-runs the
+// walk, so only the parts that can actually be reached remain. Items with no
+// producer anywhere in the source graph are raw materials the player is meant
+// to gather, so they are never touched.
+void setDeadNodePruningEnabled(bool enabled) noexcept;
+bool isDeadNodePruningEnabled() noexcept;
+
 // Single-use tag inlining. Like the pack options it is read at registration
 // time, so it must be set before registerCraftingGraph.
 void setTagInliningMode(TagInlineMode mode) noexcept;

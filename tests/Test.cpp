@@ -24,6 +24,8 @@ void expect(bool condition, const char* what) {
   }
 }
 
+bool subgraphHasRecipe(const aw::Subgraph &sub, uint32_t source);
+
 void emitVarInt(std::vector<std::byte>& out, std::uint64_t value) {
   while ((value & ~0x7FULL) != 0) {
     out.push_back(static_cast<std::byte>((value & 0x7F) | 0x80));
@@ -127,6 +129,52 @@ std::vector<std::byte> buildReachSample() {
     emitVarInt(out, 1);  // one input
     emitVarInt(out, 1);
     emitVarInt(out, 2);  // -> item handle 2
+  }
+  return out;
+}
+
+// A dump for the dead-node cleanup. Handles 1..3 are real.
+//
+//   item 1 <- rT  (x1, workstations [1], inputs item-2 x1)
+//          <- rT2 (x1, workstations [1], inputs item-3 x1)
+//   item 2 <- rA  (x1, workstations [2], inputs item-3 x1)
+//
+// item 3 has no producer. Recipe ids in file order: rT=0, rT2=1, rA=2. When
+// only workstation 1 is allowed, item 2 keeps a producer in the source graph
+// but has none in the subgraph, so the cleanup must drop rT.
+std::vector<std::byte> buildDeadNodeSample() {
+  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 3);  // realResourceCount
+  emitVarInt(out, 2);  // entries: outputs 1 and 2
+
+  emitVarInt(out, 1);  // output delta -> handle 1
+  emitVarInt(out, 2);  // two recipes
+  {
+    emitVarInt(out, 1);  // rT output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);  // handle 1
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);  // amount
+    emitVarInt(out, 2);  // -> item handle 2
+  }
+  {
+    emitVarInt(out, 1);  // rT2 output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);  // handle 1
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);  // amount
+    emitVarInt(out, 3);  // -> item handle 3
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2
+  emitVarInt(out, 1);  // one recipe
+  {
+    emitVarInt(out, 1);  // rA output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 2);  // handle 2
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);  // amount
+    emitVarInt(out, 3);  // -> item handle 3
   }
   return out;
 }
@@ -1598,40 +1646,37 @@ void testSample() {
 
   expect(graph.nReal == 2, "realResourceCount");
   expect(graph.nItem == 3, "itemCount");
-  expect(graph.nRecipe == 3, "recipeCount");
+  // r0 is a real recipe with an empty workstation set: it can never be entered
+  // by the walk, so registration drops it. r2 produces the pseudo-resource and
+  // is kept even though its workstation set is empty too.
+  expect(graph.nRecipe == 2, "recipeCount");
   expect(!graph.isRealItem(2), "handle 3 is a pseudo-resource");
   expect(graph.isRealItem(0) && graph.isRealItem(1), "handles 1 and 2 are real");
-  expect(graph.recipeNode(0) == 3 && graph.recipeNode(2) == 5, "recipe node numbering");
+  expect(graph.recipeNode(0) == 3 && graph.recipeNode(1) == 4, "recipe node numbering");
 
   const auto itemTargets = graph.i2r.targetsOf(0);
-  expect(itemTargets.size() == 2 && itemTargets[0] == 3 && itemTargets[1] == 4,
-       "item 1 -> recipes 0, 1");
+  expect(itemTargets.size() == 1 && itemTargets[0] == 3, "item 1 -> recipe 0");
   const auto itemWeights = graph.i2r.weightsOf(0);
-  expect(itemWeights.size() == 2 && itemWeights[0] == 4 && itemWeights[1] == 1,
-       "item 1 edge weights");
+  expect(itemWeights.size() == 1 && itemWeights[0] == 1, "item 1 edge weights");
   expect(graph.i2r.targetsOf(1).empty(), "item 2 has no producing recipe");
   const auto pseudo = graph.i2r.targetsOf(2);
-  expect(pseudo.size() == 1 && pseudo[0] == 5, "item 3 -> recipe 2");
+  expect(pseudo.size() == 1 && pseudo[0] == 4, "item 3 -> recipe 1");
 
   const auto r0Targets = graph.r2i.targetsOf(0);
-  expect(r0Targets.size() == 2 && r0Targets[0] == 1 && r0Targets[1] == 2,
-       "recipe 0 inputs are items 2, 3");
+  expect(r0Targets.size() == 1 && r0Targets[0] == 0, "recipe 0 input is item 1");
   const auto r0Weights = graph.r2i.weightsOf(0);
-  expect(r0Weights.size() == 2 && r0Weights[0] == 2 && r0Weights[1] == 1, "recipe 0 amounts");
-  expect(graph.r2i.targetsOf(1).size() == 1 &&
-         graph.r2i.targetsOf(1)[0] == 0,
-       "recipe 1 input is item 1");
-  expect(graph.r2i.targetsOf(2).size() == 2, "recipe 2 has two inputs");
+  expect(r0Weights.size() == 1 && r0Weights[0] == 5, "recipe 0 amount");
+  const auto r1Targets = graph.r2i.targetsOf(1);
+  expect(r1Targets.size() == 2 && r1Targets[0] == 0 && r1Targets[1] == 2,
+         "recipe 1 inputs are items 1, 3");
 
-  expect(graph.output[0] == 0 && graph.outputAmt[0] == 4, "recipe 0 output");
-  expect(graph.output[1] == 0 && graph.outputAmt[1] == 1, "recipe 1 output");
-  expect(graph.output[2] == 2 && graph.outputAmt[2] == 1, "recipe 2 output");
+  expect(graph.output[0] == 0 && graph.outputAmt[0] == 1, "recipe 0 output");
+  expect(graph.output[1] == 2 && graph.outputAmt[1] == 1, "recipe 1 output");
 
-  expect(graph.workstations.numVertices() == 3, "one workstation row per recipe");
-  const auto ws1 = graph.workstations.targetsOf(1);
-  expect(ws1.size() == 2 && ws1[0] == 0 && ws1[1] == 1, "recipe 1 workstations");
-  expect(graph.workstations.targetsOf(0).empty(), "recipe 0 has no workstations");
-  expect(graph.workstations.targetsOf(2).empty(), "recipe 2 has no workstations");
+  expect(graph.workstations.numVertices() == 2, "one workstation row per recipe");
+  const auto ws0 = graph.workstations.targetsOf(0);
+  expect(ws0.size() == 2 && ws0[0] == 0 && ws0[1] == 1, "recipe 0 workstations");
+  expect(graph.workstations.targetsOf(1).empty(), "recipe 1 has no workstations");
 }
 
 void testReachability() {
@@ -1717,6 +1762,88 @@ void testReachability() {
   expect(ok, "subgraph CSRs are well formed");
 }
 
+void testDeadNodePruning() {
+  std::cout << "[Test] dead-node cleanup\n";
+  aw::setTagPruningEnabled(false);
+  aw::setRecipePruningEnabled(false);
+  aw::setPackPruningEnabled(false);
+  aw::setSatellitePruningEnabled(false);
+
+  aw::registerCraftingGraph(buildDeadNodeSample());
+  expect(aw::getCraftingError() == nullptr, "dead-node sample parses");
+  {
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    expect(graph.nReal == 3 && graph.nItem == 3 && graph.nRecipe == 3,
+           "dead-node sample shape");
+  }
+
+  const aw::Handle onlyT[] = {1};  // rT and rT2 run; rA needs workstation 2.
+  std::vector<aw::Amount> inventory(3, 0);
+
+  // With the cleanup off, item 2 is a leaf that no surviving recipe produces,
+  // and rT is still in the subgraph.
+  aw::setDeadNodePruningEnabled(false);
+  {
+    const aw::Subgraph sub = aw::reachableSubgraph(1, onlyT, inventory);
+    expect(sub.graph.nItem == 3 && sub.graph.nRecipe == 2,
+           "cleanup off keeps the dead leaf");
+    expect(subgraphHasRecipe(sub, 0), "rT survives with the cleanup off");
+    expect(sub.translate(1) != UINT32_MAX, "item 2 survives with the cleanup off");
+  }
+
+  // With it on, rT goes and item 2 disappears with it. rT2 keeps the target and
+  // the raw material (item 3) alive.
+  aw::setDeadNodePruningEnabled(true);
+  {
+    const aw::Subgraph sub = aw::reachableSubgraph(1, onlyT, inventory);
+    expect(sub.graph.nItem == 2 && sub.graph.nRecipe == 1,
+           "cleanup drops the dead branch");
+    expect(subgraphHasRecipe(sub, 1), "the raw-material route survives");
+    expect(!subgraphHasRecipe(sub, 0), "the dead consumer is dropped");
+    expect(!subgraphHasRecipe(sub, 2), "the unreachable producer is kept out");
+    expect(sub.translate(0) != UINT32_MAX, "the target survives");
+    expect(sub.translate(1) == UINT32_MAX, "the dead item is gone");
+    expect(sub.translate(2) != UINT32_MAX, "the raw material survives");
+  }
+
+  // Stock on item 2 makes rT usable, so nothing is dead.
+  {
+    std::vector<aw::Amount> stocked = inventory;
+    stocked[1] = 5;  // item 2
+    const aw::Subgraph sub = aw::reachableSubgraph(1, onlyT, stocked);
+    expect(sub.graph.nItem == 3 && sub.graph.nRecipe == 2,
+           "stock keeps the branch");
+    expect(subgraphHasRecipe(sub, 0), "rT survives when its input is stocked");
+  }
+
+  // The cleanup must not change the plan optimum.
+  {
+    std::vector<aw::Amount> stocked = inventory;
+    stocked[2] = 10;  // item 3, the shared raw input
+    auto total = [](const aw::PlanResult &plan) {
+      int64_t sum = 0;
+      for (int64_t x : plan.exec)
+        sum += x;
+      return sum;
+    };
+    aw::setDeadNodePruningEnabled(false);
+    const aw::Subgraph full = aw::reachableSubgraph(1, onlyT, stocked);
+    const aw::PlanResult fullPlan = aw::planCrafting(full, full.translate(0), 1, stocked);
+    aw::setDeadNodePruningEnabled(true);
+    const aw::Subgraph pruned = aw::reachableSubgraph(1, onlyT, stocked);
+    const aw::PlanResult prunedPlan =
+        aw::planCrafting(pruned, pruned.translate(0), 1, stocked);
+    expect(fullPlan.status == prunedPlan.status, "dead-node: status agrees");
+    expect(fullPlan.status != aw::PlanStatus::OK || total(fullPlan) == total(prunedPlan),
+           "dead-node: optimum agrees");
+  }
+
+  aw::setTagPruningEnabled(true);
+  aw::setRecipePruningEnabled(true);
+  aw::setPackPruningEnabled(true);
+  aw::setSatellitePruningEnabled(true);
+}
+
 void testRejectsBadInput() {
   std::cout << "[Test] malformed input\n";
   auto rejects = [](std::span<const std::byte> bytes) {
@@ -1757,10 +1884,10 @@ void testRejectsBadInput() {
   // A rejected blob must leave the last good graph in place: testSample()
   // installed the sample dump and every call above bailed out early.
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
-  expect(graph.nReal == 2 && graph.nItem == 3 && graph.nRecipe == 3,
+  expect(graph.nReal == 2 && graph.nItem == 3 && graph.nRecipe == 2,
          "rejected blob leaves the previous graph in place");
   const auto itemTargets = graph.i2r.targetsOf(0);
-  expect(itemTargets.size() == 2 && itemTargets[0] == 3 && itemTargets[1] == 4,
+  expect(itemTargets.size() == 1 && itemTargets[0] == 3,
          "previous graph is still coherent after a rejected blob");
 
   // A failure must not poison the next attempt with a stale error.
@@ -2647,6 +2774,7 @@ int main() {
   testSample();
   testRejectsBadInput();
   testReachability();
+  testDeadNodePruning();
   testSolver();
   testReducedCostFixing();
   testZeroCostColumns();

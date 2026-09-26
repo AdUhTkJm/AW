@@ -743,6 +743,7 @@ int main(int argc, char** argv) {
   double packSeconds = -1.0;
   bool noSatellitePrune = false;
   double satelliteSeconds = -1.0;
+  bool noDeadNodePrune = false;
   bool doReach = false;
   bool doTree = false;
   bool doPlan = false;
@@ -765,6 +766,8 @@ int main(int argc, char** argv) {
       noPackPrune = true;
     } else if (arg == "--no-satellite-prune") {
       noSatellitePrune = true;
+    } else if (arg == "--no-dead-node-prune") {
+      noDeadNodePrune = true;
     } else if (arg == "--satellite-seconds") {
       if (i + 1 >= argc || !parseDouble(argv[++i], satelliteSeconds)) {
         std::cerr << "--satellite-seconds needs a number of seconds\n";
@@ -862,6 +865,7 @@ int main(int argc, char** argv) {
       std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
                    "                   [--no-prune] [--no-recipe-prune] [--no-pack-prune]\n"
                    "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
+                   "                   [--no-dead-node-prune]\n"
                    "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                    "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
@@ -880,6 +884,7 @@ int main(int argc, char** argv) {
     std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
                  "                   [--no-prune] [--no-recipe-prune] [--no-pack-prune]\n"
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
+                 "                   [--no-dead-node-prune]\n"
                  "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                  "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
@@ -928,6 +933,9 @@ int main(int argc, char** argv) {
       satelliteOptions.maxSeconds = satelliteSeconds;
     aw::setSatellitePruningOptions(satelliteOptions);
   }
+
+  // Dead-node cleanup runs per query, after the walk and every pruning pass.
+  aw::setDeadNodePruningEnabled(!noDeadNodePrune);
 
   // Profile the whole run: decode + canonicalize + prune precompute, the
   // reachability pass, the LP/CP-SAT solve, and the report. Started before the
