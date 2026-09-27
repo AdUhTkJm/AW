@@ -34,7 +34,7 @@ using operations_research::Domain;
 // The objective cap is searched by attempting a small value and then
 // exponentially scale it. This is used to bound CP-SAT.
 constexpr int64_t CAP_GROWTH = 8;
-constexpr int MAX_ATTEMPTS = 8;
+constexpr int MAX_ATTEMPTS = 16;
 
 // Slack on the reduced-cost test, so LP numerical noise never fixes a column
 // that could still appear in the optimum.

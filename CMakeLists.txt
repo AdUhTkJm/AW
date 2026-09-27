@@ -80,6 +80,20 @@ if(AW_BUILD_TOOLS)
    target_link_libraries(awr_inspect PRIVATE aw_crafting)
    target_compile_options(awr_inspect PRIVATE ${AW_STRICT_FLAGS})
 
+   # Cross-engine benchmark driver. Registers the graph once per (dataset, mode)
+   # and sweeps every ablation stage and query against that registration, then
+   # writes JSONL. See bench/README.md.
+   #
+   # GCC/Clang only: the derived missing set accumulates balances in __int128,
+   # which MSVC does not have. The benchmark runs on Linux/WSL, and the Windows
+   # path (scripts/build-windows.sh) only needs the DLL, so the tool is skipped
+   # there rather than carrying a second arithmetic path for it.
+   if(NOT MSVC)
+      add_executable(aw_bench tools/Bench.cpp)
+      target_link_libraries(aw_bench PRIVATE aw_crafting)
+      target_compile_options(aw_bench PRIVATE ${AW_STRICT_FLAGS})
+   endif()
+
    # Development-only CPU profiling (gperftools). It is linked in whenever the
    # library is installed, but only into awr_inspect, and it only does anything
    # when the tool is run with --profile. aw_crafting, aw_jni and the Windows

@@ -16,3 +16,9 @@ compare/
 # CPU profiles from --profile and their folded stacks / renderings
 *.prof
 *.folded
+
+# Cross-engine benchmark results (regenerable; plans/ is kept as the audit trail)
+bench/results/
+
+# Python bytecode caches
+__pycache__/
