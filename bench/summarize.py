@@ -64,6 +64,21 @@ def no_answer_of(row):
     return row.get("status") not in ANSWERED
 
 
+def plan_ms_of(row):
+    """Per-query planning time under one name across engines.
+
+    The baselines emit `plan_ms` (their whole planning call). AW splits the
+    same quantity into `reach_ms` + `solve_ms` and emits `query_ms` for the
+    sum; see bench/README.md section 5.2. Normalising here keeps the `plan_ms`
+    column comparable instead of silently reading 0.0 for every AW row.
+    """
+    if row.get("plan_ms") is not None:
+        return row["plan_ms"]
+    if row.get("query_ms") is not None:
+        return row["query_ms"]
+    return (row.get("reach_ms", 0.0) or 0.0) + (row.get("solve_ms", 0.0) or 0.0)
+
+
 def load_rows(results_dir):
     rows = []
     malformed = []
@@ -159,7 +174,7 @@ def main():
                 row.get("feasible"),
                 row.get("balance_ok"), row.get("false_positive"), row.get("cost"),
                 row.get("missing_count"), row.get("gap"), row.get("bound"),
-                "%.3f" % row.get("plan_ms", 0.0),
+                "%.3f" % plan_ms_of(row),
                 row.get("items", 0), row.get("recipes", 0), row.get("items_processed", 0),
                 row.get("conflicts", 0), row.get("branches", 0),
                 truth_status, truth_feasible, reference.get("cost") if reference else None,
@@ -201,8 +216,8 @@ def main():
             if (reference is not None and reference.get("proven_optimal")
                     and reference.get("feasible") and reference.get("cost")):
                 ratios.append(r["cost"] / reference["cost"])
-        plan_times = [r.get("plan_ms", 0.0) for r in items]
-        feasible_times = [r.get("plan_ms", 0.0) for r in feasible]
+        plan_times = [plan_ms_of(r) for r in items]
+        feasible_times = [plan_ms_of(r) for r in feasible]
         summary_rows.append({
             "dataset": dataset,
             "config": config,

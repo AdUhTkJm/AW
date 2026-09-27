@@ -185,29 +185,34 @@ Expected shape of the output (vanilla, 5 s cutoff, 5 s Java watchdog):
 
 ```
 == recipes-vanilla ==
-config      stage            n  feas   fp give  time pre_ms plan_ms   items  recipes   vs_ok     fp_vs  cost_rat
-aw-optimal  optimal         48    20    0    1     0    2.2    0.0       2        1   47/47         0     1.000
-aw-nonopt   none            48    20    0   16     0    3.7    0.0      68       88   32/32         0     1.000
-aw-nonopt   dead_node       48    20    0   16     0    3.7    0.0      68       88   32/32         0     1.000
-aw-nonopt   direct          48    20    0   16     0    3.7    0.0      68       88   32/32         0     1.000
-aw-nonopt   recipe          48    20    0   16     0    3.7    0.0      62       87   32/32         0     1.000
-aw-nonopt   substitution    48    20    0   16     0    3.7    0.0      62       87   32/32         0     1.000
-aw-nonopt   tag             48    20    0   12     0    3.7    0.0      48       48   36/36         0     1.000
-aw-nonopt   pack            48    20    0    9     0    3.7    0.0       8        7   39/39         0     1.000
-aw-nonopt   satellite       48    20    0    1     0    3.7    0.0       2        1   47/47         0     1.000
-tb-v2       -               48    20    0    0     0   56.7    4.1       0        0   47/47         0     1.000
-tb-cpsat    -               48    20    0    0     0   56.3   21.2       0        0   47/47         0     1.000
-ae2vm       -               48    12    2    0     0  519.8    0.5       0        0   37/47         1     1.250
-ae2vm-cold  -               48    12    2    0     0  521.9    2.2       0        0   37/47         1     1.250
+  optimality: prov=proven optimal, unprov=plan without a proof (AW gap / TB budget cut),
+              uncl=engine has no optimality notion, noans=no answer at all (not merely unproven)
+config      stage           n  feas   prov unprov   uncl noans tout   vs_ok   fp_vs   gapmax  cost_rat  pre_ms  plan_ms   items  recipes
+aw-optimal  optimal        48    20     19      1      0     1    0   47/47       0   0.0000     1.000     2.2      1.4       2        1
+aw-nonopt   none           48    20     18      2      0    16    0   32/32       0   0.0000     1.000     3.9      2.0      68       88
+aw-nonopt   dead_node      48    20     18      2      0    16    0   32/32       0   0.0000     1.000     3.9      2.0      68       88
+aw-nonopt   direct         48    20     18      2      0    16    0   32/32       0   0.0000     1.000     3.9      2.5      68       88
+aw-nonopt   recipe         48    20     18      2      0    16    0   32/32       0   0.0000     1.000     3.9      2.2      62       87
+aw-nonopt   substitution   48    20     18      2      0    16    0   32/32       0   0.0000     1.000     3.9      2.5      62       87
+aw-nonopt   tag            48    20     18      2      0    12    0   36/36       0   0.0000     1.000     3.9      1.8      48       48
+aw-nonopt   pack           48    20     19      1      0     9    0   39/39       0   0.0000     1.000     3.9      0.4       8        7
+aw-nonopt   satellite      48    20     19      1      0     1    0   47/47       0   0.0000     1.000     3.9      1.1       2        1
+tb-v2       -              48    20      0      0     48     0    0   47/47       0        -     1.000    54.2      3.8       0        0
+tb-cpsat    -              48    20     47      1      0     0    0   47/47       0        -     1.000    53.0     19.5       0        0
+ae2vm       -              48    12      0      0     48     0    0   37/47       1        -     1.250   515.2      0.5       0        0
+ae2vm-cold  -              48    12      0      0     48     0    0   37/47       1        -     1.250   548.1      1.9       0        0
 ```
 
 Read it as: the ablation shrinks the median query subgraph from 68 items / 88 recipes to
-2 / 1 and removes 15 of the 16 "gave up" answers; both Thunderbolt planners agree with the
-ground truth on every conclusive instance; AE2VM disagrees on 10, reports 1 instance as
+2 / 1 and removes 15 of the 16 instances that fail to give an answer. Both Thunderbolt planners agree with
+the ground truth on every conclusive instance; AE2VM disagrees on 10, reports 1 instance as
 feasible that AW proves infeasible, and emits 2 firing vectors that do not balance at all
 (the `fp` column — see §7.2). Note that in this sweep `ae2vm` and `ae2vm-cold` happen to
 agree: the false positive is history-dependent, which is why §7.3 uses a one-query instance
 instead of the sweep to expose it.
+
+For AW the `plan_ms` column is `query_ms` (`reach_ms` + `solve_ms`), the same whole-query
+quantity the baselines report as `plan_ms`; see §5.2.
 
 ### 4.2 Full run (overnight)
 
