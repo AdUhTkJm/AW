@@ -161,6 +161,45 @@ std::vector<std::byte> buildLossySample() {
   return out;
 }
 
+// A dump with degenerate input amounts. Every recipe is real and has a
+// workstation:
+//
+//   item 1 x4 <- item 2 x2               (r0, no degenerate input)
+//   item 1 x1 <- item 1 x0 + item 2 x1   (r1, workstations [1])
+//   item 1 x1 <- item 1 x0 + item 2 x1   (r2, workstations [2])
+//   item 1 x5 <- item 1 x0               (r3, workstations [1])
+//
+// An x0 input is not flow, so registration drops the edge, not the recipe: r1
+// and r2 become the same recipe and fold together (their workstations are
+// united), and r3 turns into an input-less recipe. Item 2 is an unstocked leaf
+// no recipe produces, so r0 and r1 are unusable without stock and the
+// input-less r3 is the only route to item 1.
+std::vector<std::byte> buildZeroInputSample() {
+  AwrWriter w;
+  w.header(2, 1);  // real handles 1..2, one entry, for handle 1
+  w.item(1, 4);
+  w.recipe(4, {1}, {{2, 2}});
+  w.recipe(1, {1}, {{1, 0}, {2, 1}});
+  w.recipe(1, {2}, {{1, 0}, {2, 1}});
+  w.recipe(5, {1}, {{1, 0}});
+  return w.out;
+}
+
+// The case where the choice matters: item 1's *only* recipe consumes 0 of item
+// 2, and nothing produces item 2.
+//
+//   item 1 x1 <- item 2 x0   (r0, workstations [1])
+//
+// The x0 edge is dropped and the recipe survives, so item 1 stays feasible.
+// Dropping the recipe instead would make item 1 unreachable for every query.
+std::vector<std::byte> buildDegenerateOnlyInputSample() {
+  AwrWriter w;
+  w.header(2, 1);  // real handles 1..2, one entry, for handle 1
+  w.item(1, 1);
+  w.recipe(1, {1}, {{2, 0}});
+  return w.out;
+}
+
 // A dump for the reachability walk. Handles 1..4 are real (item nodes 0..3) and
 // handle 5 is a pseudo-resource (node 4) whose members are handles 1 and 2.
 //
@@ -2230,6 +2269,84 @@ void testNetLossRecipes() {
          "stock cannot resurrect a dropped net-loss recipe");
 }
 
+void testNonPositiveInputs() {
+  std::cout << "[Test] degenerate input drop\n";
+  aw::registerCraftingGraph(buildZeroInputSample());
+  expect(aw::getCraftingError() == nullptr, "zero-input sample parses");
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+
+  // The x0 edges are gone before any pass can read an amount.
+  for (uint32_t r = 0; r < graph.nRecipe; r++) {
+    for (aw::Amount amount : graph.r2i.weightsOf(r))
+      expect(amount > 0, "no non-positive input amount survives registration");
+  }
+  expect(graph.nRecipe == 3, "the x0 edges are dropped, not their recipes");
+  expect(graph.r2i.numEdges() == 2, "a dropped edge leaves no empty slot behind");
+  expect(graph.i2r.targetsOf(0).size() == 3, "all three survivors still make item 1");
+
+  // r0, then the fold of r1 and r2, then r3. The fold keeps the lowest recipe id
+  // and gains both workstations.
+  expect(graph.outputAmt[0] == 4 && graph.outputAmt[1] == 1 && graph.outputAmt[2] == 5,
+         "surviving output amounts keep their file order");
+  expect(graph.r2i.targetsOf(0).size() == 1 && graph.r2i.targetsOf(0)[0] == 1 &&
+             graph.r2i.weightsOf(0)[0] == 2,
+         "r0 is untouched");
+  expect(graph.r2i.targetsOf(1).size() == 1 && graph.r2i.targetsOf(1)[0] == 1 &&
+             graph.r2i.weightsOf(1)[0] == 1,
+         "the folded recipe keeps only the real input");
+  const auto foldedWs = graph.workstations.targetsOf(1);
+  expect(foldedWs.size() == 2 && foldedWs[0] == 0 && foldedWs[1] == 1,
+         "recipes that differed only by a degenerate input fold, workstations united");
+  expect(graph.r2i.targetsOf(2).empty(), "r3 keeps its output with no input at all");
+
+  // An input-less recipe is not a curiosity to be husked out later: it is the
+  // only route that does not need the unstocked leaf, and the plan must use it.
+  aw::setRecipePruningEnabled(false);
+  aw::setDirectDominancePruningEnabled(false);
+  aw::setSubstitutionPruningEnabled(false);
+  aw::setSatellitePruningEnabled(false);
+  aw::setDeadNodePruningEnabled(false);
+  const aw::Handle all[] = {1, 2};
+  const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+  expect(sub.graph.nRecipe == 3, "the input-less recipe reaches the subgraph");
+  const aw::PlanResult plan = aw::planCrafting(sub, sub.translate(0), 1, {});
+  aw::setDeadNodePruningEnabled(true);
+  aw::setSatellitePruningEnabled(true);
+  aw::setSubstitutionPruningEnabled(true);
+  aw::setDirectDominancePruningEnabled(true);
+  aw::setRecipePruningEnabled(true);
+  expect(plan.status == aw::PlanStatus::OK && plan.provenOptimal, "the plan is proven optimal");
+  expect(plan.exec.size() == 3 && plan.exec[0] == 0 && plan.exec[1] == 0 && plan.exec[2] == 1,
+         "one firing of the input-less recipe covers the request");
+}
+
+void testDegenerateOnlyInput() {
+  std::cout << "[Test] a degenerate input is dropped, not the recipe\n";
+  aw::registerCraftingGraph(buildDegenerateOnlyInputSample());
+  expect(aw::getCraftingError() == nullptr, "degenerate-only sample parses");
+  const aw::CraftingGraph &graph = aw::getCraftingGraph();
+
+  expect(graph.nRecipe == 1, "the only recipe for item 1 survives");
+  expect(graph.r2i.targetsOf(0).empty(), "its x0 input is gone");
+  expect(graph.i2r.targetsOf(0).size() == 1, "item 1 is still produced");
+
+  aw::setRecipePruningEnabled(false);
+  aw::setDirectDominancePruningEnabled(false);
+  aw::setSubstitutionPruningEnabled(false);
+  aw::setSatellitePruningEnabled(false);
+  aw::setDeadNodePruningEnabled(false);
+  const aw::Handle all[] = {1, 2};
+  const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+  const aw::PlanResult plan = aw::planCrafting(sub, sub.translate(0), 1, {});
+  aw::setDeadNodePruningEnabled(true);
+  aw::setSatellitePruningEnabled(true);
+  aw::setSubstitutionPruningEnabled(true);
+  aw::setDirectDominancePruningEnabled(true);
+  aw::setRecipePruningEnabled(true);
+  expect(plan.status == aw::PlanStatus::OK, "item 1 stays feasible");
+  expect(plan.exec.size() == 1 && plan.exec[0] == 1, "the surviving recipe is the route");
+}
+
 void testReachability() {
   std::cout << "[Test] reachable subgraph\n";
   const std::vector<std::byte> bytes = buildReachSample();
@@ -3678,6 +3795,8 @@ int main() {
   testSample();
   testRejectsBadInput();
   testNetLossRecipes();
+  testNonPositiveInputs();
+  testDegenerateOnlyInput();
   testReachability();
   testDeadNodePruning();
   testSolver();

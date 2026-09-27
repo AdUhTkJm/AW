@@ -585,6 +585,56 @@ Amount selfConsumptionAt(const CraftingGraph& graph, uint r) noexcept {
   return self;
 }
 
+// Flow normalization, before any pass reads an amount: an input that consumes
+// nothing per firing (`amount <= 0`) contributes 0 to every balance row, so
+// removing it changes no plan -- `produced(i) - consumed(i) >= rhs(i)` is the
+// same either way. It cannot be kept, though: a non-positive amount is not a
+// flow, and the comparison harnesses' planners reject it outright, so the two
+// spellings of "free input" would hand three engines two different graphs. The
+// corpora reach this through AE2's entropy recipes, whose fluid ingredient
+// carries no amount at all (`data/ae2/recipe/entropy/cool/water_ice.json`).
+//
+// Runs before dropUselessRecipes so that self-consumption never sums a
+// degenerate amount, and ends in canonicalizeRecipes(): dropping an input can
+// make recipes identical, and uniting their workstations is part of the
+// normalization.
+//
+// Returns true when anything was removed; the rebuild canonicalizes for us, so
+// the caller can skip its own call in that case.
+bool dropNonPositiveInputs(CraftingGraph& graph) noexcept {
+  const auto degenerate = [&](uint r) noexcept {
+    for (Amount amount : graph.r2i.weightsOf(r))
+      if (amount <= 0)
+        return true;
+    return false;
+  };
+
+  bool any = false;
+  for (uint r = 0; r < graph.nRecipe && !any; r++)
+    any = degenerate(r);
+  if (!any)
+    return false;
+
+  std::vector<MutableRecipe> recipes;
+  extractRecipes(graph, recipes);
+  for (MutableRecipe& rec : recipes) {
+    size_t kept = 0;
+    for (size_t k = 0; k < rec.inputs.size(); k++) {
+      if (rec.amounts[k] <= 0)
+        continue;
+      if (kept != k) {
+        rec.inputs[kept] = rec.inputs[k];
+        rec.amounts[kept] = rec.amounts[k];
+      }
+      kept++;
+    }
+    rec.inputs.resize(kept);
+    rec.amounts.resize(kept);
+  }
+  rebuildFromRecipes(graph, recipes);
+  return true;
+}
+
 // Drops the recipes that can never appear in an optimal plan, before any pass
 // sees the graph. Two classes of real recipe qualify:
 //
@@ -733,10 +783,14 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
     }
   }
 
-  // Recipes that are net losses on their own output, and real recipes with no
-  // workstation, can never appear in an optimal plan, so drop them before the
-  // passes see the graph. The rebuild canonicalizes for us.
-  if (!dropUselessRecipes(graph))
+  // Degenerate input amounts are not flow, then recipes that are net losses on
+  // their own output and real recipes with no workstation can never appear in an
+  // optimal plan. All three are handled before the passes see the graph, and
+  // every rebuild canonicalizes for us, so the explicit call is only needed when
+  // neither pass touched the graph.
+  const bool normalized = dropNonPositiveInputs(graph);
+  const bool dropped = dropUselessRecipes(graph);
+  if (!normalized && !dropped)
     canonicalizeRecipes();
   const TagInlineMode inlineMode = tagInlineMode;
   // PRE flattens every single-use tag before the dominance passes see the

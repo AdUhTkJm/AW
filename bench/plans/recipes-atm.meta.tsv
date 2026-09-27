@@ -16,10 +16,10 @@ n_item	68345
 n_leaf	5780
 n_produced	59338
 n_real	65118
-n_recipe	413689
+n_recipe	413688
 n_recipe_raw	677507
 n_tag_recipe	248508
-r2i_edges	528927
+r2i_edges	528924
 ws_edges	1551705
 big_scc_items	61517
 targets_drawn	8

@@ -85,8 +85,17 @@ applied in this tree; keep them if you re-clone:
 |---|---:|---:|---:|---:|
 | `recipes-vanilla` | 1 417 | 2 282 → 2 236 | 32 | 494 |
 | `recipes-small` | 2 521 | 6 790 → 6 523 | 1 027 | 398 |
-| `recipes-nast` | 12 853 | 63 491 → 35 307 | 5 356 | 1 276 |
-| `recipes-atm` | 68 345 | 677 507 → **413 689** | **61 517** | 5 780 |
+| `recipes-nast` | 12 853 | 63 491 → 35 306 | 5 356 | 1 276 |
+| `recipes-atm` | 68 345 | 677 507 → **413 688** | **61 517** | 5 780 |
+
+All four readers normalize the file identically before anything is built, so the canonical
+column is what every engine sees: `dropNonPositiveInputs` (an input that consumes nothing per
+firing is not a flow — AE2's entropy recipes spell a fluid ingredient with no amount at all,
+and Thunderbolt's `CraftInput` rejects a non-positive amount outright), then
+`dropUselessRecipes`, then `canonicalizeRecipes`. Dropping such an edge can make two recipes
+identical, which is why `recipes-nast`'s canonical count moves by one and not three.
+A `.awr` written before this rule existed therefore graphs exactly like one written after it:
+`bench/plans/*` is unchanged, byte for byte.
 
 `recipes-atm` is the headline case: 90 % of its 68 345 items sit in one strongly connected
 component, 61 517 of them. Any method that assumes the recipe graph is a DAG has to cut that
@@ -235,7 +244,7 @@ plus 432 queries; `tb-v2` and `ae2vm` are one JVM each plus 48 queries; `tb-cpsa
 JVM plus up to 48 × 40 s of native solving, which is the expensive cell.
 
 `recipes-atm` needs a bigger JVM heap than the default: the Java harnesses hold one object
-per pattern, and it has 413 689 of them. Both Gradle tasks set `-Xmx8g`; raise it with
+per pattern, and it has 413 688 of them. Both Gradle tasks set `-Xmx8g`; raise it with
 `-PawrBenchHeap=16g` if an `ae2vm` or `tb-v2` cell dies with `OutOfMemoryError` (check that
 cell's `.log`). Compiling 413k patterns in AE2VM also means its `preprocess_ms` will be tens
 of seconds.
@@ -372,19 +381,25 @@ without the later prunings AW stops answering rather than answering slowly.
    nothing is lost by the baselines' lack of the concept. `dropUselessRecipes` is applied
    identically on both sides, so a recipe no workstation can run is never handed to a
    baseline as a free route.
-6. **`items`/`recipes`/`conflicts`/`branches` are not comparable across engines.** AW has a
+6. **Degenerate inputs are normalized away, identically on both sides.** AW's own solver
+   already treats an input of amount 0 as a no-op (`Plan.cpp` drops zero entries from the
+   balance column), but a baseline planner may not be able to represent it at all —
+   Thunderbolt's `CraftInput` throws on a non-positive amount. Rather than hand three engines
+   two different graphs, every reader drops the edge and keeps the recipe (§3.1), so the free
+   route an amount-0 input implies survives for all of them, in the same shape.
+7. **`items`/`recipes`/`conflicts`/`branches` are not comparable across engines.** AW has a
    pruned-subgraph boundary; Thunderbolt has `items_processed`; AE2VM has neither. Only the
    AW columns form a curve.
-7. **Timing hygiene.** `--warmup 1` runs a full unmeasured pass. Use `--repeats 3` and take
+8. **Timing hygiene.** `--warmup 1` runs a full unmeasured pass. Use `--repeats 3` and take
    the minimum when you care about AW's `solve_ms`: CP-SAT with 16 workers is not
    deterministic, so a single run of a hard instance is a sample, not a measurement. The
    `repeat` column is in every row for exactly this reason. For AE2VM the warm-up is not
    only a timing decision — §7.3 — so the driver exposes `ae2vm-cold` as its own config
    rather than leaving it to a flag.
-8. **`satellite` is wall-clock bounded** (see §3.6). If you lower
+9. **`satellite` is wall-clock bounded** (see §3.6). If you lower
    `--satellite-seconds` back to 0.05, expect the last ablation stage to flap between runs
    and say so in the paper.
-9. **Plan reuse.** `bench/plans/*.tsv` is committed. Do not regenerate it between engines:
+10. **Plan reuse.** `bench/plans/*.tsv` is committed. Do not regenerate it between engines:
    `make_plan.py` is seeded and deterministic, but the whole point of committing it is that
    a reviewer can check that every config was fed the same 48 instances.
 

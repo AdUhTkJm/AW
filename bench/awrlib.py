@@ -4,6 +4,7 @@ This mirrors the C++ side (`src/CraftingGraph.cpp`) so that every engine in the
 comparison sees the same graph:
 
   * `scan`      -> the raw recipe list in file order,
+  * `drop_nonpositive_inputs` -> the parse-time cleanup `dropNonPositiveInputs`,
   * `drop_useless_recipes` -> the parse-time cleanup `dropUselessRecipes`,
   * `canonicalize`         -> `canonicalizeRecipes` (dedup by output, amount and
                               inputs; workstations of merged recipes are united).
@@ -27,6 +28,12 @@ Format (see src/CraftingGraph.cpp, `ByteReader` / `scan`):
             repeat nInput:
                 varlong inputAmount
                 varint inputHandleDelta   # ascending within the recipe
+
+`inputAmount` is a flow, not a flag: the file may still spell a degenerate
+input as `0` (AE2's entropy recipes carry a fluid ingredient with no amount at
+all), which `prepare` normalizes away rather than passing on. Every engine
+plugs this into the same normalization, so a `.awr` written before the rule
+existed graphs identically to one written after it.
 """
 
 from collections import defaultdict
@@ -169,8 +176,26 @@ class Graph:
         self.recipes = merged
         self.i2r = _index(merged)
 
+    def drop_nonpositive_inputs(self):
+        """`dropNonPositiveInputs`: an input that consumes nothing per firing is
+        not a flow. It contributes 0 to every balance row, so dropping the edge
+        changes no plan, while keeping it would make three engines disagree on
+        what "free input" means (the Java planners reject a non-positive
+        amount outright). Runs before `drop_useless_recipes` so
+        self-consumption never sums a degenerate amount, and re-canonicalizes
+        because the drop can make recipes identical."""
+        changed = False
+        for rec in self.recipes:
+            if any(amt <= 0 for (_, amt) in rec.inputs):
+                rec.inputs = [(item, amt) for (item, amt) in rec.inputs if amt > 0]
+                changed = True
+        if changed:
+            self.canonicalize()
+        return changed
+
     def prepare(self):
         """The exact sequence `registerCraftingGraph` performs."""
+        self.drop_nonpositive_inputs()
         self.drop_useless_recipes()
         self.canonicalize()
         return self
