@@ -413,6 +413,10 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
   parameters.set_search_branching(operations_research::sat::SatParameters::LP_SEARCH);
   parameters.set_use_feasibility_pump(true);
 
+  // For instances large enough, presolving actually harms.
+  if (A.cols > 30000)
+    parameters.set_cp_model_presolve(false);
+
   // Development overrides for parameter sweeps (see envInt above).
   if (const int value = envInt("AW_SAT_LINEARIZATION"); value >= 0)
     parameters.set_linearization_level(value);
