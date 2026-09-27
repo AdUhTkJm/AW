@@ -413,6 +413,11 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
   parameters.set_search_branching(operations_research::sat::SatParameters::LP_SEARCH);
   parameters.set_use_feasibility_pump(true);
 
+  // Flash mode: hand back the first integer-feasible solution and stop. The
+  // cap still constrains the objective, so the model stays bounded, but no
+  // optimality is pursued or proven. See Options::flash.
+  parameters.set_stop_after_first_solution(options.flash);
+
   // For instances large enough, presolving actually harms.
   if (A.cols > 30000)
     parameters.set_cp_model_presolve(false);
@@ -557,8 +562,8 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   // bound: a feasible answer gives an incumbent tight enough for the reduced
   // costs to fix columns, while an infeasible answer proves the integrality
   // gap is too wide to bother. See docs/algorithm.typ.
-  if (envDouble("AW_RC_GAP", options.reducedCostGap) > 0.0 && lp.ok && std::isfinite(lp.value) &&
-      lp.value >= 0.0 && A.cols > 0) {
+  if (!options.flash && envDouble("AW_RC_GAP", options.reducedCostGap) > 0.0 && lp.ok &&
+      std::isfinite(lp.value) && lp.value >= 0.0 && A.cols > 0) {
     const int64_t probeCap = std::clamp<int64_t>(
         (int64_t) std::ceil(lp.value + envDouble("AW_RC_GAP", options.reducedCostGap)), 1,
         ceiling);
@@ -685,6 +690,10 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
                    (long long) current.numConflicts, (long long) current.numBranches,
                    elapsedSeconds());
     if (current.status == PlanStatus::OK) {
+      // Flash mode takes the first feasible plan whatever it costs; there is
+      // no incumbent to compare it against and no larger cap to try.
+      if (options.flash)
+        return current;
       if (!haveBest || current.objective < best.objective) {
         best = std::move(current);
         haveBest = true;

@@ -137,6 +137,7 @@ have no workstation notion, so all recipes are usable).
 |---|---|---|
 | `aw-optimal` | AW, `nonoptimal=false`, every pruning on. **Ground truth.** | 1 |
 | `aw-nonopt` | AW, `nonoptimal=true`, 8 cumulative ablation stages | 8 |
+| `aw-flash` | AW, `nonoptimal=true`, every pruning on, but `solver::Options::flash` stops CP-SAT at the first feasible plan | 1 |
 | `tb-v2` | Thunderbolt `CraftPlannerV2` (shipped default) | 1 |
 | `tb-cpsat` | Thunderbolt `CpSatRankedFlowSolver` (opt-in OR-Tools) | 1 |
 | `ae2vm` | AE2VM `CraftingVM`, production resolver policy, `--warmup` passes first | 1 |
@@ -145,6 +146,13 @@ have no workstation notion, so all recipes are usable).
 `ae2vm` and `ae2vm-cold` are separate configs on purpose. AE2VM's warm path replays a
 memoized plan and can return a **different answer**, not merely a faster one; §7.3 has a
 one-query reproduction. Report both or you are reporting an unspecified configuration.
+
+`aw-flash` is AW's latency-oriented end: the same registration and the same all-on pruning
+as the `aw-nonopt` `satellite` row, but `solver::Options::flash` returns the first feasible
+plan instead of a cheap one. It is **not** ground truth and certifies optimality only when
+that first incumbent happens to be provably optimal, so `prov` collapses to whatever it
+finds. Its point is the shape of the trade: how much latency the proof costs and what the
+first feasible plan's cost is relative to `aw-optimal` (`cost_ratio_median`).
 
 ### 3.5 Ablation stages (cumulative, `nonoptimal=true`)
 
@@ -165,7 +173,9 @@ their marks at registration; `setTagPruningEnabled` and friends are read by
 exception — `computePackPruning` early-returns when disabled — so the tool always enables
 it before registering and only uses the flag as a query-time gate afterwards. Only
 `options().nonoptimal` genuinely cannot be flipped, which is why `aw-optimal` is a second
-process. Net cost: **two registrations per dataset**, not nine.
+process. `solver::Options::flash` is read at query time, so `aw-flash` could ride the
+`aw-nonopt` registration, but `run.py` still gives it its own process so its JSONL is a
+self-contained single-row config. Net cost: **three registrations per dataset**, not ten.
 
 ### 3.6 Budgets
 
@@ -206,6 +216,7 @@ aw-nonopt   substitution   48    20     18      2      0    16    0   32/32     
 aw-nonopt   tag            48    20     18      2      0    12    0   36/36       0   0.0000     1.000     3.9      1.8      48       48
 aw-nonopt   pack           48    20     19      1      0     9    0   39/39       0   0.0000     1.000     3.9      0.4       8        7
 aw-nonopt   satellite      48    20     19      1      0     1    0   47/47       0   0.0000     1.000     3.9      1.1       2        1
+aw-flash    satellite      48    20     15      5      0     1    0   47/47       0   0.5714     1.000     4.2      1.2       2        1
 tb-v2       -              48    20      0      0     48     0    0   47/47       0        -     1.000    54.2      3.8       0        0
 tb-cpsat    -              48    20     47      1      0     0    0   47/47       0        -     1.000    53.0     19.5       0        0
 ae2vm       -              48    12      0      0     48     0    0   37/47       1        -     1.250   515.2      0.5       0        0
@@ -219,6 +230,11 @@ feasible that AW proves infeasible, and emits 2 firing vectors that do not balan
 (the `fp` column — see §7.2). Note that in this sweep `ae2vm` and `ae2vm-cold` happen to
 agree: the false positive is history-dependent, which is why §7.3 uses a one-query instance
 instead of the sweep to expose it.
+
+`aw-flash` answers the same 47 conclusive instances as `aw-optimal` here, but certifies
+only 15 of them: it stops at the first feasible plan, so `prov` falls and `unprov` absorbs
+everything it declined to prove. `gapmax` is the worst incumbent it accepted. The counts
+wobble between runs (16 workers), so read the columns, not the exact integers.
 
 For AW the `plan_ms` column is `query_ms` (`reach_ms` + `solve_ms`), the same whole-query
 quantity the baselines report as `plan_ms`; see §5.2.
@@ -238,9 +254,9 @@ Cells are child processes, so an interrupt or a crash only loses that cell; reru
 `--datasets X --configs Y` to fill a gap. Progress and the exact command line of every cell
 are in `bench/results/<dataset>.<config>.log`.
 
-Rough cost model for the full run, per dataset: AW is 2 registrations (dominated by the
+Rough cost model for the full run, per dataset: AW is 3 registrations (dominated by the
 dominance passes and the 60 s pack pass, which on `recipes-atm` is minutes, not seconds)
-plus 432 queries; `tb-v2` and `ae2vm` are one JVM each plus 48 queries; `tb-cpsat` is one
+plus 480 queries; `tb-v2` and `ae2vm` are one JVM each plus 48 queries; `tb-cpsat` is one
 JVM plus up to 48 × 40 s of native solving, which is the expensive cell.
 
 `recipes-atm` needs a bigger JVM heap than the default: the Java harnesses hold one object
@@ -421,3 +437,7 @@ without the later prunings AW stops answering rather than answering slowly.
 * **AW's optimal-mode ablation**: `aw_bench --nonoptimal 0 --stage <profile>` works for any
   profile, so `aw-optimal` can be turned into a second full curve by passing several
   `--stage` flags.
+* **Flash ablation**: `aw_bench --flash 1 --stage <profile>` (single stage) or all eight
+  `--stage` flags works the same way, if you want flash's own curve rather than the
+  single `aw-flash` row. `--flash` is a per-query solver option, so it does not need a
+  separate registration.

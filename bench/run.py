@@ -5,6 +5,8 @@ Configs
 -------
   aw-nonopt   AW in nonoptimal mode, all eight cumulative ablation stages
   aw-optimal  AW in optimal mode with every pruning on: the ground truth
+  aw-flash    AW in nonoptimal mode with every pruning on; the solver stops at
+              the FIRST feasible plan instead of optimizing it
   tb-v2       Thunderbolt `CraftPlannerV2` (shipped default planner)
   tb-cpsat    Thunderbolt `CpSatRankedFlowSolver` (opt-in OR-Tools planner)
   ae2vm       AE2VM `CraftingVM` driven offline, warm (>=1 prior pass)
@@ -49,7 +51,7 @@ DATASETS = {
 AW_STAGES = ["none", "dead_node", "direct", "recipe", "substitution", "tag", "pack",
              "satellite"]
 
-AW_CONFIGS = ("aw-nonopt", "aw-optimal")
+AW_CONFIGS = ("aw-nonopt", "aw-optimal", "aw-flash")
 TB_CONFIGS = ("tb-v2", "tb-cpsat")
 AE2VM_CONFIGS = ("ae2vm", "ae2vm-cold")
 ALL_CONFIGS = AW_CONFIGS + TB_CONFIGS + AE2VM_CONFIGS
@@ -178,6 +180,22 @@ def main():
                            "--dataset", dataset, "--awr", awr, "--plan", prefix,
                            "--config", config, "--out", out, "--names", names,
                            "--nonoptimal", "0", "--stage", "satellite:optimal",
+                           "--warmup", args.warmup, "--repeats", args.repeats,
+                           "--time-limit", args.time_limit, "--gap", args.gap,
+                           "--workers", args.workers, "--pack-seconds", args.pack_seconds,
+                           "--satellite-seconds", args.satellite_seconds]
+                code = run_logged(config, command, log, ROOT, args.dry_run)
+
+            elif config == "aw-flash":
+                # Flash mode: production pruning (nonoptimal) with every pass on,
+                # but the solver returns the first feasible plan. One row, so it
+                # lines up directly against the aw-nonopt `satellite` row and the
+                # aw-optimal ground truth. `aw_bench` is one process per config
+                # because `nonoptimal` is read at registration time.
+                command = [os.path.join(ROOT, "build", "aw_bench"),
+                           "--dataset", dataset, "--awr", awr, "--plan", prefix,
+                           "--config", config, "--out", out, "--names", names,
+                           "--nonoptimal", "1", "--flash", "1", "--stage", "satellite",
                            "--warmup", args.warmup, "--repeats", args.repeats,
                            "--time-limit", args.time_limit, "--gap", args.gap,
                            "--workers", args.workers, "--pack-seconds", args.pack_seconds,

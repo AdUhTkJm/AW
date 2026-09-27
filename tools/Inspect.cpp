@@ -908,6 +908,10 @@ int main(int argc, char** argv) {
       // Deprecated spelling of --optimal, from when the flag only meant the
       // integrality relaxation.
       optimalPruning = true;
+    } else if (arg == "--flash") {
+      // Return the first feasible plan instead of a cheap one. Solver-side, so
+      // it is orthogonal to the pruning flags above.
+      solverOptions.flash = true;
     } else if (arg == "--satellite-seconds") {
       if (i + 1 >= argc || !parseDouble(argv[++i], satelliteSeconds)) {
         std::cerr << "--satellite-seconds needs a number of seconds\n";
@@ -1006,7 +1010,7 @@ int main(int argc, char** argv) {
                    "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                    "                   [--no-pack-prune]\n"
                    "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
-                   "                   [--no-dead-node-prune] [--optimal]\n"
+                   "                   [--no-dead-node-prune] [--optimal] [--flash]\n"
                    "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                    "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
@@ -1026,7 +1030,7 @@ int main(int argc, char** argv) {
                  "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                  "                   [--no-pack-prune]\n"
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
-                 "                   [--no-dead-node-prune] [--optimal]\n"
+                 "                   [--no-dead-node-prune] [--optimal] [--flash]\n"
                  "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                  "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
@@ -1248,8 +1252,10 @@ int main(int argc, char** argv) {
     }
     std::cout << "  status: " << statusName;
     if (plan.status == aw::PlanStatus::OK)
-      std::cout << (plan.provenOptimal ? " (proven optimal)"
-                                       : " (gave up early)")
+      std::cout << (plan.provenOptimal
+                        ? " (proven optimal)"
+                        : (solverOptions.flash ? " (flash: first feasible)"
+                                               : " (gave up early)"))
                 << ", gap=" << plan.gap << ", bound=" << plan.bestBound;
     std::cout << ", conflicts=" << plan.numConflicts
               << ", branches=" << plan.numBranches

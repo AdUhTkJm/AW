@@ -328,7 +328,7 @@ std::string label(const std::map<aw::Handle, std::string> &names, aw::NodeId ite
 void usage() {
   std::fprintf(stderr,
                "usage: aw_bench --dataset <name> --awr <path> --plan <prefix> --config <name> --out <jsonl>\n"
-               "                [--nonoptimal 0|1] [--stage <profile>[:<label>]]...\n"
+               "                [--nonoptimal 0|1] [--flash 0|1] [--stage <profile>[:<label>]]...\n"
                "                [--amounts 1,100000] [--groups none,leaves,random20]\n"
                "                [--warmup N] [--repeats R]\n"
                "                [--time-limit 40] [--gap 0.01] [--workers 16]\n"
@@ -351,6 +351,7 @@ int main(int argc, char **argv) {
   std::string groupsArg;
   std::vector<std::pair<std::string, std::string>> stageArgs;  // profile -> label
   bool nonoptimal = true;
+  bool flash = false;
   bool quiet = false;
   int warmup = 1;
   int repeats = 1;
@@ -381,6 +382,10 @@ int main(int argc, char **argv) {
       std::string value;
       next(value);
       nonoptimal = value != "0";
+    } else if (arg == "--flash") {
+      std::string value;
+      next(value);
+      flash = value != "0";
     } else if (arg == "--stage") {
       std::string value;
       next(value);
@@ -532,6 +537,7 @@ int main(int argc, char **argv) {
         .str("dataset", dataset)
         .str("config", config)
         .boolean("nonoptimal", nonoptimal)
+        .boolean("flash", flash)
         .num("warmup", warmup)
         .num("repeats", repeats)
         .real("time_limit_s", timeLimit)
@@ -575,6 +581,7 @@ int main(int argc, char **argv) {
         .str("dataset", dataset)
         .str("config", config)
         .boolean("nonoptimal", nonoptimal)
+        .boolean("flash", flash)
         .real("register_ms", registerMs)
         .num("items", graph.nItem)
         .num("real_items", graph.nReal)
@@ -602,6 +609,7 @@ int main(int argc, char **argv) {
   solverOptions.maxTimeSeconds = timeLimit;
   solverOptions.relativeGap = gap;
   solverOptions.numWorkers = (int) workers;
+  solverOptions.flash = flash;
 
   // All workstations available: every real item handle is allowed, which is the
   // worst case for the pruning and the only setting the workstation-less Java

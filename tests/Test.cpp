@@ -2060,6 +2060,59 @@ void testReducedCostFixing() {
   }
 }
 
+// Flash mode stops at the first feasible plan. The plan is a real one, but no
+// optimality is claimed, and the reduced-cost fixing probe (an optimality
+// accelerator) is skipped.
+void testFlash() {
+  std::cout << "[Test] flash mode\n";
+
+  // min x0 + x1  s.t.  x0 + 2 x1 >= 4, x0 >= 1.  The optimum is 3. Flash may
+  // return any feasible point, so assert feasibility and a sound objective
+  // floor rather than the exact cost.
+  {
+    const aw::solver::Matrix A = makeMatrix(2, 2, {{{0, 1}, {1, 1}}, {{0, 2}}});
+    const std::vector<int64_t> b = {4, 1};
+    const std::vector<int64_t> c = {1, 1};
+    aw::solver::Options options;
+    options.flash = true;
+    const aw::solver::Result r = aw::solver::solve(A, b, c, options);
+    expect(r.status == aw::PlanStatus::OK, "flash returns a plan");
+    expect(r.x.size() == 2 && r.x[0] + 2 * r.x[1] >= 4 && r.x[0] >= 1,
+           "the flash plan is feasible");
+    expect(r.objective == r.x[0] + r.x[1] && r.objective >= 3,
+           "the flash objective matches the plan and is at least the optimum");
+  }
+
+  // A cap below the requirement still has to be grown: the cap bounds the
+  // search, it is not a hard limit. With x0 >= 5 the first cap of 1 is
+  // infeasible and is abandoned for a cap that admits a plan.
+  {
+    const aw::solver::Matrix A = makeMatrix(1, 1, {{{0, 1}}});
+    const std::vector<int64_t> b = {5};
+    const std::vector<int64_t> c = {1};
+    aw::solver::Options options;
+    options.flash = true;
+    options.objectiveCap = 1;
+    const aw::solver::Result r = aw::solver::solve(A, b, c, options);
+    expect(r.status == aw::PlanStatus::OK && r.objective >= 5,
+           "flash grows a binding cap until the plan fits");
+  }
+
+  // Reduced-cost fixing is an optimality proof accelerator, so flash skips it:
+  // the model that fixes a column with a 0.5 gap reports none under flash.
+  {
+    const aw::solver::Matrix A = makeMatrix(1, 2, {{{0, 2}}, {}});
+    const std::vector<int64_t> b = {7};
+    const std::vector<int64_t> c = {1, 1};
+    aw::solver::Options options;
+    options.reducedCostGap = 0.5;
+    options.flash = true;
+    const aw::solver::Result r = aw::solver::solve(A, b, c, options);
+    expect(r.status == aw::PlanStatus::OK && r.fixedColumns == 0,
+           "flash skips reduced-cost fixing");
+  }
+}
+
 void testZeroCostColumns() {
   std::cout << "[Test] zero-cost columns and the natural cap\n";
 
@@ -3801,6 +3854,7 @@ int main() {
   testDeadNodePruning();
   testSolver();
   testReducedCostFixing();
+  testFlash();
   testZeroCostColumns();
   testPlan();
   testPlanInfeasible();
