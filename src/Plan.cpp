@@ -160,20 +160,19 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
   if (!greedy.empty()) {
     for (uint32_t r = 0; r < n; r++)
       greedyCost += (__int128) objective[r] * greedy[r];
-    const __int128 qualityLimit =
-        (__int128) trivialLowerBound(A, rhs) * GREEDY_QUALITY_FACTOR;
-    greedyUsable = greedyCost > 0 && greedyCost <= (__int128) INT64_MAX &&
-                   greedyCost <= qualityLimit;
-  }
-  if (options.flash) {
-    result.status = PlanStatus::OK;
-    result.provenOptimal = false;
-    result.exec = std::move(greedy);
-    return result;
+    greedyUsable = greedyCost > 0 && greedyCost <= (__int128) INT64_MAX;
   }
   if (greedyUsable) {
-    solveOptions.objectiveUpperBound = (int64_t) greedyCost;
-    solveOptions.solutionHint = std::span<const int64_t>(greedy.data(), greedy.size());
+    if (options.flash) {
+      result.status = PlanStatus::OK;
+      result.provenOptimal = false;
+      result.exec = std::move(greedy);
+      return result;
+    }
+    if (greedyCost <= (__int128) trivialLowerBound(A, rhs) * GREEDY_QUALITY_FACTOR) {
+      solveOptions.objectiveUpperBound = (int64_t) greedyCost;
+      solveOptions.solutionHint = std::span<const int64_t>(greedy.data(), greedy.size());
+    }
   }
 
   const solver::Result solved = solver::solve(A, rhs, objective, solveOptions);

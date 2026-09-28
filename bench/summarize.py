@@ -5,8 +5,11 @@ Reads every `bench/results/*.jsonl` produced by `bench/run.py` (or by any of the
 three harnesses run by hand) and writes:
 
     bench/results/summary.cells.csv   one row per (dataset, config, stage, target, amount, stock)
-    bench/results/summary.csv         one row per (dataset, config, stage)
+    bench/results/summary.csv         one row per (dataset, config, stage, stock)
     bench/results/summary.md          the same summary as a readable markdown table
+
+`--group-inventory` does not change the rows; it makes the summary split into one
+table per inventory setting (`none`, `leaves`, `random20`) instead of pooling them.
 
 Ground truth is `aw-optimal` (AW in optimal mode, every pruning on). Where that
 row is `infeasible` or `ok` it is taken as authoritative; `iter_limit` and
@@ -34,6 +37,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_ORDER = ["aw-optimal", "aw-nonopt", "aw-flash", "tb-v2", "tb-cpsat", "ae2vm", "ae2vm-cold"]
 STAGE_ORDER = ["optimal", "none", "dead_node", "direct", "recipe", "substitution", "tag",
                "pack", "satellite", "-"]
+STOCK_ORDER = ["none", "leaves", "random20"]
 
 # Statuses that mean "the engine produced a usable answer".
 ANSWERED = {"ok", "missing", "infeasible"}
@@ -112,6 +116,25 @@ def stage_key(config, stage):
     return stage
 
 
+def summary_sort_key(row):
+    return (row["dataset"],
+            CONFIG_ORDER.index(row["config"]) if row["config"] in CONFIG_ORDER else 99,
+            STAGE_ORDER.index(row["stage"]) if row["stage"] in STAGE_ORDER else 99,
+            STOCK_ORDER.index(row["stock"]) if row["stock"] in STOCK_ORDER else 99)
+
+
+def stock_chunks(rows, group_inventory):
+    """Split a dataset's rows into one chunk per inventory setting, or one chunk."""
+    if not group_inventory:
+        return [(None, rows)]
+    by_stock = collections.defaultdict(list)
+    for row in rows:
+        by_stock[row["stock"]].append(row)
+    return [(stock, by_stock[stock])
+            for stock in sorted(by_stock,
+                                key=lambda s: STOCK_ORDER.index(s) if s in STOCK_ORDER else 99)]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -127,6 +150,10 @@ def main():
     parser.add_argument("--max", action="store_true",
                         help="report the maximum instead of the median for every "
                              "aggregated column")
+    parser.add_argument("--group-inventory", action="store_true",
+                        help="split each dataset's summary into one table per inventory "
+                             "setting (stock group: none, leaves, random20) instead of "
+                             "pooling all three")
     args = parser.parse_args()
 
     if args.mean and args.max:
@@ -207,10 +234,15 @@ def main():
     # ---- per-config/stage summary ----------------------------------------
     groups = collections.defaultdict(list)
     for row in queries:
-        groups[(row["dataset"], row["config"], stage_key(row["config"], row["stage"]))].append(row)
+        key = (row["dataset"], row["config"], stage_key(row["config"], row["stage"]))
+        if args.group_inventory:
+            key = key + (row["stock"],)
+        groups[key].append(row)
 
     summary_rows = []
-    for (dataset, config, stage), items in sorted(groups.items()):
+    for key, items in groups.items():
+        dataset, config, stage = key[:3]
+        stock = key[3] if args.group_inventory else "-"
         repeats = collections.Counter(r.get("repeat", 0) for r in items)
         answered = [r for r in items if r.get("status") in ANSWERED]
         feasible = [r for r in items if r.get("feasible")]
@@ -249,6 +281,7 @@ def main():
             "dataset": dataset,
             "config": config,
             "stage": stage,
+            "stock": stock,
             "queries": len(items),
             "repeats": max(repeats) + 1 if repeats else 1,
             "feasible": len(feasible),
@@ -277,6 +310,8 @@ def main():
             "cost_ratio_%s" % tag: aggregate(ratios, mode),
         })
 
+    summary_rows.sort(key=summary_sort_key)
+
     fields = list(summary_rows[0].keys())
     with open(prefix + ".csv", "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -285,9 +320,9 @@ def main():
             writer.writerow(row)
 
     with open(prefix + ".md", "w", encoding="utf-8") as handle:
-        write_markdown(handle, summary_rows, tag)
+        write_markdown(handle, summary_rows, tag, args.group_inventory)
 
-    render(summary_rows, tag)
+    render(summary_rows, tag, args.group_inventory)
     print()
     print("wrote %s.cells.csv, %s.csv, %s.md" % (prefix, prefix, prefix))
     for path, number, error in malformed:
@@ -302,7 +337,7 @@ def fmt(value, digits=1):
     return str(value)
 
 
-def render(summary_rows, tag):
+def render(summary_rows, tag, group_inventory):
     gap_key = "gap_%s" % tag
     cost_key = "cost_ratio_%s" % tag
     plan_key = "plan_ms_%s" % tag
@@ -319,27 +354,27 @@ def render(summary_rows, tag):
         print("              uncl=engine has no optimality notion, noans=no answer at all"
               " (not merely unproven)")
         print("  aggregation: %s" % tag)
-        print("%-11s %-12s %4s %5s %6s %6s %6s %5s %4s %7s %7s %8s %9s %7s %8s %7s %8s"
-              % ("config", "stage", "n", "feas", "prov", "unprov", "uncl", "noans", "tout",
-                 "vs_ok", "fp_vs", "gap", "cost_rat", "pre_ms", "plan_ms", "items",
-                 "recipes"))
-        for row in sorted(by_dataset[dataset],
-                          key=lambda r: (CONFIG_ORDER.index(r["config"])
-                                         if r["config"] in CONFIG_ORDER else 99,
-                                         STAGE_ORDER.index(r["stage"])
-                                         if r["stage"] in STAGE_ORDER else 99)):
-            print("%-11s %-12s %4d %5d %6d %6d %6d %5d %4d %7s %7d %8s %9s %7s %8s %7s %8s"
-                  % (row["config"], row["stage"], row["queries"], row["feasible"],
-                     row["proven"], row["unproven"], row["unclaimed"], row["no_answer"],
-                     row["timeout"],
-                     "%d/%d" % (row["vs_truth_agree"], row["vs_truth_compared"]),
-                     row["vs_truth_false_positive"],
-                     fmt(row[gap_key], 4), fmt(row[cost_key], 3),
-                     fmt(row["preprocess_ms"]), fmt(row[plan_key]),
-                     fmt(row[items_key], 0), fmt(row[recipes_key], 0)))
+        for stock, rows in stock_chunks(by_dataset[dataset], group_inventory):
+            if stock is not None:
+                print()
+                print("  -- inventory: %s --" % stock)
+            print("%-11s %-12s %4s %5s %6s %6s %6s %5s %4s %7s %7s %8s %9s %7s %8s %7s %8s"
+                  % ("config", "stage", "n", "feas", "prov", "unprov", "uncl", "noans", "tout",
+                     "vs_ok", "fp_vs", "gap", "cost_rat", "pre_ms", "plan_ms", "items",
+                     "recipes"))
+            for row in sorted(rows, key=summary_sort_key):
+                print("%-11s %-12s %4d %5d %6d %6d %6d %5d %4d %7s %7d %8s %9s %7s %8s %7s %8s"
+                      % (row["config"], row["stage"], row["queries"], row["feasible"],
+                         row["proven"], row["unproven"], row["unclaimed"], row["no_answer"],
+                         row["timeout"],
+                         "%d/%d" % (row["vs_truth_agree"], row["vs_truth_compared"]),
+                         row["vs_truth_false_positive"],
+                         fmt(row[gap_key], 4), fmt(row[cost_key], 3),
+                         fmt(row["preprocess_ms"]), fmt(row[plan_key]),
+                         fmt(row[items_key], 0), fmt(row[recipes_key], 0)))
 
 
-def write_markdown(handle, summary_rows, tag):
+def write_markdown(handle, summary_rows, tag, group_inventory):
     gap_key = "gap_%s" % tag
     cost_key = "cost_ratio_%s" % tag
     plan_key = "plan_ms_%s" % tag
@@ -354,26 +389,25 @@ def write_markdown(handle, summary_rows, tag):
                      "TB budget cut), "
                      "`uncl` = engine has no optimality notion, `noans` = no answer at all.\n\n")
         handle.write("Aggregation: `%s`.\n\n" % tag)
-        handle.write("| config | stage | n | feasible | prov | unprov | uncl | noans | timeout | "
-                     "false-pos | vs truth | FP vs truth | FN vs truth | gap | cost ratio | "
-                     "preprocess ms | plan ms | items | recipes |\n")
-        handle.write("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
-                     "---:|---:|---:|---:|\n")
-        for row in sorted(by_dataset[dataset],
-                          key=lambda r: (CONFIG_ORDER.index(r["config"])
-                                         if r["config"] in CONFIG_ORDER else 99,
-                                         STAGE_ORDER.index(r["stage"])
-                                         if r["stage"] in STAGE_ORDER else 99)):
-            handle.write("| %s | %s | %d | %d | %d | %d | %d | %d | %d | %d | %d/%d | %d | %d | %s | %s | %s | %s | %s | %s |\n"
-                         % (row["config"], row["stage"], row["queries"], row["feasible"],
-                            row["proven"], row["unproven"], row["unclaimed"], row["no_answer"],
-                            row["timeout"], row["false_positive"],
-                            row["vs_truth_agree"], row["vs_truth_compared"],
-                            row["vs_truth_false_positive"], row["vs_truth_false_negative"],
-                            fmt(row[gap_key], 4), fmt(row[cost_key], 3),
-                            fmt(row["preprocess_ms"]), fmt(row[plan_key]),
-                            fmt(row[items_key], 0), fmt(row[recipes_key], 0)))
-        handle.write("\n")
+        for stock, rows in stock_chunks(by_dataset[dataset], group_inventory):
+            if stock is not None:
+                handle.write("### Inventory: %s\n\n" % stock)
+            handle.write("| config | stage | n | feasible | prov | unprov | uncl | noans | timeout | "
+                         "false-pos | vs truth | FP vs truth | FN vs truth | gap | cost ratio | "
+                         "preprocess ms | plan ms | items | recipes |\n")
+            handle.write("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+                         "---:|---:|---:|---:|\n")
+            for row in sorted(rows, key=summary_sort_key):
+                handle.write("| %s | %s | %d | %d | %d | %d | %d | %d | %d | %d | %d/%d | %d | %d | %s | %s | %s | %s | %s | %s |\n"
+                             % (row["config"], row["stage"], row["queries"], row["feasible"],
+                                row["proven"], row["unproven"], row["unclaimed"], row["no_answer"],
+                                row["timeout"], row["false_positive"],
+                                row["vs_truth_agree"], row["vs_truth_compared"],
+                                row["vs_truth_false_positive"], row["vs_truth_false_negative"],
+                                fmt(row[gap_key], 4), fmt(row[cost_key], 3),
+                                fmt(row["preprocess_ms"]), fmt(row[plan_key]),
+                                fmt(row[items_key], 0), fmt(row[recipes_key], 0)))
+            handle.write("\n")
 
 
 if __name__ == "__main__":

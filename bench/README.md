@@ -291,6 +291,9 @@ python3 bench/run.py --datasets recipes-nast --configs aw-nonopt --stages tag
 python3 bench/summarize.py --mean
 python3 bench/summarize.py --max
 
+# one table per inventory setting (none / leaves / random20) instead of pooling them
+python3 bench/summarize.py --group-inventory
+
 # a corpus you exported yourself
 python3 bench/make_plan.py --dataset my-pack --awr /path/recipes.awr --names /path/recipes.names.tsv
 python3 bench/run.py --datasets recipes-vanilla          # edit DATASETS in run.py for a new path
@@ -367,10 +370,12 @@ without the later prunings AW stops answering rather than answering slowly.
 * `bench/results/<dataset>.<config>.log` — the child's stdout/stderr.
 * `bench/results/summary.cells.csv` — one row per (dataset, config, stage, target, amount,
   stock, repeat), joined with the ground-truth row for that instance.
-* `bench/results/summary.csv`, `summary.md` — one row per (dataset, config, stage):
+* `bench/results/summary.csv`, `summary.md` — one row per (dataset, config, stage, stock):
   counts, aggregates, agreement tallies, cost ratios. Every aggregate is the median by
   default; `python3 bench/summarize.py --mean` (or `--max`) switches them all to the mean
-  (or the worst case) and suffixes the columns `_mean` / `_max` accordingly.
+  (or the worst case) and suffixes the columns `_mean` / `_max` accordingly. Without
+  `--group-inventory` the three inventory settings are pooled and `stock` is `-`;
+  `--group-inventory` gives each setting its own row and renders one table per setting.
 * `bench/results/summary.csv` also carries `preprocess_ms`, `items_<agg>`,
   `recipes_<agg>`, `conflicts_<agg>` and `branches_<agg>`, so the CP-SAT effort counters
   you asked for are in the same table.

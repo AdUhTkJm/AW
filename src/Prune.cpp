@@ -46,11 +46,11 @@
 
 #include <algorithm>
 #include <span>
-#include <unordered_map>
 #include <utility>
 
 #include "aw/CraftingGraph.h"
 #include "aw/Options.h"
+#include "aw/ankerl/unordered_dense.h"
 #ifdef AW_PROFILE_PRUNING
 #  include "aw/Profiler.h"
 #endif
@@ -1548,15 +1548,20 @@ bool collectGuards(const CraftingGraph &graph, NodeId y,
 // so it prunes less.
 struct CostContext {
   const CraftingGraph *graph = nullptr;
-  const aw::vector<uint8_t> *simpleTag = nullptr;
-  const aw::vector<aw::vector<NodeId>> *tagMembers = nullptr;
+  const aw::vector<uint8_t> simpleTag;
+  const aw::vector<aw::vector<NodeId>> tagMembers;
   // Exact mode only: an item whose producers can emit a batch has a surplus a
   // plan can spend for free, so the per-unit bound is not enough. Requiring
   // every item on the chain to be unit-output removes the surplus.
-  const aw::vector<uint8_t> *unitOutput = nullptr;
-  std::unordered_map<uint64_t, uint8_t> *memo = nullptr;  // 1=in progress, 2=false, 3=true
-  uint64_t work = 0;
+  const aw::vector<uint8_t> unitOutput;
+  ankerl::unordered_dense::map<uint64_t, uint8_t> memo ;  // 1=in progress, 2=false, 3=true
+  uint64_t work;
   bool requireUnit = false;
+
+  CostContext(const CraftingGraph &graph, uint64_t work,
+    aw::vector<uint8_t> &&simpleTag, aw::vector<aw::vector<NodeId>> &&tagMembers, aw::vector<uint8_t> &&unitOutput
+  ):
+    graph(&graph), work(work), simpleTag(simpleTag), tagMembers(tagMembers), unitOutput(unitOutput) {}
 };
 
 bool costsRec(CostContext &ctx, NodeId y, NodeId w, uint32_t depth) noexcept {
@@ -1569,23 +1574,23 @@ bool costsRec(CostContext &ctx, NodeId y, NodeId w, uint32_t depth) noexcept {
     return false;
 
   const uint64_t key = ((uint64_t) y << 32) | (uint64_t) w;
-  const auto it = ctx.memo->find(key);
-  if (it != ctx.memo->end()) {
+  const auto it = ctx.memo.find(key);
+  if (it != ctx.memo.end()) {
     if (it->second == 1)
       return false;  // on the current path: the least fixpoint has no cycle
     return it->second == 3;
   }
-  const bool memoize = ctx.memo->size() < options.maxCostMemo;
+  const bool memoize = ctx.memo.size() < options.maxCostMemo;
   if (memoize)
-    (*ctx.memo)[key] = 1;
+    ctx.memo[key] = 1;
 
   const CraftingGraph &graph = *ctx.graph;
   bool result;
   if (y >= graph.nReal) {
-    result = (*ctx.simpleTag)[y] != 0;
+    result = ctx.simpleTag[y] != 0;
     if (result)
-      for (NodeId z : (*ctx.tagMembers)[y]) {
-        if (ctx.requireUnit && !(*ctx.unitOutput)[z]) {
+      for (NodeId z : ctx.tagMembers[y]) {
+        if (ctx.requireUnit && !ctx.unitOutput[z]) {
           result = false;
           break;
         }
@@ -1595,7 +1600,7 @@ bool costsRec(CostContext &ctx, NodeId y, NodeId w, uint32_t depth) noexcept {
         }
       }
   } else {
-    if (ctx.requireUnit && !(*ctx.unitOutput)[y])
+    if (ctx.requireUnit && !ctx.unitOutput[y])
       return false;
     const auto recipes = graph.i2r.targetsOf(y);
     // A raw material is gathered, so it does not consume a crafted w.
@@ -1625,7 +1630,7 @@ bool costsRec(CostContext &ctx, NodeId y, NodeId w, uint32_t depth) noexcept {
   }
 
   if (memoize)
-    (*ctx.memo)[key] = result ? 3 : 2;
+    ctx.memo[key] = result ? 3 : 2;
   return result;
 }
 
@@ -1775,14 +1780,6 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
     tagMembers[t] = std::move(ms);
   }
 
-  std::unordered_map<uint64_t, uint8_t> memo;
-  CostContext ctx;
-  ctx.graph = &graph;
-  ctx.simpleTag = &simpleTag;
-  ctx.tagMembers = &tagMembers;
-  ctx.memo = &memo;
-  ctx.work = options.maxSubstitutionCostWork;
-
   // Exact mode needs the batching guard; nonoptimal mode waives it, as the tag
   // pass does.
   aw::vector<uint8_t> unitOutput;
@@ -1795,7 +1792,10 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
           break;
         }
   }
-  ctx.unitOutput = &unitOutput;
+
+  CostContext ctx(graph, options.maxSubstitutionCostWork,
+    std::move(simpleTag), std::move(tagMembers), std::move(unitOutput)
+  );
   ctx.requireUnit = !options.nonoptimal;
 
   uint64_t work = options.maxSubstitutionWork;
