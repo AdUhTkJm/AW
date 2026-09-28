@@ -66,7 +66,7 @@ bool recipePruning = true;
 bool directPruning = true;
 bool substitutionPruning = true;
 
-void prefixSum(std::vector<uint>& v) noexcept {
+void prefixSum(std::vector<uint> &v) noexcept {
   v.insert(v.begin(), 0);
   for (size_t i = 0; i + 1 < v.size(); i++)
     v[i + 1] += v[i];
@@ -155,8 +155,8 @@ bool addOverflow(int64_t a, int64_t b, int64_t &out) noexcept {
 // Returns false on integer overflow, which is treated as "cannot prove
 // dominance" by the caller.
 bool buildComposite(int64_t alpha, const RecipeVectors &vec, uint r, uint R,
-                    std::vector<NodeId>& outItems,
-                    std::vector<Amount>& outCoeffs) noexcept {
+                    std::vector<NodeId> &outItems,
+                    std::vector<Amount> &outCoeffs) noexcept {
   const auto ri = vec.itemsOf(r);
   const auto rc = vec.coeffsOf(r);
   const auto Ri = vec.itemsOf(R);
@@ -283,11 +283,11 @@ void compareNormalized(std::span<const NodeId> ii, std::span<const Amount> ic,
 // component always points at a smaller id. `keep[a] == 1` exactly for the
 // representatives. Every node with no outgoing edge is its own sink SCC, so the
 // result is never empty for k > 0. Returns the number of components.
-uint32_t markSinkRepresentatives(uint k, const std::vector<uint>& adjOffsets,
-                                 const std::vector<uint32_t>& adjTargets,
-                                 std::vector<int32_t>& comp,
-                                 std::vector<uint32_t>& repOfComp,
-                                 std::vector<uint8_t>& keep) noexcept {
+uint32_t markSinkRepresentatives(uint k, const std::vector<uint> &adjOffsets,
+                                 const std::vector<uint32_t> &adjTargets,
+                                 std::vector<int32_t> &comp,
+                                 std::vector<uint32_t> &repOfComp,
+                                 std::vector<uint8_t> &keep) noexcept {
   keep.assign(k, 0);
   comp.assign(k, -1);
   repOfComp.clear();
@@ -393,8 +393,8 @@ constexpr PairKey packPair(NodeId m, NodeId w) noexcept {
   return ((PairKey) m << 32) | (PairKey) w;
 }
 
-void intersectSorted(const std::vector<NodeId>& a, const std::vector<NodeId>& b,
-                     std::vector<NodeId>& out) noexcept {
+void intersectSorted(const std::vector<NodeId> &a, const std::vector<NodeId> &b,
+                     std::vector<NodeId> &out) noexcept {
   out.clear();
   size_t i = 0, j = 0;
   while (i < a.size() && j < b.size()) {
@@ -415,8 +415,8 @@ void intersectSorted(const std::vector<NodeId>& a, const std::vector<NodeId>& b,
 // it. The closure below inserts one frontier at a time, so appending a sorted
 // batch beats probing a hash table and matches the sort/unique style of the
 // rest of the pass.
-std::vector<PairKey> mergeNewPairs(std::vector<PairKey>& dst,
-                                   std::vector<PairKey>& cand) noexcept {
+std::vector<PairKey> mergeNewPairs(std::vector<PairKey> &dst,
+                                   std::vector<PairKey> &cand) noexcept {
   std::sort(cand.begin(), cand.end());
   cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
   std::vector<PairKey> added;
@@ -667,7 +667,7 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
   for (NodeId t = nReal; t < nItem; t++) {
     if (!simpleTag[t])
       continue;
-    const std::vector<NodeId>& ms = members[t];
+    const std::vector<NodeId> &ms = members[t];
     for (NodeId z : ms) {
       if (!producible[z])
         continue;
@@ -1041,7 +1041,7 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
   for (NodeId t = nReal; t < nItem; t++) {
     if (!simpleTag[t])
       continue;
-    const std::vector<NodeId>& ms = members[t];
+    const std::vector<NodeId> &ms = members[t];
     const size_t k = ms.size();
     if (k < 2)
       continue;
@@ -1119,9 +1119,9 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
 // without w.
 
 // Fills `adjOffsets` / `adjTargets` from a per-node adjacency list.
-void buildAdjacency(const std::vector<std::vector<uint32_t>>& adj,
-                    std::vector<uint>& adjOffsets,
-                    std::vector<uint32_t>& adjTargets) noexcept {
+void buildAdjacency(const std::vector<std::vector<uint32_t>> &adj,
+                    std::vector<uint> &adjOffsets,
+                    std::vector<uint32_t> &adjTargets) noexcept {
   const uint k = (uint) adj.size();
   adjOffsets.assign(k + 1, 0);
   for (uint i = 0; i < k; i++)
@@ -1142,17 +1142,17 @@ void buildAdjacency(const std::vector<std::vector<uint32_t>>& adj,
 // count. Those representatives are the replacements a dropped recipe can fall
 // back on, so the query keeps it only when one of their stations is available.
 void computeCompWorkstations(const CraftingGraph &graph,
-                             const std::vector<std::vector<uint32_t>>& adj,
-                             const std::vector<int32_t>& comp,
-                             const std::vector<uint32_t>& repOfComp,
-                             const std::vector<uint32_t>& recs,
-                             std::vector<std::vector<NodeId>>& compWs) noexcept {
+                             const std::vector<std::vector<uint32_t>> &adj,
+                             const std::vector<int32_t> &comp,
+                             const std::vector<uint32_t> &repOfComp,
+                             const std::vector<uint32_t> &recs,
+                             std::vector<std::vector<NodeId>> &compWs) noexcept {
   const uint32_t nComp = (uint32_t) compWs.size();
   std::vector<std::vector<uint32_t>> members(nComp);
   for (uint32_t a = 0; a < adj.size(); a++)
     members[comp[a]].push_back(a);
   for (uint32_t c = 0; c < nComp; c++) {
-    std::vector<NodeId>& ws = compWs[c];
+    std::vector<NodeId> &ws = compWs[c];
     if (repOfComp[c] != UINT32_MAX) {
       const auto own = graph.workstations.targetsOf(recs[repOfComp[c]]);
       ws.insert(ws.end(), own.begin(), own.end());
@@ -1160,7 +1160,7 @@ void computeCompWorkstations(const CraftingGraph &graph,
     for (uint32_t a : members[c])
       for (uint32_t j : adj[a])
         if ((uint32_t) comp[j] != c) {
-          const std::vector<NodeId>& succ = compWs[comp[j]];
+          const std::vector<NodeId> &succ = compWs[comp[j]];
           ws.insert(ws.end(), succ.begin(), succ.end());
         }
     std::sort(ws.begin(), ws.end());
@@ -1450,8 +1450,8 @@ void computeDirectDominancePruning(CraftingGraph &graph,
 // Adds `delta` to the coefficient of `row` of a sorted sparse column, writing
 // the result to `outItems`/`outCoeffs`.
 void addToColumn(std::span<const NodeId> items, std::span<const Amount> coeffs,
-                 NodeId row, Amount delta, std::vector<NodeId>& outItems,
-                 std::vector<Amount>& outCoeffs) noexcept {
+                 NodeId row, Amount delta, std::vector<NodeId> &outItems,
+                 std::vector<Amount> &outCoeffs) noexcept {
   outItems.clear();
   outCoeffs.clear();
   size_t i = 0;
@@ -1498,7 +1498,7 @@ Amount coeffOf(std::span<const NodeId> items, std::span<const Amount> coeffs,
 // wider than the cap is refused, because a catch-all tag is not worth a
 // per-recipe guard list.
 bool collectGuards(const CraftingGraph &graph, NodeId y,
-                   std::vector<NodeId>& out) noexcept {
+                   std::vector<NodeId> &out) noexcept {
   out.clear();
   if (y < graph.nReal) {
     out.push_back(y);
@@ -1617,30 +1617,29 @@ bool substitutionDominates(CostContext &ctx, std::span<const NodeId> curItems,
                            std::span<const Amount> curCoeffs,
                            std::span<const NodeId> sItems,
                            std::span<const Amount> sCoeffs, uint32_t depth,
-                           uint64_t &work, std::vector<NodeId>& collapses) noexcept {
+                           uint64_t &work, std::vector<NodeId> &collapses) noexcept {
   if (work == 0)
     return false;
   work--;
 
   // The first row where `cur` exceeds `s`.
   NodeId d = UINT32_MAX;
-  {
-    size_t i = 0, j = 0;
-    while (i < curItems.size() || j < sItems.size()) {
-      NodeId next = UINT32_MAX;
-      if (i < curItems.size())
-        next = std::min(next, curItems[i]);
-      if (j < sItems.size())
-        next = std::min(next, sItems[j]);
-      const Amount cu =
-          (i < curItems.size() && curItems[i] == next) ? curCoeffs[i++] : 0;
-      const Amount sv = (j < sItems.size() && sItems[j] == next) ? sCoeffs[j++] : 0;
-      if (cu > sv) {
-        d = next;
-        break;
-      }
+  size_t i = 0, j = 0;
+  while (i < curItems.size() || j < sItems.size()) {
+    NodeId next = UINT32_MAX;
+    if (i < curItems.size())
+      next = std::min(next, curItems[i]);
+    if (j < sItems.size())
+      next = std::min(next, sItems[j]);
+    const Amount cu =
+        (i < curItems.size() && curItems[i] == next) ? curCoeffs[i++] : 0;
+    const Amount sv = (j < sItems.size() && sItems[j] == next) ? sCoeffs[j++] : 0;
+    if (cu > sv) {
+      d = next;
+      break;
     }
   }
+  
   if (d == UINT32_MAX)
     return !collapses.empty();
   if (depth == 0)
@@ -1689,24 +1688,24 @@ bool substitutionDominates(CostContext &ctx, std::span<const NodeId> curItems,
 // component c and of every component reachable from it. Tarjan numbers the
 // components in reverse topological order, so a component's successors are
 // already final.
-void computeCompGuards(const std::vector<std::vector<uint32_t>>& adj,
-                       const std::vector<int32_t>& comp,
-                       const std::vector<std::vector<NodeId>>& edgeGuards,
-                       std::vector<std::vector<NodeId>>& compGuards) noexcept {
+void computeCompGuards(const std::vector<std::vector<uint32_t>> &adj,
+                       const std::vector<int32_t> &comp,
+                       const std::vector<std::vector<NodeId>> &edgeGuards,
+                       std::vector<std::vector<NodeId>> &compGuards) noexcept {
   const uint32_t nComp = (uint32_t) compGuards.size();
   std::vector<std::vector<uint32_t>> members(nComp);
   for (uint32_t a = 0; a < adj.size(); a++)
     members[comp[a]].push_back(a);
   for (uint32_t c = 0; c < nComp; c++) {
-    std::vector<NodeId>& g = compGuards[c];
+    std::vector<NodeId> &g = compGuards[c];
     for (uint32_t a : members[c]) {
-      const std::vector<NodeId>& own = edgeGuards[a];
+      const std::vector<NodeId> &own = edgeGuards[a];
       g.insert(g.end(), own.begin(), own.end());
     }
     for (uint32_t a : members[c])
       for (uint32_t j : adj[a])
         if ((uint32_t) comp[j] != c) {
-          const std::vector<NodeId>& succ = compGuards[comp[j]];
+          const std::vector<NodeId> &succ = compGuards[comp[j]];
           g.insert(g.end(), succ.begin(), succ.end());
         }
     std::sort(g.begin(), g.end());
@@ -1838,10 +1837,10 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
         if (!guardOk)
           continue;
         adj[i].push_back(j);
-        std::vector<NodeId>& eg = edgeGuards[i];
+        std::vector<NodeId> &eg = edgeGuards[i];
         eg.insert(eg.end(), tmpGuards.begin(), tmpGuards.end());
       }
-      std::vector<NodeId>& eg = edgeGuards[i];
+      std::vector<NodeId> &eg = edgeGuards[i];
       std::sort(eg.begin(), eg.end());
       eg.erase(std::unique(eg.begin(), eg.end()), eg.end());
     }
@@ -1863,7 +1862,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
     for (uint i = 0; i < k; i++) {
       if (keep[i])
         continue;
-      const std::vector<NodeId>& guards = compGuards[comp[i]];
+      const std::vector<NodeId> &guards = compGuards[comp[i]];
       // A path union wider than the per-recipe cap would make the query-time
       // guard scan unbounded, so the recipe is left alive instead.
       if (guards.size() > MAX_SUBSTITUTION_GUARD_ITEMS ||

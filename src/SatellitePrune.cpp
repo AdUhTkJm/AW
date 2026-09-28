@@ -240,7 +240,7 @@ void buildDfsTree(const Undirected& und, uint root, uint nNodes, DfsTree& out) n
 // Collects the DFS subtree rooted at `v` into `nodes`, reusing it as the work
 // stack. Only tree children are followed, so the walk costs the subtree size.
 void collectSubtree(const Undirected& und, const DfsTree& tree, uint v,
-                    std::vector<uint>& nodes) noexcept {
+                    std::vector<uint> &nodes) noexcept {
   nodes.clear();
   nodes.push_back(v);
   for (size_t q = 0; q < nodes.size(); q++) {
@@ -307,7 +307,7 @@ void buildItemGraph(const CraftingGraph& graph, std::span<const uint8_t> recipeS
 // UINT32_MAX when the item is not in the subgraph. The number of components is
 // returned.
 uint32_t computeItemSccs(const ItemGraph& graph, std::span<const uint8_t> itemSeen,
-                         uint nItem, std::vector<uint32_t>& comp) noexcept {
+                         uint nItem, std::vector<uint32_t> &comp) noexcept {
   comp.assign(nItem, UINT32_MAX);
   std::vector<uint32_t> index(nItem, UINT32_MAX);
   std::vector<uint32_t> low(nItem, 0);
@@ -378,7 +378,7 @@ struct Component {
 // G, minimising sum y so the point is as small as possible. False means "no
 // certificate was found", which only ever costs pruning power.
 bool solveCertificate(const CraftingGraph& graph, NodeId cutNode, const Component& comp,
-                      std::span<const int32_t> itemPos, std::vector<double>& y) noexcept {
+                      std::span<const int32_t> itemPos, std::vector<double> &y) noexcept {
   try {
     std::unique_ptr<MPSolver> solver(MPSolver::CreateSolver("GLOP"));
     if (!solver)
@@ -443,8 +443,8 @@ bool certificateHolds(const CraftingGraph& graph, NodeId cutNode, const Componen
 }
 
 bool componentIsDead(const CraftingGraph& graph, NodeId cutNode, const Component& comp,
-                     std::span<const int32_t> itemPos, std::vector<double>& y,
-                     std::vector<int64_t>& scaled) noexcept {
+                     std::span<const int32_t> itemPos, std::vector<double> &y,
+                     std::vector<int64_t> &scaled) noexcept {
   // Cheap and exact: with no recipe of G producing A, (A z)_A <= 0 for every z,
   // so the degenerate certificate Y = 0 is always available.
   bool producesCut = false;
@@ -504,7 +504,7 @@ bool componentIsDead(const CraftingGraph& graph, NodeId cutNode, const Component
 // escapes live; running out of budget only means an escape is not tried.
 bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> itemSeen,
                  std::span<const uint8_t> recipeSeen, std::span<const Amount> inventory,
-                 std::vector<uint8_t>& drop,
+                 std::vector<uint8_t> &drop,
                  std::chrono::steady_clock::time_point started) noexcept {
   const uint nItem = graph.nItem;
   if (target >= nItem || !itemSeen[target])
@@ -724,7 +724,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
 
 bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> itemSeen,
          std::span<const uint8_t> recipeSeen, std::span<const Amount> inventory,
-         std::vector<uint8_t>& drop) noexcept {
+         std::vector<uint8_t> &drop) noexcept {
   const uint nItem = graph.nItem;
   const uint nNodes = nItem + graph.nRecipe;
   if (target >= nItem || !itemSeen[target])
@@ -838,7 +838,7 @@ bool computeSatellitePruning(const CraftingGraph& graph, NodeId target,
                              std::span<const uint8_t> itemSeen,
                              std::span<const uint8_t> recipeSeen,
                              std::span<const Amount> inventory,
-                             std::vector<uint8_t>& drop) noexcept {
+                             std::vector<uint8_t> &drop) noexcept {
   if (!satelliteEnabled || !satelliteSettings.enabled)
     return false;
   static const bool debug = std::getenv("AW_SATELLITE_DEBUG") != nullptr;

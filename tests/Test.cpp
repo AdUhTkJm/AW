@@ -27,7 +27,7 @@ void expect(bool condition, const char* what) {
 
 bool subgraphHasRecipe(const aw::Subgraph &sub, uint32_t source);
 
-void emitVarInt(std::vector<std::byte>& out, std::uint64_t value) {
+void emitVarInt(std::vector<std::byte> &out, std::uint64_t value) {
   while ((value & ~0x7FULL) != 0) {
     out.push_back(static_cast<std::byte>((value & 0x7F) | 0x80));
     value >>= 7;

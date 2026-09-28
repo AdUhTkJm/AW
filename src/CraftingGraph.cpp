@@ -372,7 +372,7 @@ struct MutableRecipe {
 // reachability and pruning, so a tag's surviving member edges are exactly the
 // members whose stock the player can still spend.
 template <typename Allowed>
-bool inlineSingleUseTagsCore(std::vector<MutableRecipe>& recipes, uint nReal,
+bool inlineSingleUseTagsCore(std::vector<MutableRecipe> &recipes, uint nReal,
                              uint nItem, Allowed allowed) {
   if (nItem <= nReal || recipes.empty())
     return false;
@@ -487,7 +487,7 @@ bool inlineSingleUseTagsCore(std::vector<MutableRecipe>& recipes, uint nReal,
 }
 
 // Flattens `graph`'s recipes into the mutable form.
-void extractRecipes(const CraftingGraph& graph, std::vector<MutableRecipe>& out) {
+void extractRecipes(const CraftingGraph& graph, std::vector<MutableRecipe> &out) {
   out.clear();
   out.reserve(graph.nRecipe);
   for (uint r = 0; r < graph.nRecipe; r++) {
@@ -506,7 +506,7 @@ void extractRecipes(const CraftingGraph& graph, std::vector<MutableRecipe>& out)
 
 // Rebuilds every CSR field from a rewritten recipe list, then merges the
 // duplicates the rewrite may have produced.
-void rebuildFromRecipes(CraftingGraph& graph, std::vector<MutableRecipe>& recipes) {
+void rebuildFromRecipes(CraftingGraph& graph, std::vector<MutableRecipe> &recipes) {
   const uint nItem = graph.nItem;
   const uint newNRecipe = (uint) recipes.size();
 

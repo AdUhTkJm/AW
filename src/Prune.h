@@ -34,7 +34,7 @@ bool computeSatellitePruning(const CraftingGraph& graph, NodeId target,
                              std::span<const uint8_t> itemSeen,
                              std::span<const uint8_t> recipeSeen,
                              std::span<const Amount> inventory,
-                             std::vector<uint8_t>& drop) noexcept;
+                             std::vector<uint8_t> &drop) noexcept;
 
 }  // namespace aw
 
