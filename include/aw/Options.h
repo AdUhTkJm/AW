@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "aw/Solver.h"
+
 namespace aw {
 
 // Where single-use tag inlining runs. Off by default; it is an experiment.
@@ -190,6 +192,13 @@ struct Options {
 
 // The singleton option block.
 extern Options options;
+
+// The solver budget the JNI plan entry point uses (see aw/Protocol.h). It lives
+// apart from `options` because it is a different struct with a different
+// lifetime: `options` holds the planner's own pruning switches, and the solver
+// budget is re-read per query so the mod config can retune it without
+// re-registering the graph.
+extern solver::Options solverOptions;
 
 }  // namespace aw
 

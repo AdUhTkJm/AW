@@ -64,9 +64,25 @@ endif()
 
 find_package(ortools CONFIG REQUIRED)
 
-add_library(aw_crafting STATIC src/CraftingGraph.cpp src/CpSatSolver.cpp src/Greedy.cpp src/Options.cpp src/PackPrune.cpp src/Plan.cpp src/Prune.cpp src/SatellitePrune.cpp)
+# nlohmann/json (single header) is used only by the JNI option loader. The
+# recipe payload stays a binary blob; the options are a few dozen scalars that a
+# human edits, so JSON is the natural shape. Vendored rather than fetched at
+# configure time so the Windows build stays offline.
+find_path(AW_JSON_INCLUDE_DIR nlohmann/json.hpp
+   HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann")
+if(NOT AW_JSON_INCLUDE_DIR)
+   message(FATAL_ERROR
+      "nlohmann/json.hpp not found. Run scripts/fetch-nlohmann.sh, or install "
+      "the header where CMake can see it (set CMAKE_PREFIX_PATH).")
+endif()
+message(STATUS "Using nlohmann/json from ${AW_JSON_INCLUDE_DIR}")
+
+add_library(aw_crafting STATIC src/CraftingGraph.cpp src/CpSatSolver.cpp src/Greedy.cpp src/Options.cpp src/OptionsJson.cpp src/PackPrune.cpp src/Plan.cpp src/Prune.cpp src/Protocol.cpp src/SatellitePrune.cpp)
 target_include_directories(aw_crafting PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(aw_crafting PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+# PRIVATE: the header is an implementation detail of the option loader, and it
+# needs exceptions, which the rest of the library does not.
+target_include_directories(aw_crafting PRIVATE "${AW_JSON_INCLUDE_DIR}")
 target_compile_features(aw_crafting PUBLIC cxx_std_20)
 target_link_libraries(aw_crafting PUBLIC ortools::ortools)
 
@@ -76,7 +92,9 @@ if(LINUX)
 endif()
 
 if(AW_STRICT_FLAGS)
-   set_source_files_properties(src/CraftingGraph.cpp src/Greedy.cpp src/Options.cpp src/PackPrune.cpp src/Plan.cpp src/Prune.cpp
+   # OptionsJson.cpp is deliberately absent: nlohmann/json uses exceptions, and
+   # it is the only translation unit in the library that needs them.
+   set_source_files_properties(src/CraftingGraph.cpp src/Greedy.cpp src/Options.cpp src/PackPrune.cpp src/Plan.cpp src/Prune.cpp src/Protocol.cpp
       PROPERTIES COMPILE_OPTIONS "${AW_STRICT_FLAGS}")
 endif()
 

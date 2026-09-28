@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <initializer_list>
 #include <iostream>
 #include <span>
 #include <utility>
@@ -11,7 +13,9 @@
 
 #include "aw/CraftingGraph.h"
 #include "aw/Options.h"
+#include "aw/OptionsJson.h"
 #include "aw/Plan.h"
+#include "aw/Protocol.h"
 #include "aw/Solver.h"
 
 namespace {
@@ -3917,6 +3921,247 @@ void testGreedyDag() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Plan protocol
+// ---------------------------------------------------------------------------
+
+// Mirrors the mod's PlanCodec: handles ascend, the first delta is absolute.
+aw::vector<std::byte> encodePlanRequest(
+    aw::Handle target, aw::Amount amount,
+    std::initializer_list<aw::Handle> workstations,
+    std::initializer_list<std::pair<aw::Handle, aw::Amount>> stock) {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'P'}, std::byte{1}};
+  emitVarInt(out, (std::uint64_t) amount);
+  emitVarInt(out, target);
+  emitVarInt(out, workstations.size());
+  {
+    std::uint32_t previous = 0;
+    for (aw::Handle handle : workstations) {
+      emitVarInt(out, handle - previous);
+      previous = handle;
+    }
+  }
+  emitVarInt(out, stock.size());
+  {
+    std::uint32_t previous = 0;
+    for (const auto& [handle, available] : stock) {
+      emitVarInt(out, handle - previous);
+      previous = handle;
+      emitVarInt(out, (std::uint64_t) available);
+    }
+  }
+  return out;
+}
+
+// The response decoder, kept independent of src/Protocol.cpp so a matching bug
+// on both sides cannot hide.
+struct BlobReader {
+  std::span<const std::byte> bytes;
+  std::size_t pos = 0;
+  bool ok = true;
+
+  std::uint8_t byte() {
+    if (pos >= bytes.size()) {
+      ok = false;
+      return 0;
+    }
+    return std::to_integer<std::uint8_t>(bytes[pos++]);
+  }
+
+  std::uint64_t var() {
+    std::uint64_t value = 0;
+    for (unsigned i = 0; i < 10; i++) {
+      const std::uint8_t b = byte();
+      value |= (std::uint64_t) (b & 0x7F) << (7 * i);
+      if (!(b & 0x80))
+        return value;
+    }
+    ok = false;
+    return value;
+  }
+
+  double f64() {
+    std::uint64_t bits = 0;
+    for (unsigned i = 0; i < 8; i++)
+      bits |= (std::uint64_t) byte() << (8 * i);
+    double value = 0.0;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+  }
+};
+
+struct DecodedUse {
+  aw::Amount count = 0;
+  aw::Handle output = 0;
+  aw::Amount outputAmount = 0;
+  aw::vector<aw::Handle> inputs;
+  aw::vector<aw::Amount> inputAmounts;
+};
+
+struct DecodedResponse {
+  bool ok = false;
+  int status = -1;
+  bool provenOptimal = false;
+  aw::vector<DecodedUse> uses;
+};
+
+DecodedResponse decodePlanResponse(const aw::vector<std::byte>& blob) {
+  DecodedResponse out;
+  BlobReader in{blob};
+  if (in.byte() != 'A' || in.byte() != 'W' || in.byte() != 'Q' || in.byte() != 1)
+    return out;
+  out.status = (int) in.var();
+  out.provenOptimal = in.byte() != 0;
+  (void) in.f64();  // gap
+  (void) in.f64();  // bestBound
+  (void) in.var();  // numConflicts
+  (void) in.var();  // numBranches
+  (void) in.var();  // fixedColumns
+  const std::uint64_t uses = in.var();
+  for (std::uint64_t i = 0; i < uses && in.ok; i++) {
+    DecodedUse use;
+    use.count = (aw::Amount) in.var();
+    use.output = (aw::Handle) in.var();
+    use.outputAmount = (aw::Amount) in.var();
+    const std::uint64_t inputs = in.var();
+    std::uint32_t handle = 0;
+    for (std::uint64_t k = 0; k < inputs && in.ok; k++) {
+      handle += (std::uint32_t) in.var();
+      use.inputs.push_back(handle);
+      use.inputAmounts.push_back((aw::Amount) in.var());
+    }
+    out.uses.push_back(std::move(use));
+  }
+  out.ok = in.ok && in.pos == blob.size();
+  return out;
+}
+
+void testPlanProtocol() {
+  std::cout << "[Test] plan protocol\n";
+  const aw::TagInlineMode savedInlining = aw::options.tagInlining;
+  aw::options.tagInlining = aw::TagInlineMode::OFF;
+  aw::registerCraftingGraph(buildPlanSample());
+  expect(aw::getCraftingError() == nullptr, "protocol sample parses");
+
+  std::string error;
+  const auto request = encodePlanRequest(1, 4, {1, 2}, {});
+  const auto response = aw::planBlob(request, error);
+  expect(error.empty(), "a well-formed request is accepted");
+  expect(!response.empty(), "a response came back");
+
+  const DecodedResponse decoded = decodePlanResponse(response);
+  expect(decoded.ok, "the response decodes exactly");
+  expect(decoded.status == (int) aw::PlanStatus::OK, "the plan is feasible");
+  expect(decoded.provenOptimal, "the small plan is proven optimal");
+  expect(decoded.uses.size() == 2, "two recipes are executed");
+  if (decoded.uses.size() == 2) {
+    expect(decoded.uses[0].count == 8 && decoded.uses[0].output == 1 &&
+               decoded.uses[0].outputAmount == 1,
+           "r0 produces item 1 eight times");
+    expect(decoded.uses[0].inputs.size() == 1 && decoded.uses[0].inputs[0] == 2 &&
+               decoded.uses[0].inputAmounts[0] == 1,
+           "r0 consumes item 2");
+    expect(decoded.uses[1].count == 4 && decoded.uses[1].output == 2 &&
+               decoded.uses[1].outputAmount == 2,
+           "r1 produces item 2 four times");
+    expect(decoded.uses[1].inputs.size() == 1 && decoded.uses[1].inputs[0] == 1 &&
+               decoded.uses[1].inputAmounts[0] == 1,
+           "r1 consumes item 1");
+  }
+
+  // 100 spare item 2 units cover the cycle losses, so r0 alone suffices.
+  error.clear();
+  const auto stocked = aw::planBlob(encodePlanRequest(1, 4, {1, 2}, {{2, 100}}), error);
+  expect(error.empty(), "a request with stock is accepted");
+  const DecodedResponse stockedDecoded = decodePlanResponse(stocked);
+  expect(stockedDecoded.ok && stockedDecoded.uses.size() == 1,
+         "stock removes the recycling recipe");
+  if (stockedDecoded.uses.size() == 1)
+    expect(stockedDecoded.uses[0].count == 4, "r0 runs only four times with stock");
+
+  // Malformed requests. Each one must be rejected, not silently coerced.
+  auto rejects = [&](const aw::vector<std::byte>& blob, const char* what) {
+    std::string message;
+    const auto result = aw::planBlob(blob, message);
+    expect(result.empty() && !message.empty(), what);
+  };
+  rejects({}, "an empty request is rejected");
+  rejects({std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}, std::byte{1}},
+          "a recipe blob is not a plan request");
+  {
+    auto zero = encodePlanRequest(1, 4, {1, 2}, {});
+    zero[4] = std::byte{0};  // varint amount
+    rejects(zero, "a zero amount is rejected");
+  }
+  {
+    auto repeated = encodePlanRequest(1, 4, {1, 2}, {});
+    // Overwrite the second workstation delta with a zero.
+    repeated[8] = std::byte{0};
+    rejects(repeated, "a repeated workstation handle is rejected");
+  }
+  {
+    auto trailing = encodePlanRequest(1, 4, {1, 2}, {});
+    trailing.push_back(std::byte{0});
+    rejects(trailing, "trailing bytes are rejected");
+  }
+  rejects(encodePlanRequest(99, 4, {1, 2}, {}), "an out-of-range target is rejected");
+  rejects(encodePlanRequest(1, 4, {1, 99}, {}), "an out-of-range workstation is rejected");
+  rejects(encodePlanRequest(1, 4, {1, 2}, {{99, 1}}), "an out-of-range stock handle is rejected");
+
+  aw::options.tagInlining = savedInlining;
+}
+
+void testOptionsJson() {
+  std::cout << "[Test] options json\n";
+  const aw::Options savedPlanner = aw::options;
+  const aw::solver::Options savedSolver = aw::solverOptions;
+  std::string error;
+
+  expect(aw::applyPlannerOptionsJson(
+             R"({"tagPruning": false, "maxTagMembers": 12, "tagInlining": "queryTime", "pack": {"enabled": false}})",
+             error),
+         "a partial planner patch applies");
+  expect(!aw::options.tagPruning, "a planner switch is updated");
+  expect(aw::options.maxTagMembers == 12, "a planner budget is updated");
+  expect(aw::options.tagInlining == aw::TagInlineMode::QUERY_TIME, "the tag-inlining enum is updated");
+  expect(!aw::options.pack.enabled, "a nested planner object is updated");
+  expect(aw::options.recipePruning, "an absent key keeps its current value");
+
+  error.clear();
+  expect(!aw::applyPlannerOptionsJson(R"({"nope": 1})", error) && !error.empty(),
+         "an unknown planner key is rejected");
+  expect(aw::options.maxTagMembers == 12, "a rejected patch changes nothing");
+
+  error.clear();
+  expect(!aw::applyPlannerOptionsJson(R"({"maxTagMembers": -1})", error) && !error.empty(),
+         "a negative budget is rejected");
+  expect(!aw::applyPlannerOptionsJson(R"({"pack": 3})", error), "a non-object nested field is rejected");
+  expect(!aw::applyPlannerOptionsJson(R"({"tagInlining": "sometimes"})", error),
+         "an unknown tag-inlining mode is rejected");
+  expect(!aw::applyPlannerOptionsJson("not json", error), "a malformed document is rejected");
+
+  error.clear();
+  const std::string dumped = aw::plannerOptionsJson();
+  expect(aw::applyPlannerOptionsJson(dumped, error), "the dumped planner options apply verbatim");
+  expect(error.empty(), "round-tripping the planner options reports no error");
+
+  error.clear();
+  expect(aw::applySolverOptionsJson(R"({"flash": true, "numWorkers": 1, "maxTimeSeconds": 0.5})", error),
+         "a partial solver patch applies");
+  expect(aw::solverOptions.flash && aw::solverOptions.numWorkers == 1, "solver scalars are updated");
+  expect(aw::solverOptions.maxTimeSeconds == 0.5, "a solver double is updated");
+  expect(aw::solverOptions.relativeGap == savedSolver.relativeGap, "an absent solver key keeps its value");
+  expect(!aw::applySolverOptionsJson(R"({"maxTimeSeconds": "slow"})", error),
+         "a wrong solver type is rejected");
+
+  error.clear();
+  const std::string dumpedSolver = aw::solverOptionsJson();
+  expect(aw::applySolverOptionsJson(dumpedSolver, error), "the dumped solver options apply verbatim");
+
+  aw::options = savedPlanner;
+  aw::solverOptions = savedSolver;
+}
+
 int main() {
   // Nonoptimal mode may prune more than the optimum allows, so the parity tests
   // below -- which assert that pruning preserves the optimum -- must run with
@@ -3958,6 +4203,8 @@ int main() {
   testSatellitePruning();
   testSatelliteLeakPruning();
   testSatellitePruningParity();
+  testPlanProtocol();
+  testOptionsJson();
 
   if (failures == 0) {
     std::cout << "all tests passed\n";
