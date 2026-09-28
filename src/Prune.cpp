@@ -48,10 +48,12 @@
 #include <span>
 #include <unordered_map>
 #include <utility>
-#include <vector>
 
 #include "aw/CraftingGraph.h"
 #include "aw/Options.h"
+#ifdef AW_PROFILE_PRUNING
+#  include "aw/Profiler.h"
+#endif
 
 namespace aw {
 namespace {
@@ -1901,7 +1903,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
 // their keep sets need not overlap. If together they flag every recipe of an
 // item the item would have no producer at all, so clear every flag on one
 // recipe: keeping a recipe is always sound.
-void ensureRecipeSurvivors(CraftingGraph &graph) noexcept {
+void computeDeadnodePruning(CraftingGraph &graph) noexcept {
   const uint nReal = graph.nReal;
   const bool haveComposite = graph.recipeDominated.size() == graph.nRecipe &&
                              graph.recipeDominatorWorkstations.size() == graph.nRecipe;
@@ -1944,18 +1946,53 @@ void ensureRecipeSurvivors(CraftingGraph &graph) noexcept {
 
 }  // namespace
 
-void computePruning(CraftingGraph &graph) noexcept {
+void prune(CraftingGraph &graph) noexcept {
+#ifdef AW_PROFILE_PRUNING
+  auto start = std::chrono::steady_clock::now();
+#endif
   computeTagPruning(graph);
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputPruningProfile)
+    std::fprintf(stderr, "[time] tag pruning: %.6f s\n", aw::since(start));
+#endif
 
   // Both recipe passes compare the raw column vectors, so they share one
   // construction.
   RecipeVectors vec(graph);
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputPruningProfile)
+    std::fprintf(stderr, "[time] construct recipe vectors: %.6f s\n", aw::since(start));
+#endif
+
   computeRecipePruning(graph, vec);
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputPruningProfile)
+    std::fprintf(stderr, "[time] recipe pruning: %.6f s\n", aw::since(start));
+#endif
+
   computeDirectDominancePruning(graph, vec);
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputPruningProfile)
+    std::fprintf(stderr, "[time] direct dominance pruning: %.6f s\n", aw::since(start));
+#endif
+
   computeSubstitutionPruning(graph, vec);
-  ensureRecipeSurvivors(graph);
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputPruningProfile)
+    std::fprintf(stderr, "[time] substitution pruning: %.6f s\n", aw::since(start));
+#endif
+
+  computeDeadnodePruning(graph);
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputPruningProfile)
+    std::fprintf(stderr, "[time] dead node pruning: %.6f s\n", aw::since(start));
+#endif
 
   computePackPruning(graph);
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputPruningProfile)
+    std::fprintf(stderr, "[time] pack pruning: %.6f s\n", aw::since(start));
+#endif
 }
 
 }  // namespace aw

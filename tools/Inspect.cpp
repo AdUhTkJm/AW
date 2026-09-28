@@ -25,17 +25,6 @@ namespace {
 
 #define fail(msg, ...) { std::cerr << (msg) << "\n"; return __VA_ARGS__; }
 
-// AW_INSPECT_TIME=1 prints phase timings to stderr. Development aid; off by
-// default so the normal run stays quiet.
-bool inspectTiming() {
-  static const bool enabled = std::getenv("AW_INSPECT_TIME") != nullptr;
-  return enabled;
-}
-
-double since(const std::chrono::steady_clock::time_point &start) {
-  return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-}
-
 // Owns the profiling session for the whole run. It stops the profiler however
 // main returns and reports the sample count, which makes a run that was too
 // short for a useful flamegraph obvious. `path` stays empty until profiling
@@ -1056,9 +1045,12 @@ int main(int argc, char** argv) {
   else
     aw::options.tagInlining = aw::TagInlineMode::OFF;
 
-  // Nonoptimal mode is on by default; --optimal restores the exact (but
-  // slower) pruning.
+  // Nonoptimal mode is on by default.
   aw::options.nonoptimal = !optimalPruning;
+  // Prune profiling is on by default.
+#ifdef AW_PROFILE_PRUNING
+  aw::options.outputPruningProfile = true;
+#endif
 
   // The certificate pass runs at registration time, so its options have to be
   // installed before the graph is registered.
@@ -1097,8 +1089,7 @@ int main(int argc, char** argv) {
 
   const auto registerStart = std::chrono::steady_clock::now();
   aw::registerCraftingGraph(bytes);
-  if (inspectTiming())
-    std::fprintf(stderr, "[time] register+prune: %.3f s\n", since(registerStart));
+  std::fprintf(stderr, "[time] register+prune: %.3f s\n", aw::since(registerStart));
   if (const char *error = aw::getCraftingError()) {
     std::cout << "malformed graph: " << error << "\n";
     return EXIT_SUCCESS;
@@ -1218,8 +1209,7 @@ int main(int argc, char** argv) {
 
     const auto reachStart = std::chrono::steady_clock::now();
     const aw::Subgraph sub = aw::reachableSubgraph(target, stations, inventory);
-    if (inspectTiming())
-      std::fprintf(stderr, "[time] reachableSubgraph: %.3f s\n", since(reachStart));
+    std::fprintf(stderr, "[time] reachableSubgraph: %.3f s\n", aw::since(reachStart));
     if (sub.graph.nItem == 0) {
       std::cerr << "no subgraph reachable from " << planArg << '\n';
       return EXIT_FAILURE;
@@ -1236,8 +1226,7 @@ int main(int argc, char** argv) {
     const auto planStart = std::chrono::steady_clock::now();
     const aw::PlanResult plan =
         aw::planCrafting(sub, targetNode, planAmount, inventory, solverOptions);
-    if (inspectTiming())
-      std::fprintf(stderr, "[time] planCrafting(solve): %.3f s\n", since(planStart));
+    std::fprintf(stderr, "[time] planCrafting(solve): %.3f s\n", aw::since(planStart));
 
     const char *statusName = "?";
     switch (plan.status) {

@@ -795,7 +795,7 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
   // reachableSubgraph, on the recipes that survived reachability and pruning.
   if (inlineMode == TagInlineMode::PRE_PRUNE || inlineMode == TagInlineMode::BOTH)
     inlineSingleUseTags(graph);
-  computePruning(graph);
+  prune(graph);
 }
 
 const char *getCraftingError() noexcept {

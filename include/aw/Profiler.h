@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <string>
+#include <chrono>
 
 #ifdef AW_HAVE_PROFILER
 #include <gperftools/profiler.h>
@@ -110,5 +111,19 @@ class ScopedProfile {
 };
 
 }  // namespace aw::profiler
+
+namespace aw {
+
+inline double since(const std::chrono::steady_clock::time_point &start) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+
+inline double since(std::chrono::steady_clock::time_point &start) {
+  auto before = start;
+  start = std::chrono::steady_clock::now();
+  return std::chrono::duration<double>(start - before).count();
+}
+
+}
 
 #endif

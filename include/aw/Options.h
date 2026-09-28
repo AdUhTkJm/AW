@@ -114,6 +114,10 @@ struct Options {
   // Query-time passes, independent of the registration-time ones above.
   bool deadNodePruning = true;
 
+#ifdef AW_PROFILE_PRUNING
+  bool outputPruningProfile = false;
+#endif
+
   // Where single-use tag inlining runs. Read at registration time.
   TagInlineMode tagInlining = TagInlineMode::OFF;
 

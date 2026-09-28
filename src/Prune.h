@@ -13,7 +13,7 @@ namespace aw {
 // Called once by registerCraftingGraph, after canonicalizeRecipes(). Never
 // fails; malformed input just prunes less. The implementation lives in
 // Prune.cpp so both passes can share the sparse-vector and SCC machinery.
-void computePruning(CraftingGraph& graph) noexcept;
+void prune(CraftingGraph& graph) noexcept;
 
 // Fills packDominated / packCertificates with the multi-item "wasteful pack"
 // certificates. Called by computePruning after the tag and composite passes,
