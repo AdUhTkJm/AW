@@ -61,6 +61,7 @@
 #include <ortools/linear_solver/linear_solver.h>
 
 #include "aw/CraftingGraph.h"
+#include "aw/Options.h"
 
 namespace aw {
 namespace {
@@ -69,9 +70,6 @@ using uint = uint32_t;
 using operations_research::MPConstraint;
 using operations_research::MPSolver;
 using operations_research::MPVariable;
-
-bool satelliteEnabled = true;
-SatellitePruneOptions satelliteSettings;
 
 // Upper bound on a single certificate value. A certificate is not scale free
 // (the A coefficient is fixed at 1), so the LP needs a box; anything a real
@@ -612,9 +610,9 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
 
   for (uint32_t candidate = 0; candidate < candidates.size(); candidate++) {
     const uint escape = candidates[candidate];
-    if (satelliteSettings.maxSeconds > 0.0 &&
+    if (options.satellite.maxSeconds > 0.0 &&
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() >
-            satelliteSettings.maxSeconds)
+            options.satellite.maxSeconds)
       break;
 
     // Reverse BFS from the required items, never entering the escape.
@@ -640,7 +638,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
     if (queue.size() + 1 >= nSeen)
       continue;  // empty island
     const uint islandSize = nSeen - queue.size() - 1;
-    if (islandSize > satelliteSettings.maxIslandNodes) {
+    if (islandSize > options.satellite.maxIslandNodes) {
       skippedWide++;
       continue;
     }
@@ -675,7 +673,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
       skippedGates++;
       continue;
     }
-    if (island.items.size() + island.recipes.size() > satelliteSettings.maxIslandNodes) {
+    if (island.items.size() + island.recipes.size() > options.satellite.maxIslandNodes) {
       skippedWide++;
       continue;
     }
@@ -762,13 +760,13 @@ bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> ite
       continue;
     if (tree.low[c] < tree.disc[cut])
       continue;
-    if (satelliteSettings.maxSeconds > 0.0 &&
+    if (options.satellite.maxSeconds > 0.0 &&
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() >
-            satelliteSettings.maxSeconds)
+            options.satellite.maxSeconds)
       break;
 
     collectSubtree(und, tree, c, subtree);
-    if (subtree.size() > satelliteSettings.maxComponentNodes) {
+    if (subtree.size() > options.satellite.maxComponentNodes) {
       skippedWide++;
       continue;
     }
@@ -825,28 +823,12 @@ bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> ite
 
 }  // namespace
 
-void setSatellitePruningEnabled(bool enabled) noexcept {
-  satelliteEnabled = enabled;
-}
-
-bool isSatellitePruningEnabled() noexcept {
-  return satelliteEnabled;
-}
-
-void setSatellitePruningOptions(const SatellitePruneOptions& options) noexcept {
-  satelliteSettings = options;
-}
-
-SatellitePruneOptions getSatellitePruningOptions() noexcept {
-  return satelliteSettings;
-}
-
 bool computeSatellitePruning(const CraftingGraph& graph, NodeId target,
                              std::span<const uint8_t> itemSeen,
                              std::span<const uint8_t> recipeSeen,
                              std::span<const Amount> inventory,
                              aw::vector<uint8_t> &drop) noexcept {
-  if (!satelliteEnabled || !satelliteSettings.enabled)
+  if (!options.satellite.enabled)
     return false;
   static const bool debug = std::getenv("AW_SATELLITE_DEBUG") != nullptr;
   verbose = debug;

@@ -7,10 +7,10 @@
 // must not be repeated per query.
 //
 // Why one registration can serve every ablation stage: the dominance passes
-// always compute their marks at registration time. `setTagPruningEnabled` and
+// always compute their marks at registration time. `options.tagPruning` and
 // friends are read by `reachableSubgraph` at query time, so flipping them after
 // registration selects how much of the already-computed pruning is applied.
-// `setPackPruningEnabled` is the exception -- `computePackPruning` early-returns
+// `options.pack.enabled` is the exception -- `computePackPruning` early-returns
 // when it is off -- so this tool always enables it before registering and only
 // uses the flag as a query-time gate afterwards.
 //
@@ -221,36 +221,36 @@ const Stage *findStage(const std::string &name) {
 }
 
 void applyStage(const Stage &stage) {
-  aw::setDeadNodePruningEnabled(stage.dead);
-  aw::setDirectDominancePruningEnabled(stage.direct);
-  aw::setRecipePruningEnabled(stage.recipe);
-  aw::setSubstitutionPruningEnabled(stage.subs);
-  aw::setTagPruningEnabled(stage.tag);
-  aw::setPackPruningEnabled(stage.pack);
-  aw::setSatellitePruningEnabled(stage.sat);
+  aw::options.deadNodePruning = stage.dead;
+  aw::options.directPruning = stage.direct;
+  aw::options.recipePruning = stage.recipe;
+  aw::options.substitutionPruning = stage.subs;
+  aw::options.tagPruning = stage.tag;
+  aw::options.pack.enabled = stage.pack;
+  aw::options.satellite.enabled = stage.sat;
 }
 
 // Everything the registration-time passes read. Must run before
 // `registerCraftingGraph`.
 void configureForRegistration(bool nonoptimal, double packSeconds, double satelliteSeconds) {
   aw::options.nonoptimal = nonoptimal;
-  aw::setTagInliningMode(aw::TagInlineMode::OFF);
+  aw::options.tagInlining = aw::TagInlineMode::OFF;
   // Pack certificates are always computed; the stage only chooses whether the
   // query applies them, because the query gate is this same flag.
-  aw::setPackPruningEnabled(true);
-  aw::PackPruneOptions pack = aw::getPackPruningOptions();
+  aw::options.pack.enabled = true;
+  aw::PackPruneOptions pack = aw::options.pack;
   pack.maxSeconds = packSeconds;
-  aw::setPackPruningOptions(pack);
-  aw::SatellitePruneOptions satellite = aw::getSatellitePruningOptions();
+  aw::options.pack = pack;
+  aw::SatellitePruneOptions satellite = aw::options.satellite;
   satellite.maxSeconds = satelliteSeconds;
-  aw::setSatellitePruningOptions(satellite);
+  aw::options.satellite = satellite;
   // The other four are always on for the registration itself.
-  aw::setTagPruningEnabled(true);
-  aw::setRecipePruningEnabled(true);
-  aw::setDirectDominancePruningEnabled(true);
-  aw::setSubstitutionPruningEnabled(true);
-  aw::setDeadNodePruningEnabled(true);
-  aw::setSatellitePruningEnabled(true);
+  aw::options.tagPruning = true;
+  aw::options.recipePruning = true;
+  aw::options.directPruning = true;
+  aw::options.substitutionPruning = true;
+  aw::options.deadNodePruning = true;
+  aw::options.satellite.enabled = true;
 }
 
 // ------------------------------------------------------- derived missing set

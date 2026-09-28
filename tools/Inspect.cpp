@@ -1048,13 +1048,13 @@ int main(int argc, char** argv) {
 
   // Single-use tag inlining is read at registration time.
   if (inlineTags == "pre")
-    aw::setTagInliningMode(aw::TagInlineMode::PRE_PRUNE);
+    aw::options.tagInlining = aw::TagInlineMode::PRE_PRUNE;
   else if (inlineTags == "post")
-    aw::setTagInliningMode(aw::TagInlineMode::QUERY_TIME);
+    aw::options.tagInlining = aw::TagInlineMode::QUERY_TIME;
   else if (inlineTags == "both")
-    aw::setTagInliningMode(aw::TagInlineMode::BOTH);
+    aw::options.tagInlining = aw::TagInlineMode::BOTH;
   else
-    aw::setTagInliningMode(aw::TagInlineMode::OFF);
+    aw::options.tagInlining = aw::TagInlineMode::OFF;
 
   // Nonoptimal mode is on by default; --optimal restores the exact (but
   // slower) pruning.
@@ -1063,26 +1063,26 @@ int main(int argc, char** argv) {
   // The certificate pass runs at registration time, so its options have to be
   // installed before the graph is registered.
   {
-    aw::PackPruneOptions packOptions = aw::getPackPruningOptions();
+    aw::PackPruneOptions packOptions = aw::options.pack;
     if (noPackPrune || noPrune)
       packOptions.enabled = false;
     if (packSeconds >= 0.0)
       packOptions.maxSeconds = packSeconds;
-    aw::setPackPruningOptions(packOptions);
+    aw::options.pack = packOptions;
   }
 
   // Satellite elimination runs per query, on the reachable subgraph.
   {
-    aw::SatellitePruneOptions satelliteOptions = aw::getSatellitePruningOptions();
+    aw::SatellitePruneOptions satelliteOptions = aw::options.satellite;
     if (noSatellitePrune || noPrune)
       satelliteOptions.enabled = false;
     if (satelliteSeconds >= 0.0)
       satelliteOptions.maxSeconds = satelliteSeconds;
-    aw::setSatellitePruningOptions(satelliteOptions);
+    aw::options.satellite = satelliteOptions;
   }
 
   // Dead-node cleanup runs per query, after the walk and every pruning pass.
-  aw::setDeadNodePruningEnabled(!noDeadNodePrune && !noPrune);
+  aw::options.deadNodePruning = !noDeadNodePrune && !noPrune;
 
   // Profile the whole run: decode + canonicalize + prune precompute, the
   // reachability pass, the LP/CP-SAT solve, and the report. Started before the
@@ -1105,13 +1105,13 @@ int main(int argc, char** argv) {
   }
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
   if (noTagPrune || noPrune)
-    aw::setTagPruningEnabled(false);
+    aw::options.tagPruning = false;
   if (noRecipePrune || noPrune)
-    aw::setRecipePruningEnabled(false);
+    aw::options.recipePruning = false;
   if (noDirectPrune || noPrune)
-    aw::setDirectDominancePruningEnabled(false);
+    aw::options.directPruning = false;
   if (noSubstitutionPrune || noPrune)
-    aw::setSubstitutionPruningEnabled(false);
+    aw::options.substitutionPruning = false;
 
   std::cout << "parsed " << bytes.size() << " bytes from " << path << '\n';
   printSummary(graph);

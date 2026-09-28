@@ -52,7 +52,6 @@
 
 #include "aw/CraftingGraph.h"
 #include "aw/Options.h"
-#include "aw/Config.h"
 
 namespace aw {
 namespace {
@@ -71,13 +70,6 @@ struct ColumnView {
 };
 
 using uint = uint32_t;
-
-// Both passes are on by default. The setters exist so the command line tool
-// and the unit tests can A/B a plan against the unpruned graph.
-bool tagPruning = true;
-bool recipePruning = true;
-bool directPruning = true;
-bool substitutionPruning = true;
 
 void prefixSum(aw::vector<uint> &v) noexcept {
   v.insert(v.begin(), 0);
@@ -538,7 +530,7 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
     for (uint32_t t : order) {
       const uint64_t k = members[t].size();
       const uint64_t cost = k * k;
-      if (k > MAX_TAG_MEMBERS || cost > MAX_TAG_PAIRS - used) {
+      if (k > options.maxTagMembers || cost > options.maxTagPairs - used) {
         simpleTag[t] = 0;
         continue;
       }
@@ -641,7 +633,7 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
   {
     aw::vector<NodeId> acc, next, scratch;
     uint64_t witnessPairs = 0;
-    for (NodeId m = 0; m < nReal && witnessPairs < MAX_WITNESS_PAIRS; m++) {
+    for (NodeId m = 0; m < nReal && witnessPairs < options.maxWitnessPairs; m++) {
       const auto recipes = graph.i2r.targetsOf(m);
       if (recipes.empty())
         continue;
@@ -680,7 +672,7 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
         if (w == m)
           continue;
         itemPairs.push_back(packPair(m, w));
-        if (++witnessPairs >= MAX_WITNESS_PAIRS)
+        if (++witnessPairs >= options.maxWitnessPairs)
           break;
       }
     }
@@ -724,7 +716,7 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
 
   // ---- Transitive closure -----------------------------------------------
   // Only the frontier is expanded, so every pair is processed once and the
-  // closure costs one pass over the pairs it reaches. MAX_PRUNE_PAIRS caps what
+  // closure costs one pass over the pairs it reaches. options.maxPrunePairs caps what
   // the closure adds; running out leaves pairs out of the relation, never in
   // it. The tag pairs above are deliberately outside the budget: the exact mode
   // gates through them, so they must survive however large the seeds are.
@@ -733,13 +725,13 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
     aw::vector<PairKey> frontierItems = itemPairs;
     aw::vector<PairKey> frontierTags = tagPairs;
     while ((!frontierItems.empty() || !frontierTags.empty()) &&
-           total < MAX_PRUNE_PAIRS) {
+           total < options.maxPrunePairs) {
       aw::vector<PairKey> candTags;
       for (PairKey key : frontierItems) {
         const NodeId m = (NodeId) (key >> 32);
         const NodeId w = (NodeId) (key & 0xFFFFFFFFu);
         for (NodeId j : qualTags[m]) {
-          if (total + candTags.size() >= MAX_PRUNE_PAIRS)
+          if (total + candTags.size() >= options.maxPrunePairs)
             break;
           candTags.push_back(packPair(j, w));
         }
@@ -755,7 +747,7 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
         for (NodeId z : members[j]) {
           if (z == w || !producible[z])
             continue;
-          if (total + candItems.size() >= MAX_PRUNE_PAIRS)
+          if (total + candItems.size() >= options.maxPrunePairs)
             break;
           candItems.push_back(packPair(z, w));
         }
@@ -769,7 +761,7 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
         for (NodeId j : qualReal[m]) {
           if (j == w)
             continue;
-          if (total + candItems.size() >= MAX_PRUNE_PAIRS)
+          if (total + candItems.size() >= options.maxPrunePairs)
             break;
           candItems.push_back(packPair(j, w));
         }
@@ -880,7 +872,7 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
   // `_d <- amethyst + quartz_block`) but still consume at least what some
   // dominator route does. The check is budgeted, because the fixpoint may ask
   // for the same pair repeatedly.
-  uint64_t coverBudget = MAX_TAG_COVER_WORK;
+  uint64_t coverBudget = options.maxTagCoverWork;
   aw::vector<std::pair<NodeId, Amount>> cap;
   auto covers = [&](uint s, uint r) -> bool {
     if (coverBudget == 0)
@@ -1219,7 +1211,7 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
     // Comparing every pair of X's recipes costs O(k^2) time and can build a
     // k^2-edge adjacency. Leave an item with an absurd fan-out unpruned rather
     // than spend gigabytes on it.
-    if (recipeNodes.size() > MAX_SIBLING_RECIPES)
+    if (recipeNodes.size() > options.maxSiblingRecipes)
       continue;
 
     recs.clear();
@@ -1247,7 +1239,7 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
         // the inner loop is proportional to producers(Y). Skip a witness that
         // is itself produced by an absurd number of recipes; that just leaves
         // R without a guard.
-        if (producers.size() > MAX_WITNESS_PRODUCERS)
+        if (producers.size() > options.maxWitnessProducers)
           continue;
 
         // Every sibling is a candidate: the workstation condition is deferred
@@ -1382,7 +1374,7 @@ void computeDirectDominancePruning(CraftingGraph &graph,
       continue;
     // The same budget as the composite pass: a quadratic scan of an item with
     // an absurd fan-out is not worth the memory it would need.
-    if (recipeNodes.size() > MAX_SIBLING_RECIPES)
+    if (recipeNodes.size() > options.maxSiblingRecipes)
       continue;
 
     recs.clear();
@@ -1530,7 +1522,7 @@ bool collectGuards(const CraftingGraph &graph, NodeId y,
     return true;
   }
   const auto recipes = graph.i2r.targetsOf(y);
-  if (recipes.size() > MAX_SUBSTITUTION_GUARD_ITEMS)
+  if (recipes.size() > options.maxSubstitutionGuardItems)
     return false;
   // At most one guard per tag member recipe.
   out.reserve(recipes.size());
@@ -1581,7 +1573,7 @@ bool costsRec(CostContext &ctx, NodeId y, NodeId w, uint32_t depth) noexcept {
       return false;  // on the current path: the least fixpoint has no cycle
     return it->second == 3;
   }
-  const bool memoize = ctx.memo->size() < MAX_COST_MEMO;
+  const bool memoize = ctx.memo->size() < options.maxCostMemo;
   if (memoize)
     (*ctx.memo)[key] = 1;
 
@@ -1686,7 +1678,7 @@ bool substitutionDominates(CostContext &ctx, const ColumnView &cur, const Column
     const Amount coeff = cur.coeffs[k];
     if (coeff >= 0 || y == d)
       continue;
-    if (!costsRec(ctx, y, d, MAX_COST_DEPTH))
+    if (!costsRec(ctx, y, d, options.maxCostDepth))
       continue;
     Amount t = std::min(-coeff, deficit);
     // Moving t units of y onto d must not push y's own row into deficit.
@@ -1775,7 +1767,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
     ms.erase(std::unique(ms.begin(), ms.end()), ms.end());
     // A catch-all tag is neither worth a per-recipe guard list nor cheap to
     // walk, so it is left out of the cost relation entirely.
-    if (ms.size() > MAX_SUBSTITUTION_GUARD_ITEMS)
+    if (ms.size() > options.maxSubstitutionGuardItems)
       continue;
     simpleTag[t] = 1;
     tagMembers[t] = std::move(ms);
@@ -1787,7 +1779,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
   ctx.simpleTag = &simpleTag;
   ctx.tagMembers = &tagMembers;
   ctx.memo = &memo;
-  ctx.work = MAX_SUBSTITUTION_COST_WORK;
+  ctx.work = options.maxSubstitutionCostWork;
 
   // Exact mode needs the batching guard; nonoptimal mode waives it, as the tag
   // pass does.
@@ -1804,7 +1796,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
   ctx.unitOutput = &unitOutput;
   ctx.requireUnit = !options.nonoptimal;
 
-  uint64_t work = MAX_SUBSTITUTION_WORK;
+  uint64_t work = options.maxSubstitutionWork;
   size_t guardTotal = 0;
 
   aw::vector<uint32_t> recs;
@@ -1820,13 +1812,13 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
 
   aw::vector<NodeId> collapses, resolved, tmpGuards;
   // The recursive search abandons any branch that would exceed the depth cap.
-  collapses.reserve(MAX_SUBSTITUTION_DEPTH);
+  collapses.reserve(options.maxSubstitutionDepth);
 
   for (NodeId X = 0; X < nReal && work != 0; X++) {
     const auto recipeNodes = graph.i2r.targetsOf(X);
     if (recipeNodes.size() < 2)
       continue;
-    if (recipeNodes.size() > MAX_SIBLING_RECIPES)
+    if (recipeNodes.size() > options.maxSiblingRecipes)
       continue;
 
     recs.clear();
@@ -1849,7 +1841,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
         collapses.clear();
         if (!substitutionDominates(ctx, ColumnView(uItems, uCoeffs),
                                    ColumnView(vec.itemsOf(S), vec.coeffsOf(S)),
-                                   MAX_SUBSTITUTION_DEPTH, work, collapses))
+                                   options.maxSubstitutionDepth, work, collapses))
           continue;
         // Resolve the guards; a collapsed tag too wide to list makes the edge
         // unusable, so it is dropped along with the rest of this attempt.
@@ -1893,8 +1885,8 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
       const aw::vector<NodeId> &guards = compGuards[comp[i]];
       // A path union wider than the per-recipe cap would make the query-time
       // guard scan unbounded, so the recipe is left alive instead.
-      if (guards.size() > MAX_SUBSTITUTION_GUARD_ITEMS ||
-          guardTotal + guards.size() > MAX_SUBSTITUTION_GUARD_TOTAL)
+      if (guards.size() > options.maxSubstitutionGuardItems ||
+          guardTotal + guards.size() > options.maxSubstitutionGuardTotal)
         continue;
       const uint r = recs[i];
       graph.recipeSubstituted[r] = 1;
@@ -1964,38 +1956,6 @@ void computePruning(CraftingGraph &graph) noexcept {
   ensureRecipeSurvivors(graph);
 
   computePackPruning(graph);
-}
-
-void setTagPruningEnabled(bool enabled) noexcept {
-  tagPruning = enabled;
-}
-
-bool isTagPruningEnabled() noexcept {
-  return tagPruning;
-}
-
-void setRecipePruningEnabled(bool enabled) noexcept {
-  recipePruning = enabled;
-}
-
-bool isRecipePruningEnabled() noexcept {
-  return recipePruning;
-}
-
-void setDirectDominancePruningEnabled(bool enabled) noexcept {
-  directPruning = enabled;
-}
-
-bool isDirectDominancePruningEnabled() noexcept {
-  return directPruning;
-}
-
-void setSubstitutionPruningEnabled(bool enabled) noexcept {
-  substitutionPruning = enabled;
-}
-
-bool isSubstitutionPruningEnabled() noexcept {
-  return substitutionPruning;
 }
 
 }  // namespace aw

@@ -32,14 +32,12 @@
 #include <vector>
 
 #include "aw/CraftingGraph.h"
-#include "aw/Config.h"
+#include "aw/Options.h"
 
 namespace aw {
 namespace {
 
 using uint = uint32_t;
-
-PackPruneOptions packOptions;
 
 // The largest `need` we are willing to track. Values are only used to force
 // producers and to branch, so a clamp keeps a pathological R2' cycle from
@@ -210,8 +208,8 @@ struct PackSearch {
   }
 
   void writeNeed(NodeId i, int64_t value) noexcept {
-    if (value > MAX_NEED)
-      value = MAX_NEED;
+    if (value > options.maxNeed)
+      value = options.maxNeed;
     if (value <= need[i])
       return;
     undo.push_back({kUndoNeed, i, need[i]});
@@ -469,7 +467,7 @@ struct PackSearch {
         return false;
       if (budgetStop || deadlineHit)
         return true;
-      if (++iterations > MAX_PROP_ITERATIONS)
+      if (++iterations > options.maxPropIterations)
         return true;
       changed = false;
 
@@ -771,10 +769,10 @@ void computePackPruning(CraftingGraph &graph) noexcept {
   graph.packDominated.assign(graph.nRecipe, 0);
   graph.packCertificates.assign(graph.nRecipe, PackCertificate{});
 
-  if (!packOptions.enabled || graph.nRecipe == 0)
+  if (!options.pack.enabled || graph.nRecipe == 0)
     return;
 
-  PackSearch search(graph, packOptions);
+  PackSearch search(graph, options.pack);
   search.buildRates();
   search.passStart = std::chrono::steady_clock::now();
 
@@ -790,7 +788,7 @@ void computePackPruning(CraftingGraph &graph) noexcept {
     // A recipe whose output nothing consumes can never close A z <= 0.
     if (graph.output[r] < graph.nItem && search.unconsumed[graph.output[r]])
       continue;
-    if (packOptions.maxSeconds > 0.0 && search.timedOut())
+    if (options.pack.maxSeconds > 0.0 && search.timedOut())
       break;
 
     if (search.run(r)) {
@@ -798,22 +796,6 @@ void computePackPruning(CraftingGraph &graph) noexcept {
       graph.packCertificates[r] = search.certScratch;
     }
   }
-}
-
-void setPackPruningEnabled(bool enabled) noexcept {
-  packOptions.enabled = enabled;
-}
-
-bool isPackPruningEnabled() noexcept {
-  return packOptions.enabled;
-}
-
-void setPackPruningOptions(const PackPruneOptions &options) noexcept {
-  packOptions = options;
-}
-
-PackPruneOptions getPackPruningOptions() noexcept {
-  return packOptions;
 }
 
 }  // namespace aw

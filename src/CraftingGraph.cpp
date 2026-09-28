@@ -6,16 +6,13 @@
 #include <array>
 #include <climits>
 
+#include "aw/Options.h"
+
 namespace aw {
 CraftingGraph graph;
 // Last parse error, or nullptr when the last registerCraftingGraph succeeded.
 // The Java side reads this to turn a malformed blob into an exception.
 const char *error;
-// Single-use tag inlining mode. Global and read at registration time, matching
-// the other registration-time knobs.
-TagInlineMode tagInlineMode = TagInlineMode::OFF;
-// Dead-node cleanup. Query-time, global like the satellite toggle.
-bool deadNodePruningEnabled = true;
 
 namespace {
 
@@ -793,7 +790,7 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
   const bool dropped = dropUselessRecipes(graph);
   if (!normalized && !dropped)
     canonicalizeRecipes();
-  const TagInlineMode inlineMode = tagInlineMode;
+  const TagInlineMode inlineMode = options.tagInlining;
   // PRE flattens every single-use tag before the dominance passes see the
   // graph. The query-time spot (QUERY_TIME / BOTH) runs later, inside
   // reachableSubgraph, on the recipes that survived reachability and pruning.
@@ -814,22 +811,6 @@ const CraftingGraph &getCraftingGraph() noexcept {
   return graph;
 }
 
-void setTagInliningMode(TagInlineMode mode) noexcept {
-  tagInlineMode = mode;
-}
-
-TagInlineMode getTagInliningMode() noexcept {
-  return tagInlineMode;
-}
-
-void setDeadNodePruningEnabled(bool enabled) noexcept {
-  deadNodePruningEnabled = enabled;
-}
-
-bool isDeadNodePruningEnabled() noexcept {
-  return deadNodePruningEnabled;
-}
-
 Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
                            std::span<const Amount> inventory) noexcept {
   Subgraph result;
@@ -846,11 +827,11 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
       allowed[handle - 1] = 1;
   }
 
-  const bool pruneTag = isTagPruningEnabled();
-  const bool pruneRecipe = isRecipePruningEnabled();
-  const bool pruneDirect = isDirectDominancePruningEnabled();
-  const bool pruneSubstitution = isSubstitutionPruningEnabled();
-  const bool prunePack = isPackPruningEnabled();
+  const bool pruneTag = options.tagPruning;
+  const bool pruneRecipe = options.recipePruning;
+  const bool pruneDirect = options.directPruning;
+  const bool pruneSubstitution = options.substitutionPruning;
+  const bool prunePack = options.pack.enabled;
 
   aw::vector<uint8_t> itemSeen(nItem, 0);
   aw::vector<uint8_t> recipeSeen(nRecipe, 0);
@@ -1027,7 +1008,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   }
 
   // Satellite elimination. We have to do it per-query, so not always a net gain.
-  if (isSatellitePruningEnabled()) {
+  if (options.satellite.enabled) {
     constexpr uint MAX_SATELLITE_ROUNDS = 4;
     const NodeId target = CraftingGraph::itemNode(output);
     aw::vector<uint8_t> drop(nRecipe, 0);
@@ -1047,7 +1028,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   // nothing: every recipe that consumes it is dead, and dropping those can
   // expose further such items. Items with no producer in the source graph are
   // raw materials the player is expected to gather, so they are kept.
-  if (deadNodePruningEnabled) {
+  if (options.deadNodePruning) {
     const NodeId target = CraftingGraph::itemNode(output);
 
     // How many surviving recipes produce each item.
@@ -1154,7 +1135,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   // member that is in stock. Folding them into the consumer removes the tag
   // node without dropping any option, and without the subgraph growth the
   // registration-time flattening has.
-  if (tagInlineMode == TagInlineMode::QUERY_TIME || tagInlineMode == TagInlineMode::BOTH) {
+  if (options.tagInlining == TagInlineMode::QUERY_TIME || options.tagInlining == TagInlineMode::BOTH) {
     inlineSingleUseTagsCore(built, graph.nReal, nItem, [](uint) { return true; });
 
     // A flattened tag has neither producers nor consumers left. Drop it so it
