@@ -19,7 +19,9 @@
 // ground-truth run is a separate process with `--nonoptimal 0`.
 //
 // Output is JSON Lines: one `config` header object, one `registration` object,
-// then one object per query. See bench/README.md.
+// then one object per query. `--preprocess-only` stops after the registration row,
+// which is what lets the preprocessing half of an existing file be refreshed
+// without re-running the queries. See bench/README.md.
 
 #include "aw/CraftingGraph.h"
 #include "aw/Options.h"
@@ -333,7 +335,11 @@ void usage() {
                "                [--warmup N] [--repeats R]\n"
                "                [--time-limit 40] [--gap 0.01] [--workers 16]\n"
                "                [--pack-seconds 60] [--satellite-seconds 2]\n"
-               "                [--names <path>] [--quiet]\n"
+               "                [--names <path>] [--quiet] [--preprocess-only]\n"
+               "\n"
+               "--preprocess-only registers the graph and writes the config header and the\n"
+               "registration row, then exits without running a single query. Use it to refresh\n"
+               "the preprocessing half of an existing JSONL without paying for plan_ms again.\n"
                "\n"
                "stages (cumulative): none dead_node direct recipe substitution tag pack satellite\n");
 }
@@ -353,6 +359,7 @@ int main(int argc, char **argv) {
   bool nonoptimal = true;
   bool flash = false;
   bool quiet = false;
+  bool preprocessOnly = false;
   int warmup = 1;
   int repeats = 1;
   long long workers = 16;
@@ -408,6 +415,7 @@ int main(int argc, char **argv) {
     else if (arg == "--pack-seconds") { std::string v; next(v); if (!parseDouble(v, packSeconds)) return EXIT_FAILURE; }
     else if (arg == "--satellite-seconds") { std::string v; next(v); if (!parseDouble(v, satelliteSeconds)) return EXIT_FAILURE; }
     else if (arg == "--quiet") quiet = true;
+    else if (arg == "--preprocess-only") preprocessOnly = true;
     else if (arg == "-h" || arg == "--help") { usage(); return EXIT_SUCCESS; }
     else { std::fprintf(stderr, "unknown argument: %s\n", arg.c_str()); usage(); return EXIT_FAILURE; }
   }
@@ -416,6 +424,13 @@ int main(int argc, char **argv) {
     usage();
     return EXIT_FAILURE;
   }
+
+  // Everything below is harness input preparation: read the plan manifests and the
+  // `.awr` bytes off disk. `registerCraftingGraph` does the parsing, so it is timed
+  // separately as the engine's preprocessing. Keeping the two apart is what makes
+  // `parse_ms` (harness + I/O) and `register_ms` (engine) comparable to the baselines,
+  // whose harnesses parse the `.awr` themselves.
+  const auto parseStart = Clock::now();
 
   // ---- plan files -------------------------------------------------------
   std::map<std::string, std::string> meta;
@@ -511,6 +526,10 @@ int main(int argc, char **argv) {
   aw::vector<std::byte> bytes(raw.size());
   std::memcpy(bytes.data(), raw.data(), raw.size());
 
+  const std::map<aw::Handle, std::string> names =
+      namesPath.empty() ? std::map<aw::Handle, std::string>() : loadNames(namesPath);
+  const double parseMs = sinceMs(parseStart);
+
   configureForRegistration(nonoptimal, packSeconds, satelliteSeconds);
   const auto registerStart = Clock::now();
   aw::registerCraftingGraph(bytes);
@@ -520,9 +539,6 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
-
-  const std::map<aw::Handle, std::string> names =
-      namesPath.empty() ? std::map<aw::Handle, std::string>() : loadNames(namesPath);
 
   std::ofstream out(outPath);
   if (!out) {
@@ -544,7 +560,10 @@ int main(int argc, char **argv) {
         .real("gap", gap)
         .num("workers", workers)
         .real("pack_seconds", packSeconds)
-        .real("satellite_seconds", satelliteSeconds);
+        .real("satellite_seconds", satelliteSeconds)
+        .real("parse_ms", parseMs)
+        .str("preprocess_scope", "engine")
+        .boolean("preprocess_only", preprocessOnly);
     std::string stageNames;
     for (size_t k = 0; k < stages.size(); k++) {
       if (k != 0) stageNames += ",";
@@ -583,6 +602,7 @@ int main(int argc, char **argv) {
         .boolean("nonoptimal", nonoptimal)
         .boolean("flash", flash)
         .real("register_ms", registerMs)
+        .real("parse_ms", parseMs)
         .num("items", graph.nItem)
         .num("real_items", graph.nReal)
         .num("recipes", graph.nRecipe)
@@ -602,6 +622,15 @@ int main(int argc, char **argv) {
                   registerMs, graph.nItem, graph.nRecipe, tagEdges, tagDominated,
                   recipeDominated, directDominated, substituted, packDominated);
     }
+  }
+
+  if (preprocessOnly) {
+    out.flush();
+    if (!quiet) {
+      std::printf("preprocess-only: parse %.1f ms, registration %.1f ms, no queries run\n",
+                  parseMs, registerMs);
+    }
+    return EXIT_SUCCESS;
   }
 
   // ---- query sweep ------------------------------------------------------

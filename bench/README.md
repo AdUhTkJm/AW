@@ -223,10 +223,10 @@ aw-nonopt   tag            48    20     18      2      0    12    0   36/36     
 aw-nonopt   pack           48    20     19      1      0     9    0   39/39       0   0.0000     1.000     3.9      0.4       8        7
 aw-nonopt   satellite      48    20     19      1      0     1    0   47/47       0   0.0000     1.000     3.9      1.1       2        1
 aw-flash    satellite      48    20     15      5      0     1    0   47/47       0   0.5714     1.000     4.2      1.2       2        1
-tb-v2       -              48    20      0      0     48     0    0   47/47       0        -     1.000    54.2      3.8       0        0
-tb-cpsat    -              48    20     47      1      0     0    0   47/47       0        -     1.000    53.0     19.5       0        0
-ae2vm       -              48    12      0      0     48     0    0   37/47       1        -     1.250   515.2      0.5       0        0
-ae2vm-cold  -              48    12      0      0     48     0    0   37/47       1        -     1.250   548.1      1.9       0        0
+tb-v2       -              48    20      0      0     48     0    0   47/47       0        -     1.000     0.0      3.8       0        0
+tb-cpsat    -              48    20     47      1      0     0    0   47/47       0        -     1.000   458.1     19.5       0        0
+ae2vm       -              48    12      0      0     48     0    0   37/47       1        -     1.250     9.9      0.5       0        0
+ae2vm-cold  -              48    12      0      0     48     0    0   37/47       1        -     1.250     9.7      1.9       0        0
 ```
 
 Read it as: the ablation shrinks the median query subgraph from 68 items / 88 recipes to
@@ -242,6 +242,12 @@ only 15 of them: it stops at the first feasible plan, so `prov` falls and `unpro
 everything it declined to prove. `gap` is the median gap of those incumbents (pass
 `summarize.py --max` for the worst one). The counts
 wobble between runs (16 workers), so read the columns, not the exact integers.
+
+The `pre_ms` column is engine-only (§5.2): `aw-*` is `registerCraftingGraph`, AE2VM is the
+`PatternCompiler` pass over 2 236 patterns, `tb-cpsat` is the OR-Tools native runtime, and
+`tb-v2` is 0 because it has no one-time phase at all. The harness' own parse is reported as
+`parse_ms` in `summary.csv` (on this corpus: AW ~0.7 ms, the two Java harnesses ~60 ms and
+~560 ms).
 
 For AW the `plan_ms` column is `query_ms` (`reach_ms` + `solve_ms`), the same whole-query
 quantity the baselines report as `plan_ms`; see §5.2.
@@ -269,8 +275,9 @@ JVM plus up to 48 × 40 s of native solving, which is the expensive cell.
 `recipes-atm` needs a bigger JVM heap than the default: the Java harnesses hold one object
 per pattern, and it has 413 688 of them. Both Gradle tasks set `-Xmx8g`; raise it with
 `-PawrBenchHeap=16g` if an `ae2vm` or `tb-v2` cell dies with `OutOfMemoryError` (check that
-cell's `.log`). Compiling 413k patterns in AE2VM also means its `preprocess_ms` will be tens
-of seconds.
+cell's `.log`). On `recipes-atm` the AE2VM cell spends ~1.5 s in `parse_ms` (reading and
+canonicalizing the `.awr`) and ~0.5 s in `preprocess_ms` (compiling all 413 688 patterns),
+so the parse dominates the one-time half there.
 
 ### 4.3 Useful variations
 
@@ -300,6 +307,9 @@ python3 bench/run.py --datasets recipes-vanilla          # edit DATASETS in run.
 
 # Thunderbolt CP-SAT with its own internal bounds instead of the shared 40 s
 python3 bench/run.py --datasets recipes-small --configs tb-cpsat --tb-deadline-ms 0
+
+# refresh only the preprocessing half of a cell; every query row (and its plan_ms) is kept
+python3 bench/run.py --datasets recipes-atm --configs tb-cpsat --preprocess-only
 ```
 
 ---
@@ -325,10 +335,56 @@ enforces this and leaves `cost_ratio_median` (or `cost_ratio_mean` / `cost_ratio
 
 ### 5.2 Time
 
+`pre_ms` is the engine's **one-time** work, and nothing else. `parse_ms` is the harness' own
+input preparation (read the `.awr`, read the plan manifests, build the objects the engine is
+handed) and is deliberately kept out of `pre_ms`, because it is not something an engine does.
+
 | field | AW | baselines |
 |---|---|---|
-| preprocessing | `register_ms` (parse + canonicalize + dominance + pack certificates) | `preprocess_ms` (parse + canonicalize + build the engine graph; for AE2VM also compiling all patterns; for `tb-cpsat` also `cp_sat_init_ms` for the native runtime) |
+| harness input preparation | `parse_ms` (file read + name table; the `.awr` *parse* is inside `registerCraftingGraph`) | `parse_ms` (parse + canonicalize + build the harness' graph/pattern objects) |
+| preprocessing | `register_ms` (`registerCraftingGraph`: parse + canonicalize + dominance + pack certificates) | `preprocess_ms`: AE2VM compiles every pattern; `tb-v2` is **0** (it has no one-time phase); `tb-cpsat` is the OR-Tools native runtime init |
 | query | `reach_ms` + `solve_ms` = `query_ms` | `plan_ms` |
+
+`preprocess_ms` is what `summarize.py` reports, and it means different amounts of work per
+engine by construction:
+
+* **AW** — one `registerCraftingGraph` per graph version: canonicalization, the tag/recipe/
+  direct/substitution dominance passes and the pack certificates. The satellite pass is *not*
+  here; it is per query (`reach_ms`), because it needs the target and the inventory.
+* **AE2VM** — `PatternCompiler` compilation of every pattern. The pattern-table construction
+  is harness work and lives in `parse_ms`. AE2VM has no other one-time phase.
+* **`tb-v2`** — **0**. `CraftPlannerV2` compiles its DAG, feedback components and capacity
+  index lazily *inside* `plan()`, so in this harness that cost is per query and lands in
+  `plan_ms`; `diag_graph_compile_ns` on each row isolates it. In production the same work is
+  shared by the amount probes of one crafting calculation (`PlanningSession`), not by the game.
+* **`tb-cpsat`** — the OR-Tools native runtime load (`cp_sat_init_ms`). Its `compile()` is per
+  `solve()` call, so it too is inside `plan_ms`.
+
+A header written before this split has no `preprocess_scope` field: its `preprocess_ms` still
+contains the harness parse, and `tb-cpsat` reported the native init separately. `summarize.py`
+folds `cp_sat_init_ms` back in for those rows and prints a note. `--preprocess-only` refreshes
+such a cell in place:
+
+```bash
+python3 bench/run.py --datasets <dataset> --configs <config> --preprocess-only
+```
+
+It runs the harness with `--preprocess-only`, which writes the config header (and AW's
+registration row) and exits **without running a query**, then merges that header into the
+existing JSONL so every query row — and every `plan_ms` — is preserved byte for byte. The
+child process is one gradle/`aw_bench` launch, so it costs seconds, not hours. If the JSONL
+does not exist yet, only the preprocessing half is recorded and `run.py` says so. Pass the
+same `--time-limit`, `--pack-seconds` and `--satellite-seconds` the original sweep used: the
+merged header describes the run that produced the *new* preprocessing number, and the AW
+header records those settings (they do not affect the query rows, which are kept as they
+were).
+
+After a full sweep, every legacy header can be brought over in one cheap pass:
+
+```bash
+python3 bench/run.py --satellite-seconds 0.05 --preprocess-only
+python3 bench/summarize.py
+```
 
 AW's `reach_ms` is the reachability walk including every query-time pruning pass; `solve_ms`
 is `planCrafting` alone. The Java numbers include the watchdog thread hop, so they are
@@ -366,8 +422,13 @@ without the later prunings AW stops answering rather than answering slowly.
 ## 6. Output files
 
 * `bench/results/<dataset>.<config>.jsonl` — one `config` header, then either one
-  `registration` row (AW) or nothing, then one `query` row per measured query.
+  `registration` row (AW) or nothing, then one `query` row per measured query. The header
+  carries `parse_ms`, `preprocess_ms`, `preprocess_scope` (`engine`) and `preprocess_only`;
+  a header without `preprocess_scope` predates the split (see §5.2).
 * `bench/results/<dataset>.<config>.log` — the child's stdout/stderr.
+* `bench/results/<dataset>.<config>.preprocess.log` — the same, for a `--preprocess-only`
+  run. It gets its own name so refreshing the preprocessing half never overwrites the full
+  sweep's log.
 * `bench/results/summary.cells.csv` — one row per (dataset, config, stage, target, amount,
   stock, repeat), joined with the ground-truth row for that instance.
 * `bench/results/summary.csv`, `summary.md` — one row per (dataset, config, stage, stock):
@@ -376,9 +437,10 @@ without the later prunings AW stops answering rather than answering slowly.
   (or the worst case) and suffixes the columns `_mean` / `_max` accordingly. Without
   `--group-inventory` the three inventory settings are pooled and `stock` is `-`;
   `--group-inventory` gives each setting its own row and renders one table per setting.
-* `bench/results/summary.csv` also carries `preprocess_ms`, `items_<agg>`,
+* `bench/results/summary.csv` also carries `preprocess_ms`, `parse_ms`, `items_<agg>`,
   `recipes_<agg>`, `conflicts_<agg>` and `branches_<agg>`, so the CP-SAT effort counters
-  you asked for are in the same table.
+  you asked for are in the same table. `parse_ms` is CSV-only; the printed table has no
+  column for it.
 
 ---
 

@@ -32,6 +32,9 @@ Typical use
   nohup python3 bench/run.py --datasets recipes-nast,recipes-atm \\
         --time-limit 40 --warmup 1 --repeats 1 > bench/results/run.log 2>&1 &
 
+  # refresh the preprocessing half of one cell without re-running its queries
+  python3 bench/run.py --datasets recipes-atm --configs tb-v2 --preprocess-only
+
 Then `python3 bench/summarize.py`.
 """
 
@@ -144,6 +147,52 @@ def merge_stage_output(out_path, fresh_path, stages):
     os.remove(fresh_path)
 
 
+def merge_preprocess_output(out_path, fresh_path):
+    """Replace the header rows of `out_path` with the fresh ones, keeping every query row.
+
+    `fresh_path` is a `--preprocess-only` output: a config header, plus a registration
+    row for AW, and no query rows at all. The old file keeps its queries (and therefore
+    every `plan_ms`) and gets the new preprocessing measurement, which is the whole point
+    of the mode: refreshing the preprocessing half must not cost the query half again.
+    """
+    with open(fresh_path, encoding="utf-8") as handle:
+        fresh = [json.loads(line) for line in handle if line.strip()]
+    header = next((row for row in fresh if row.get("type") == "config"), None)
+    registration = next((row for row in fresh if row.get("type") == "registration"), None)
+
+    old = []
+    if os.path.exists(out_path):
+        with open(out_path, encoding="utf-8") as handle:
+            old = [json.loads(line) for line in handle if line.strip()]
+    kept = [row for row in old if row.get("type") not in ("config", "registration")]
+
+    # Keep the header's stage list describing the file, not the subset this invocation
+    # refreshed: a `--preprocess-only --stages satellite` run must not relabel a file that
+    # still carries all eight ablation stages.
+    if header is not None:
+        header = dict(header)
+        if "stages" in header:
+            present = set(row.get("stage") for row in kept if row.get("stage"))
+            present.update(part for part in (header.get("stages") or "").split(",") if part)
+            header["stages"] = ",".join([stage for stage in AW_STAGES if stage in present]
+                                         + sorted(present - set(AW_STAGES)))
+
+    ordered = ([header] if header is not None else [])
+    if registration is not None:
+        ordered.append(registration)
+    ordered += kept
+    if not any(row.get("type") == "query" for row in kept):
+        print("[warn] %s has no query rows; only the preprocessing half is recorded"
+              % out_path, flush=True)
+
+    tmp_path = out_path + ".merge.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        for row in ordered:
+            handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+    os.replace(tmp_path, out_path)
+    os.remove(fresh_path)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -164,6 +213,12 @@ def main():
                         help="sample targets from the largest SCC")
     parser.add_argument("--regen-plan", action="store_true",
                         help="regenerate the plan files even if they exist")
+    parser.add_argument("--preprocess-only", action="store_true",
+                        help="run only each engine's one-time preprocessing (AW registration, "
+                             "AE2VM pattern compilation, Thunderbolt's CP-SAT runtime init) "
+                             "and merge the fresh timing into the existing JSONL, keeping "
+                             "every query row. Use this to refresh `pre_ms` after a harness "
+                             "change without paying for `plan_ms` again.")
     parser.add_argument("--time-limit", default="40", help="per-query cutoff in seconds")
     parser.add_argument("--warmup", default="1", help="unmeasured passes before the measured one")
     parser.add_argument("--repeats", default="1", help="measured passes")
@@ -222,12 +277,18 @@ def main():
                 continue
             out = os.path.join(ROOT, args.out_dir, "%s.%s.jsonl" % (dataset, config))
             log = os.path.join(ROOT, args.out_dir, "%s.%s.log" % (dataset, config))
+            if args.preprocess_only:
+                # A separate log keeps the full sweep's log (its command line and query
+                # output) intact; the JSONL itself is merged, not replaced.
+                log = os.path.join(ROOT, args.out_dir,
+                                   "%s.%s.preprocess.log" % (dataset, config))
+            preprocess_flags = ["--preprocess-only"] if args.preprocess_only else []
 
             if config == "aw-nonopt":
                 # A subset of the cumulative stages is a legitimate re-run: only
                 # the selected `--stage` arguments are passed and the fresh rows
                 # are merged into the existing JSONL instead of clobbering it.
-                fresh = out + ".fresh"
+                fresh = out + (".preprocess" if args.preprocess_only else ".fresh")
                 command = [os.path.join(ROOT, "build", "aw_bench"),
                            "--dataset", dataset, "--awr", awr, "--plan", prefix,
                            "--config", config, "--out", fresh, "--names", names,
@@ -235,23 +296,29 @@ def main():
                            "--warmup", args.warmup, "--repeats", args.repeats,
                            "--time-limit", args.time_limit, "--gap", args.gap,
                            "--workers", args.workers, "--pack-seconds", args.pack_seconds,
-                           "--satellite-seconds", args.satellite_seconds]
+                           "--satellite-seconds", args.satellite_seconds] + preprocess_flags
                 for stage in stages:
                     command += ["--stage", stage]
                 code = run_logged(config, command, log, ROOT, args.dry_run)
                 if code == 0 and not args.dry_run:
-                    merge_stage_output(out, fresh, stages)
+                    if args.preprocess_only:
+                        merge_preprocess_output(out, fresh)
+                    else:
+                        merge_stage_output(out, fresh, stages)
 
             elif config == "aw-optimal":
+                target = out + ".preprocess" if args.preprocess_only else out
                 command = [os.path.join(ROOT, "build", "aw_bench"),
                            "--dataset", dataset, "--awr", awr, "--plan", prefix,
-                           "--config", config, "--out", out, "--names", names,
+                           "--config", config, "--out", target, "--names", names,
                            "--nonoptimal", "0", "--stage", "satellite:optimal",
                            "--warmup", args.warmup, "--repeats", args.repeats,
                            "--time-limit", args.time_limit, "--gap", args.gap,
                            "--workers", args.workers, "--pack-seconds", args.pack_seconds,
-                           "--satellite-seconds", args.satellite_seconds]
+                           "--satellite-seconds", args.satellite_seconds] + preprocess_flags
                 code = run_logged(config, command, log, ROOT, args.dry_run)
+                if args.preprocess_only and code == 0 and not args.dry_run:
+                    merge_preprocess_output(out, target)
 
             elif config == "aw-flash":
                 # Flash mode: production pruning (nonoptimal) with every pass on,
@@ -259,30 +326,37 @@ def main():
                 # lines up directly against the aw-nonopt `satellite` row and the
                 # aw-optimal ground truth. `aw_bench` is one process per config
                 # because `nonoptimal` is read at registration time.
+                target = out + ".preprocess" if args.preprocess_only else out
                 command = [os.path.join(ROOT, "build", "aw_bench"),
                            "--dataset", dataset, "--awr", awr, "--plan", prefix,
-                           "--config", config, "--out", out, "--names", names,
+                           "--config", config, "--out", target, "--names", names,
                            "--nonoptimal", "1", "--flash", "1", "--stage", "satellite",
                            "--warmup", args.warmup, "--repeats", args.repeats,
                            "--time-limit", args.time_limit, "--gap", args.gap,
                            "--workers", args.workers, "--pack-seconds", args.pack_seconds,
-                           "--satellite-seconds", args.satellite_seconds]
+                           "--satellite-seconds", args.satellite_seconds] + preprocess_flags
                 code = run_logged(config, command, log, ROOT, args.dry_run)
+                if args.preprocess_only and code == 0 and not args.dry_run:
+                    merge_preprocess_output(out, target)
 
             else:
                 repo = os.path.join(ROOT, "compare",
                                     "thunderboltcore" if config.startswith("tb-") else "ae2vm")
                 # `ae2vm-cold` is the same harness with no warm-up pass at all.
                 warmup = "0" if config == "ae2vm-cold" else args.warmup
+                target = out + ".preprocess" if args.preprocess_only else out
                 child = ["--dataset", dataset, "--awr", awr, "--plan", prefix,
-                         "--config", config, "--out", out, "--names", names,
+                         "--config", config, "--out", target, "--names", names,
                          "--warmup", warmup, "--repeats", args.repeats,
                          "--deadline-ms", common_limit_ms]
                 if config == "tb-cpsat":
                     child += ["--bind-deadline-ms", bound_ms]
+                child += preprocess_flags
                 command = [os.path.join(repo, "gradlew"), "--no-daemon", "benchAwr",
                            "--args=" + " ".join(child)]
                 code = run_logged(config, command, log, repo, args.dry_run)
+                if args.preprocess_only and code == 0 and not args.dry_run:
+                    merge_preprocess_output(out, target)
 
             if code != 0:
                 failures.append("%s/%s" % (dataset, config))

@@ -172,11 +172,40 @@ def main():
     if not queries:
         raise SystemExit("no query rows found in %s" % args.results_dir)
 
+    # ---- preprocessing index ----------------------------------------------
+    # `preprocess_ms` is engine-only for anything written by the current harnesses: they mark
+    # their headers with `preprocess_scope: "engine"` and report the harness' own input
+    # preparation separately as `parse_ms`. A header without that marker predates the split,
+    # so its `preprocess_ms` still contains the harness parse, and for `tb-cpsat` the native
+    # runtime init was reported in its own field; fold that in so old and new cells agree on
+    # what the column means. AW never had this problem: `register_ms` is `registerCraftingGraph`
+    # alone, and the `.awr` read happens outside its timer.
     preprocess = {}
+    parse = {}
+    legacy_headers = set()
     for row in configs:
-        preprocess[(row["dataset"], row["config"])] = row.get("preprocess_ms")
+        key = (row["dataset"], row["config"])
+        value = row.get("preprocess_ms")
+        if row.get("preprocess_scope") != "engine":
+            legacy_headers.add(key)
+            if row["config"] == "tb-cpsat":
+                value = (value or 0.0) + (row.get("cp_sat_init_ms") or 0.0)
+        preprocess[key] = value
+        if row.get("parse_ms") is not None:
+            parse[key] = row["parse_ms"]
     for row in registrations:
-        preprocess[(row["dataset"], row["config"])] = row.get("register_ms")
+        key = (row["dataset"], row["config"])
+        preprocess[key] = row.get("register_ms")
+        if row.get("parse_ms") is not None:
+            parse[key] = row["parse_ms"]
+    if legacy_headers:
+        print("note: %d pre-split header(s) (no preprocess_scope=engine): their pre_ms still "
+              "contains the harness parse. Re-run `bench/run.py --preprocess-only` on those "
+              "cells to refresh it.%s"
+              % (len(legacy_headers),
+                 " tb-cpsat cp_sat_init_ms was folded in."
+                 if any(c == "tb-cpsat" for _, c in legacy_headers) else ""),
+              file=sys.stderr)
 
     # ---- ground truth index ------------------------------------------------
     truth = {}
@@ -301,6 +330,7 @@ def main():
             "vs_truth_false_positive": len(false_positive_vs_truth),
             "vs_truth_false_negative": len(false_negative),
             "preprocess_ms": preprocess.get((dataset, config)),
+            "parse_ms": parse.get((dataset, config)),
             "plan_ms_%s" % tag: aggregate(plan_times, mode),
             "plan_ms_feasible_%s" % tag: aggregate(feasible_times, mode),
             "items_%s" % tag: aggregate(item_counts, mode),
