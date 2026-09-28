@@ -241,7 +241,12 @@ def _index(recipes):
 
 
 def load_names(path):
-    """`handle -> (kind, name)` from a `.names.tsv`. Missing file -> empty dict."""
+    """`handle -> (resource location, en_US name)` from a `.names.tsv`.
+
+    The table the mod writes is `<handle>\t<resource location>\t<en_US>\t<zh_CN>`.
+    Only the first three columns are read; the Chinese name is for the search
+    index and is not used by the tools. Missing file -> empty dict.
+    """
     names = {}
     try:
         handle = open(path, encoding="utf-8")

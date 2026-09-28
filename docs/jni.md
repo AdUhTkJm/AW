@@ -2,7 +2,8 @@
 
 `aw_jni` is the only thing the Minecraft mod links against. It exposes five
 static native methods, one thread's worth of work, and two payload formats: a
-binary blob for the graph and the plan, and JSON for the options.
+binary blob for the graph and the plan, and JSON for the options. It also
+carries a small item-name search index; see `search.md` for that endpoint.
 
 The Java counterpart lives in
 `src/main/java/io/aduhtkjm/appliedwheelchair/natives/`. The untracked

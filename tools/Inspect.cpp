@@ -114,21 +114,30 @@ bool parseHandleList(const std::string &text, aw::vector<aw::Handle> &out) {
 // ---------------------------------------------------------------------------
 // Name table
 // ---------------------------------------------------------------------------
-// RecipeReader.writeNameTable emits one line per node:
+// RecipeReader.writeNameTable emits one line per real resource:
 //
-//   <handle> \t <kind> \t <name>
+//   <handle> \t <resource location> \t <en_US> \t <zh_CN>
 //
-// where kind is "resource" (name is the item id) or "ingredient" (name is the
-// comma-separated member list of a pseudo-resource). Only resource names are
-// used for display; pseudo-resources print as #handle because their member
-// lists are too long to read in a listing.
+// The resource location and the English name both resolve a command-line
+// target; the English name is what gets printed. Pseudo-resources are absent
+// from the table because they have no resource location, and they have always
+// printed as #handle.
 struct NameTable {
   // Indexed by handle - 1. Empty when the image has no entry for it.
   aw::vector<std::string> names;
-  // Resource name -> handle. When a name is not unique the first handle wins.
+  // Alias -> handle. When an alias is not unique the first handle wins.
   std::unordered_map<std::string, aw::Handle> byName;
   std::unordered_set<std::string> ambiguous;
 };
+
+// Records an alias, marking it ambiguous when a second handle claims it.
+void addName(NameTable &out, const std::string &alias, aw::Handle handle) {
+  if (alias.empty())
+    return;
+  auto [it, inserted] = out.byName.emplace(alias, handle);
+  if (!inserted && it->second != handle)
+    out.ambiguous.insert(alias);
+}
 
 bool loadNames(const std::string &path, aw::Handle nReal, NameTable &out) {
   std::ifstream in(path);
@@ -142,30 +151,35 @@ bool loadNames(const std::string &path, aw::Handle nReal, NameTable &out) {
     if (line.empty() || line[0] == '#')
       continue;
 
-    const size_t first = line.find('\t');
-    if (first == std::string::npos)
-      continue;
-    const size_t second = line.find('\t', first + 1);
-    if (second == std::string::npos)
-      continue;
+    // Split on tabs. Only the first four columns are read, so a stray tab in a
+    // translation cannot shift the parse.
+    std::string column[4];
+    size_t start = 0;
+    for (int i = 0; i < 4; i++) {
+      const size_t tab = line.find('\t', start);
+      column[i] = line.substr(
+          start, tab == std::string::npos ? std::string::npos : tab - start);
+      if (tab == std::string::npos)
+        break;
+      start = tab + 1;
+    }
 
     aw::Handle handle = 0;
-    if (!parseHandle(line.substr(0, first), handle) || handle == 0)
+    if (!parseHandle(column[0], handle) || handle == 0)
       continue;
 
-    const std::string name = line.substr(second + 1);
-    if (name.empty())
-      continue;
+    const std::string &resource = column[1];
+    const std::string &name = column[2];
 
     if (out.names.size() < handle)
       out.names.resize(handle);
-    out.names[handle - 1] = name;
+    if (!name.empty())
+      out.names[handle - 1] = name;
 
     // Ingredients are pseudo-resources; only real resources are addressable.
     if (handle <= nReal) {
-      auto [it, inserted] = out.byName.emplace(name, handle);
-      if (!inserted && it->second != handle)
-        out.ambiguous.insert(name);
+      addName(out, resource, handle);
+      addName(out, name, handle);
     }
   }
   return true;

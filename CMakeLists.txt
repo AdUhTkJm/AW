@@ -98,6 +98,18 @@ if(AW_STRICT_FLAGS)
       PROPERTIES COMPILE_OPTIONS "${AW_STRICT_FLAGS}")
 endif()
 
+# The item search index. It is deliberately independent of OR-Tools and of
+# aw_crafting, so it builds and tests on its own; the JNI shim
+# (src/search/SearchJni.cpp) needs the JVM headers and is therefore compiled
+# straight into aw_jni below.
+add_library(aw_search STATIC src/search/TextIndex.cpp)
+target_include_directories(aw_search PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_compile_features(aw_search PUBLIC cxx_std_20)
+if(AW_STRICT_FLAGS)
+   set_source_files_properties(src/search/TextIndex.cpp
+      PROPERTIES COMPILE_OPTIONS "${AW_STRICT_FLAGS}")
+endif()
+
 if(AW_BUILD_TOOLS)
    add_executable(awr_inspect tools/Inspect.cpp)
    target_link_libraries(awr_inspect PRIVATE aw_crafting)
@@ -152,14 +164,21 @@ if(AW_BUILD_TESTS)
    target_compile_features(aw_podvector_tests PRIVATE cxx_std_20)
    target_compile_options(aw_podvector_tests PRIVATE ${AW_STRICT_FLAGS})
    add_test(NAME pod_vector COMMAND aw_podvector_tests)
+
+   # The search corpus loader: transfer layout, ASCII folding and rejection of
+   # malformed offsets. Links only aw_search, so it builds without OR-Tools.
+   add_executable(aw_search_tests tests/TestSearch.cpp)
+   target_link_libraries(aw_search_tests PRIVATE aw_search)
+   target_compile_options(aw_search_tests PRIVATE ${AW_STRICT_FLAGS})
+   add_test(NAME search_index COMMAND aw_search_tests)
 endif()
 
 if(AW_BUILD_JNI)
    # JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 if CMake cannot guess it.
    find_package(JNI)
    if(JNI_FOUND)
-      add_library(aw_jni SHARED src/JNIBridge.cpp)
-      target_link_libraries(aw_jni PRIVATE aw_crafting)
+      add_library(aw_jni SHARED src/JNIBridge.cpp src/search/SearchJni.cpp)
+      target_link_libraries(aw_jni PRIVATE aw_crafting aw_search)
       target_include_directories(aw_jni PRIVATE ${JNI_INCLUDE_DIRS})
 
       # A Minecraft mod ships one file. The Windows OR-Tools release is built

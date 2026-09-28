@@ -11,8 +11,18 @@
 //     public static native byte[] plan(byte[] request);
 //   }
 //
+// A second class, SearchKernel, carries the search index entry point. Its
+// natives are bound by src/search/SearchJni.cpp and registered from here, so
+// the library still has exactly one JNI_OnLoad:
+//
+//   public final class SearchKernel {
+//     public static native void registerSearch(ByteBuffer[] chunks, int[] offsets,
+//                                              int fieldsPerHandle);
+//   }
+//
 // The methods are bound in JNI_OnLoad, so no symbol name depends on the
-// package: only AW_JNI_CLASS_NAME does, and it is a compile-time knob.
+// package: only the two AW_JNI_*_CLASS_NAME macros do, and they are
+// compile-time knobs.
 //
 // Concurrency contract: the mod owns exactly one worker thread and never calls
 // two of these at once. Nothing here takes a lock; the status flag is the
@@ -34,9 +44,14 @@
 #include "aw/CraftingGraph.h"
 #include "aw/OptionsJson.h"
 #include "aw/Protocol.h"
+#include "search/SearchJni.h"
 
 #ifndef AW_JNI_CLASS_NAME
 #define AW_JNI_CLASS_NAME "io/aduhtkjm/appliedwheelchair/natives/CraftingGraphKernel"
+#endif
+
+#ifndef AW_JNI_SEARCH_CLASS_NAME
+#define AW_JNI_SEARCH_CLASS_NAME "io/aduhtkjm/appliedwheelchair/natives/SearchKernel"
 #endif
 
 namespace {
@@ -178,9 +193,18 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void*) {
   if (!type) {
     return JNI_ERR;
   }
-
   const jint count = (jint) (sizeof(jniMethods) / sizeof(JNINativeMethod));
   const jint result = env->RegisterNatives(type, jniMethods, count);
   env->DeleteLocalRef(type);
-  return result == JNI_OK ? JNI_VERSION_1_8 : JNI_ERR;
+  if (result != JNI_OK) {
+    return JNI_ERR;
+  }
+
+  jclass searchType = env->FindClass(AW_JNI_SEARCH_CLASS_NAME);
+  if (!searchType) {
+    return JNI_ERR;
+  }
+  const bool searchOk = aw::search::registerNativeMethods(env, searchType);
+  env->DeleteLocalRef(searchType);
+  return searchOk ? JNI_VERSION_1_8 : JNI_ERR;
 }
