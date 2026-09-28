@@ -36,14 +36,64 @@
 #   * third_party/ortools/windows-x86_64, laid out by
 #     scripts/fetch-ortools.sh --platform windows.
 #
-# Usage: scripts/build-windows.sh [artifact-dir]
-#
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
-ARTIFACT_DIR="${1:-${ROOT}/build/windows}"
 ORTOOLS="${ROOT}/third_party/ortools/windows-x86_64"
 VSWHERE="/mnt/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+
+# The platform directory name the mod uses under its natives root. This script
+# only ever builds Windows x86-64 with MSVC.
+NATIVES_PLATFORM="windows-x86_64"
+
+MOD_ROOT="${AW_MOD_DIR:-/mnt/d/IdeaProjects/AppliedWheelchair}"
+ARTIFACT_ARG=""
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/build-windows.sh [artifact-dir] [--mod-dir DIR]
+
+  artifact-dir   where to copy aw_jni.dll and the OR-Tools runtime it links
+                 against (default: <aw>/build/windows)
+  --mod-dir DIR  the AppliedWheelchair checkout to stage a development bundle
+                 into (default: $AW_MOD_DIR, else /mnt/d/IdeaProjects/
+                 AppliedWheelchair; a Windows path is accepted too)
+
+Staging writes the layout the mod bundles, natives/<platform>/ plus an index.txt
+naming every file, into <mod>/build/natives. The mod reads that directory as a
+resource root when -PawNativeDir is not set, so `gradlew runClient` finds the
+planner as soon as this script has run. A missing checkout is a note, not a
+failure.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --mod-dir)
+      shift
+      if [ $# -eq 0 ]; then
+        echo "--mod-dir needs a directory" >&2
+        exit 1
+      fi
+      MOD_ROOT="$1"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      ARTIFACT_ARG="$1"
+      ;;
+  esac
+  shift
+done
+
+ARTIFACT_DIR="${ARTIFACT_ARG:-${ROOT}/build/windows}"
 
 # cmd.exe inherits this shell's working directory, which lives on
 # \\wsl.localhost\... and is therefore unusable as a Windows process directory.
@@ -60,6 +110,15 @@ win_exists() {
   local unix_path
   unix_path="$(wslpath -u "$1" 2>/dev/null)" || return 1
   [ -f "${unix_path}" ]
+}
+
+# A caller-supplied directory may be written the Windows way, which is the
+# natural spelling for a checkout that lives on D:.
+to_unix_path() {
+  case "$1" in
+    [A-Za-z]:[\\/]* | \\\\*) wslpath -u "$1" ;;
+    *)                        printf '%s' "$1" ;;
+  esac
 }
 
 if [ ! -x "$(command -v cmd.exe 2>/dev/null || true)" ]; then
@@ -144,6 +203,10 @@ esac
 
 mkdir -p "${ARTIFACT_DIR}"
 
+# Whatever the build tree is, the DLLs are always collected from it: aw_jni.dll
+# plus the OR-Tools runtime it has to ship beside.
+BUILD_TREE="$(wslpath -u "${BUILD_TREE_WIN}")"
+
 # wslpath gives the \\wsl.localhost\... paths Windows tools need.
 WIN_ROOT="$(wslpath -w "${ROOT}")"
 WIN_ORTOOLS="$(wslpath -w "${ORTOOLS}")"
@@ -166,20 +229,65 @@ echo "CMake         : ${CMAKE_EXE}"
 echo "OR-Tools      : ${ORTOOLS}"
 echo "Build tree    : ${BUILD_TREE_WIN}"
 echo "Artifacts     : ${ARTIFACT_DIR}"
+echo "Dev bundle    : ${MOD_ROOT}/build/natives/natives/${NATIVES_PLATFORM}"
 echo
 win_cmd "$(wslpath -w "${BAT}")"
 
+shopt -s nullglob
+DLLS=( "${BUILD_TREE}"/*.dll )
+shopt -u nullglob
+
+if [ ${#DLLS[@]} -eq 0 ]; then
+  echo
+  echo "the build produced no DLLs; check the output above" >&2
+  exit 1
+fi
+
 if [ "${COPY_BACK}" = yes ]; then
-  WSL_BUILD_TREE="$(wslpath -u "${BUILD_TREE_WIN}")"
-  shopt -s nullglob
-  DLLS=( "${WSL_BUILD_TREE}"/*.dll )
-  shopt -u nullglob
-  if [ ${#DLLS[@]} -gt 0 ]; then
-    # aw_jni.dll plus the OR-Tools runtime the mod has to ship beside it.
-    cp -f "${DLLS[@]}" "${ARTIFACT_DIR}/"
-  fi
+  cp -f "${DLLS[@]}" "${ARTIFACT_DIR}/"
 fi
 
 echo
 echo "artifacts in ${ARTIFACT_DIR}:"
 ls -1 "${ARTIFACT_DIR}"/*.dll 2>/dev/null || echo "  (no dll produced)"
+
+# A development bundle for the mod, in the layout it bundles: natives/<platform>
+# with an index.txt naming the files, because a jar directory cannot be listed
+# at runtime and the loader has to be told what to unpack. The mod adds
+# build/natives as a resource root only when -PawNativeDir is not set, so a
+# plain `gradlew runClient` finds these and the two ways of supplying natives
+# cannot disagree about which ones a build ships.
+stage_dev_bundle() {
+  local mod_root target
+  mod_root="$(to_unix_path "${MOD_ROOT}")"
+  target="${mod_root}/build/natives/natives/${NATIVES_PLATFORM}"
+
+  if [ ! -d "${mod_root}" ]; then
+    echo
+    echo "no mod checkout at ${mod_root}, so the development bundle was skipped"
+    echo "(pass --mod-dir <checkout> or set AW_MOD_DIR to stage it)"
+    return
+  fi
+
+  mkdir -p "${target}"
+  # Clear what an earlier build left, including the other platforms' suffixes, so
+  # a renamed or dropped DLL cannot linger in the bundle.
+  rm -f "${target}"/*.dll "${target}"/*.so "${target}"/*.so.* \
+        "${target}"/*.dylib "${target}"/index.txt
+  cp -f "${DLLS[@]}" "${target}/"
+
+  # The basenames, sorted, one per line: the same index the mod's own
+  # stageNatives task writes, so both bundles describe themselves alike.
+  local names=() dll
+  for dll in "${DLLS[@]}"; do
+    names+=( "$(basename -- "${dll}")" )
+  done
+  printf '%s\n' "${names[@]}" | LC_ALL=C sort > "${target}/index.txt"
+
+  echo
+  echo "development bundle for ${mod_root}:"
+  echo "  ${target}"
+  echo "  $(wc -l < "${target}/index.txt") entry index, $(du -sh "${target}" | cut -f1) on disk"
+}
+
+stage_dev_bundle

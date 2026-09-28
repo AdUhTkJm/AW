@@ -230,15 +230,16 @@ before returning.
 that alone is not enough. Measured on JDK 21, `System.load` of an absolute path
 does not put the DLL's own directory on the dependency search path: a
 co-located `ortools.dll` fails with "Can't find dependent libraries" (Windows
-error 126) unless the directory is also on `PATH` or the dependencies were
-loaded first. `LoadLibraryExW(..., LOAD_WITH_ALTERED_SEARCH_PATH)` resolves the
+error 126). `LoadLibraryExW(..., LOAD_WITH_ALTERED_SEARCH_PATH)` resolves the
 same file and its co-located dependencies, so the limitation is on the JVM's
-side of the call, not in the DLL. `scripts/build-windows.sh` copies the runtime
-DLLs next to the shim either way, so the directory only has to be handed to the
+side of the call, not in the DLL. `NativeLoader` therefore retries: it loads the
+sibling libraries first, in dependency order, and then loads `aw_jni`, which
+leaves `JNI_OnLoad` to the JVM. `scripts/build-windows.sh` copies the runtime
+DLLs next to the shim either way, so only the directory has to be handed to the
 JVM.
 
-On Linux the equivalent is `DT_RUNPATH`, which for a build tree points at the
-OR-Tools library directory by absolute path, so a development run works as-is. A
-*bundled* Linux library has no such path baked in and needs the extracted
-directory on `LD_LIBRARY_PATH`. Windows is the shipping target; the Linux
-bundled path is a convenience, not a supported install.
+On Linux a build tree needs none of that: `DT_RUNPATH` points at the OR-Tools
+library directory by absolute path, so the direct load succeeds. A *bundled*
+Linux library has no such path baked in, and the same sibling preload covers it,
+so it does not need `LD_LIBRARY_PATH` either. Windows is the shipping target;
+the Linux bundled path is a convenience, not a supported install.
