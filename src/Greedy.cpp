@@ -17,6 +17,7 @@
 // The caller uses the result as the whole answer in flash mode, or as the
 // CP-SAT objective cap plus solution hint in the other modes.
 
+#include "aw/Int128.h"
 #include "aw/Plan.h"
 
 #include <cstdint>
@@ -213,8 +214,8 @@ aw::vector<int64_t> greedyDagPlan(const Subgraph &sub, NodeId target, Amount amo
       const auto inputs = g.r2i.targetsOf(best);
       const auto weights = g.r2i.weightsOf(best);
       for (size_t k = 0; k < inputs.size(); k++) {
-        const __int128 next = (__int128) need[inputs[k]] + (__int128) weights[k] * times;
-        if (next > (__int128) INT64_MAX) {
+        const aw::int128 next = (aw::int128) need[inputs[k]] + (aw::int128) weights[k] * times;
+        if (next > (aw::int128) INT64_MAX) {
           failed = true;
           break;
         }
@@ -225,20 +226,20 @@ aw::vector<int64_t> greedyDagPlan(const Subgraph &sub, NodeId target, Amount amo
       continue;
 
     // ---- 4. Verify the exact balance the solver will be handed. ----
-    aw::vector<__int128> balance(nItem, 0);
+    aw::vector<aw::int128> balance(nItem, 0);
     for (uint32_t recipe = 0; recipe < nRecipe; recipe++) {
       const int64_t times = exec[recipe];
       if (times == 0)
         continue;
-      balance[g.output[recipe]] += (__int128) g.outputAmt[recipe] * times;
+      balance[g.output[recipe]] += (aw::int128) g.outputAmt[recipe] * times;
       const auto inputs = g.r2i.targetsOf(recipe);
       const auto weights = g.r2i.weightsOf(recipe);
       for (size_t k = 0; k < inputs.size(); k++)
-        balance[inputs[k]] -= (__int128) weights[k] * times;
+        balance[inputs[k]] -= (aw::int128) weights[k] * times;
     }
     bool valid = true;
     for (uint32_t item = 0; item < nItem && valid; item++) {
-      const __int128 required = item == target ? (__int128) amount : -(__int128) stockOf(item);
+      const aw::int128 required = item == target ? (aw::int128) amount : -(aw::int128) stockOf(item);
       if (balance[item] < required)
         valid = false;
     }

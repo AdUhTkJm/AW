@@ -16,7 +16,12 @@ option(AW_BUILD_TESTS "Build the unit tests" ON)
 option(AW_USE_SYSTEM_ORTOOLS "Use OR-Tools from the system/CMAKE_PREFIX_PATH instead of the vendored copy" OFF)
 
 if(MSVC)
-   add_compile_options(/W4 /Zi)
+   # /utf-8: the sources are UTF-8, including the Chinese section titles quoted
+   # in comments. Without it cl.exe reads them in the active code page (936 on
+   # this machine), warns C4819 for every header that has one, and would
+   # re-encode the escaped literals in tests/Test.cpp, so the Windows build
+   # would disagree with the Linux one byte for byte.
+   add_compile_options(/W4 /Zi /utf-8)
 else()
    add_compile_options(-Wall -g)
 endif()
@@ -150,15 +155,12 @@ if(AW_BUILD_TOOLS)
    # and sweeps every ablation stage and query against that registration, then
    # writes JSONL. See bench/README.md.
    #
-   # GCC/Clang only: the derived missing set accumulates balances in __int128,
-   # which MSVC does not have. The benchmark runs on Linux/WSL, and the Windows
-   # path (scripts/build-windows.sh) only needs the DLL, so the tool is skipped
-   # there rather than carrying a second arithmetic path for it.
-   if(NOT MSVC)
-      add_executable(aw_bench tools/Bench.cpp)
-      target_link_libraries(aw_bench PRIVATE aw_crafting)
-      target_compile_options(aw_bench PRIVATE ${AW_STRICT_FLAGS})
-   endif()
+   # The derived missing set accumulates balances in aw::int128, which is a
+   # native type on GCC/Clang and a small wrapper on MSVC, so unlike when the
+   # sources spelled __int128 directly the tool builds on both.
+   add_executable(aw_bench tools/Bench.cpp)
+   target_link_libraries(aw_bench PRIVATE aw_crafting)
+   target_compile_options(aw_bench PRIVATE ${AW_STRICT_FLAGS})
 
    # Development-only CPU profiling (gperftools). It is linked in whenever the
    # library is installed, but only into awr_inspect, and it only does anything

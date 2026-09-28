@@ -29,6 +29,7 @@
 #include <chrono>
 
 #include "aw/CraftingGraph.h"
+#include "aw/Int128.h"
 #include "aw/Options.h"
 
 namespace aw {
@@ -40,8 +41,19 @@ using uint = uint32_t;
 // producers and to branch, so a clamp keeps a pathological R2' cycle from
 // running away while staying a valid lower bound.
 
+// GCC and Clang have the overflow builtins and define __has_builtin; MSVC has
+// neither. The test has to be nested rather than written as one expression
+// (`defined(__has_builtin) && __has_builtin(...)`), because MSVC tokenizes the
+// whole directive: __has_builtin becomes 0 and the right hand side is left as
+// `0(__builtin_add_overflow)`, which it reports as C4067.
+#if defined(__has_builtin)
+#  if __has_builtin(__builtin_add_overflow) && __has_builtin(__builtin_mul_overflow)
+#    define AW_HAVE_OVERFLOW_BUILTINS 1
+#  endif
+#endif
+
 bool addOverflow(int64_t a, int64_t b, int64_t &out) noexcept {
-#if __has_builtin(__builtin_add_overflow)
+#ifdef AW_HAVE_OVERFLOW_BUILTINS
   return __builtin_add_overflow(a, b, &out);
 #else
   if (b > 0 ? a > INT64_MAX - b : a < INT64_MIN - b)
@@ -52,7 +64,7 @@ bool addOverflow(int64_t a, int64_t b, int64_t &out) noexcept {
 }
 
 bool mulOverflow(int64_t a, int64_t b, int64_t &out) noexcept {
-#if __has_builtin(__builtin_mul_overflow)
+#ifdef AW_HAVE_OVERFLOW_BUILTINS
   return __builtin_mul_overflow(a, b, &out);
 #else
   if (a == 0 || b == 0) {
@@ -73,17 +85,14 @@ int64_t ceilDiv(int64_t n, int64_t d) noexcept {
 }
 
 // Compares n1 / d1 with n2 / d2 for non-negative numerators and positive
-// denominators. Exact when the cross products fit in int64_t, which they always
-// do for realistic recipe amounts.
+// denominators. Exact for every int64_t input: the cross products are formed in
+// 128 bits, where |a * b| <= 2^126 can never overflow. Comparing the ratios in
+// floating point instead would be wrong on MSVC, whose long double has the same
+// 53-bit mantissa as double and could not separate two neighbouring fractions.
 int compareRatio(int64_t n1, int64_t d1, int64_t n2, int64_t d2) noexcept {
-  int64_t left = 0, right = 0;
-  const bool overflow = mulOverflow(n1, d2, left) || mulOverflow(n2, d1, right);
-  [[likely]]
-  if (!overflow)
-    return left < right ? -1 : (left > right ? 1 : 0);
-  const long double a = (long double) n1 / (long double) d1;
-  const long double b = (long double) n2 / (long double) d2;
-  return a < b ? -1 : (a > b ? 1 : 0);
+  const aw::int128 left = (aw::int128) n1 * d2;
+  const aw::int128 right = (aw::int128) n2 * d1;
+  return left < right ? -1 : (left > right ? 1 : 0);
 }
 
 // num / den is the minimum over every producer of `item` of the amount of

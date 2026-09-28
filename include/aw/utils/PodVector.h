@@ -13,7 +13,18 @@
 #include <utility>
 #include <vector>
 
+#include "aw/Int128.h"
+
 namespace aw {
+
+// The element types PodVector is willing to hold: the integers, plus aw::int128.
+// The latter is a class on MSVC, which has no __int128, but it is still a
+// 16-byte trivially copyable word pair that is passed in registers, so it
+// belongs here rather than in the exception-throwing std::vector branch.
+template<typename T>
+inline constexpr bool isPodElement =
+    (std::is_integral_v<T> || std::is_same_v<T, aw::int128>) &&
+    std::is_trivially_copyable_v<T>;
 
 // Vector for integers.
 // Cannot hold more than 2^32 elements, but we never need that much.
@@ -21,7 +32,7 @@ namespace aw {
 // integers are small enough to pass in a single register.
 template<typename T>
 class PodVector {
-  static_assert(std::is_integral_v<T>,
+  static_assert(isPodElement<T>,
                 "PodVector requires a trivially copyable element type");
 
   using uint = uint32_t;
@@ -358,7 +369,7 @@ public:
 
 template<class T>
 using vector = std::conditional_t<
-  std::is_integral_v<T>,
+  isPodElement<T>,
   PodVector<T>,
   std::vector<T>
 >;

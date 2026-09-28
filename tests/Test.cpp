@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "aw/CraftingGraph.h"
+#include "aw/Int128.h"
 #include "aw/Options.h"
 #include "aw/OptionsJson.h"
 #include "aw/Plan.h"
@@ -3849,21 +3850,21 @@ bool greedyBalances(const aw::Subgraph &sub, aw::NodeId target, aw::Amount amoun
                     const aw::vector<aw::Amount> &inventory,
                     const aw::vector<int64_t> &exec) {
   const aw::BaseCraftingGraph &g = sub.graph;
-  aw::vector<__int128> balance(g.nItem, 0);
+  aw::vector<aw::int128> balance(g.nItem, 0);
   for (uint32_t r = 0; r < g.nRecipe; r++) {
-    const __int128 times = exec[r];
+    const aw::int128 times = exec[r];
     if (times == 0)
       continue;
-    balance[g.output[r]] += (__int128) g.outputAmt[r] * times;
+    balance[g.output[r]] += (aw::int128) g.outputAmt[r] * times;
     const auto inputs = g.r2i.targetsOf(r);
     const auto weights = g.r2i.weightsOf(r);
     for (size_t k = 0; k < inputs.size(); k++)
-      balance[inputs[k]] -= (__int128) weights[k] * times;
+      balance[inputs[k]] -= (aw::int128) weights[k] * times;
   }
   for (uint32_t i = 0; i < g.nItem; i++) {
     const aw::NodeId source = sub.itemOrigin[i];
     const aw::Amount available = source < inventory.size() ? inventory[source] : 0;
-    const __int128 required = i == target ? (__int128) amount : -(__int128) available;
+    const aw::int128 required = i == target ? (aw::int128) amount : -(aw::int128) available;
     if (balance[i] < required)
       return false;
   }

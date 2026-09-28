@@ -24,6 +24,7 @@
 // without re-running the queries. See bench/README.md.
 
 #include "aw/CraftingGraph.h"
+#include "aw/Int128.h"
 #include "aw/Options.h"
 #include "aw/Plan.h"
 #include "aw/Solver.h"
@@ -273,31 +274,31 @@ aw::vector<MissingItem> deriveMissing(const aw::Subgraph &sub, aw::NodeId target
                                        const aw::vector<aw::Amount> &inventory,
                                        const aw::vector<int64_t> &exec) {
   const aw::BaseCraftingGraph &g = sub.graph;
-  aw::vector<__int128> balance(g.nItem, 0);
+  aw::vector<aw::int128> balance(g.nItem, 0);
   for (uint32_t r = 0; r < g.nRecipe; r++) {
-    const __int128 times = exec[r];
+    const aw::int128 times = exec[r];
     if (times == 0) continue;
-    balance[g.output[r]] += (__int128) g.outputAmt[r] * times;
+    balance[g.output[r]] += (aw::int128) g.outputAmt[r] * times;
     const auto inputs = g.r2i.targetsOf(r);
     const auto weights = g.r2i.weightsOf(r);
     for (size_t k = 0; k < inputs.size(); k++)
-      balance[inputs[k]] -= (__int128) weights[k] * times;
+      balance[inputs[k]] -= (aw::int128) weights[k] * times;
   }
 
   aw::vector<MissingItem> missing;
   for (uint32_t i = 0; i < g.nItem; i++) {
-    __int128 required;
+    aw::int128 required;
     if (i == target) {
       required = amount;
     } else {
       const aw::NodeId source = sub.itemOrigin[i];
       const aw::Amount available = source < inventory.size() ? inventory[source] : 0;
-      required = -(__int128) available;
+      required = -(aw::int128) available;
     }
-    const __int128 shortfall = required - balance[i];
+    const aw::int128 shortfall = required - balance[i];
     if (shortfall <= 0) continue;
-    const __int128 capped =
-        shortfall > (__int128) INT64_MAX ? (__int128) INT64_MAX : shortfall;
+    const aw::int128 capped =
+        shortfall > (aw::int128) INT64_MAX ? (aw::int128) INT64_MAX : shortfall;
     missing.push_back({i, (aw::Amount) capped});
   }
   std::sort(missing.begin(), missing.end(),

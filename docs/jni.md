@@ -203,8 +203,13 @@ cmake --build build
 build/aw_tests
 ```
 
-The Windows DLL is a separate path, `scripts/build-windows.sh`, which stages the
-OR-Tools runtime DLLs next to `aw_jni.dll` in the build directory.
+The Windows DLL is a separate path, `scripts/build-windows.sh`. MSVC and Ninja
+cannot build inside the WSL filesystem: Ninja runs each command through cmd.exe
+with the build directory as its working directory, and cmd.exe cannot chdir to a
+UNC path, so the tree lives in `%LOCALAPPDATA%\Temp\aw-build-windows` and the
+script copies `aw_jni.dll` plus the OR-Tools runtime DLLs it stages beside it
+into `build/windows/` afterwards. That directory is a build cache: deleting
+`build/windows/` does not force a recompile, deleting the Windows tree does.
 
 `src/OptionsJson.cpp` is the only translation unit that is *not* compiled with
 `-fno-exceptions`: nlohmann uses them, and its entry points catch everything
@@ -221,11 +226,16 @@ before returning.
    `index.txt`, because a jar directory cannot be listed at runtime and the
    loader therefore has to be told what to unpack.
 
-`aw_jni` must sit **next to** the OR-Tools runtime in both cases. On Windows the
-JVM loads an absolute DLL path with `LOAD_WITH_ALTERED_SEARCH_PATH`, so a DLL's
-own directory is searched for its dependencies first; that is what makes a
-co-located OR-Tools work at all, and it is why `scripts/build-windows.sh` copies
-the runtime DLLs next to the shim.
+`aw_jni` must sit **next to** the OR-Tools runtime in both cases, but on Windows
+that alone is not enough. Measured on JDK 21, `System.load` of an absolute path
+does not put the DLL's own directory on the dependency search path: a
+co-located `ortools.dll` fails with "Can't find dependent libraries" (Windows
+error 126) unless the directory is also on `PATH` or the dependencies were
+loaded first. `LoadLibraryExW(..., LOAD_WITH_ALTERED_SEARCH_PATH)` resolves the
+same file and its co-located dependencies, so the limitation is on the JVM's
+side of the call, not in the DLL. `scripts/build-windows.sh` copies the runtime
+DLLs next to the shim either way, so the directory only has to be handed to the
+JVM.
 
 On Linux the equivalent is `DT_RUNPATH`, which for a build tree points at the
 OR-Tools library directory by absolute path, so a development run works as-is. A

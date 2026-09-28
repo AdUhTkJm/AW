@@ -144,6 +144,9 @@ void testAlias() {
   static_assert(std::is_same_v<aw::vector<int64_t>, aw::PodVector<int64_t>>);
   static_assert(std::is_same_v<aw::vector<uint64_t>, aw::PodVector<uint64_t>>);
   static_assert(std::is_same_v<aw::vector<bool>, aw::PodVector<bool>>);
+  // aw::int128 is not an integral type on MSVC, but the planner keeps balances
+  // in vectors of it, so it has to reach PodVector on every platform.
+  static_assert(std::is_same_v<aw::vector<aw::int128>, aw::PodVector<aw::int128>>);
 
   // Non-integral elements fall back to std::vector.
   static_assert(std::is_same_v<aw::vector<double>, std::vector<double>>);
@@ -152,6 +155,126 @@ void testAlias() {
   static_assert(std::is_same_v<aw::vector<aw::vector<int>>, std::vector<aw::PodVector<int>>>);
 
   expect(true, "alias selection");
+}
+
+// ---------------------------------------------------------------- aw::int128
+//
+// The planner accumulates products of two int64_t amounts, which overflow
+// int64_t but not 128 bits. aw::int128 is the native type on GCC/Clang and a
+// small wrapper over _umul128 on MSVC, so the wrapper has to reproduce the
+// native type exactly for every product of int64_t inputs.
+//
+// The oracle below sign-extends both operands to 128 bits and multiplies 32-bit
+// limbs by hand, sharing no code with the intrinsic path. On GCC/Clang it is
+// itself checked against the native type; on MSVC, where no native type exists
+// to compare with, the oracle is what the wrapper is measured against.
+
+struct Limbs {
+  uint64_t hi;
+  uint64_t lo;
+};
+
+// Low 128 bits of a * b, from a 4x4 schoolbook multiply over 32-bit limbs.
+// Each limb array is sign-extended, because a * b is a signed multiplication:
+// multiplying the 64-bit bit patterns alone would lose the sign of a negative
+// operand, e.g. INT64_MIN * -1 would come out as +2^63 instead of 2^63.
+Limbs mulReference(int64_t a, int64_t b) {
+  const uint32_t a0 = (uint32_t) a, a1 = (uint32_t) ((uint64_t) a >> 32);
+  const uint32_t b0 = (uint32_t) b, b1 = (uint32_t) ((uint64_t) b >> 32);
+  const uint32_t a2 = a < 0 ? 0xFFFFFFFFu : 0;
+  const uint32_t b2 = b < 0 ? 0xFFFFFFFFu : 0;
+  const uint32_t al[4] = {a0, a1, a2, a2};
+  const uint32_t bl[4] = {b0, b1, b2, b2};
+
+  uint32_t r[4] = {0, 0, 0, 0};
+  for (int i = 0; i < 4; i++) {
+    uint64_t carry = 0;
+    for (int j = 0; i + j < 4; j++) {
+      // One limb plus one 32x32 product plus one carry still fits in 64 bits.
+      const uint64_t cur = r[i + j] + (uint64_t) al[i] * bl[j] + carry;
+      r[i + j] = (uint32_t) cur;
+      carry = cur >> 32;
+    }
+  }
+
+  Limbs out;
+  out.lo = ((uint64_t) r[1] << 32) | r[0];
+  out.hi = ((uint64_t) r[3] << 32) | r[2];
+  return out;
+}
+
+// Rebuilds the value the limbs describe using only aw::int128's public
+// operations, so the comparison below can be an ordinary ==.
+aw::int128 compose(const Limbs &limbs) {
+  const aw::int128 pow64 = (aw::int128) (int64_t) (1ull << 32) * (int64_t) (1ull << 32);
+  // Adding the low limb as int64_t subtracts 2^64 when its top bit is set, so
+  // the high limb is bumped by one to compensate.
+  const int64_t hi = (int64_t) limbs.hi + (int64_t) (limbs.lo >> 63);
+  return (aw::int128) hi * pow64 + (aw::int128) (int64_t) limbs.lo;
+}
+
+constexpr int64_t kInt128Values[] = {
+  INT64_MIN, INT64_MIN + 1, -4294967296ll, -4294967295ll, -1, 0,
+  1, 4294967295ll, 4294967296ll, 0x0123456789ABCDEFll, INT64_MAX - 1, INT64_MAX,
+};
+
+void expectProduct(int64_t a, int64_t b) {
+  const Limbs ref = mulReference(a, b);
+  const aw::int128 product = (aw::int128) a * b;
+  expect((int64_t) product == (int64_t) ref.lo, "product low limb matches the reference");
+  expect(product == compose(ref), "product matches the reference limbs");
+}
+
+void testInt128() {
+  std::cout << "[PodVector] aw::int128\n";
+
+  // Everything below composes expected values through 2^64, so that has to hold
+  // first: lo == 0 and a high limb of 1.
+  const aw::int128 pow64 = (aw::int128) (int64_t) (1ull << 32) * (int64_t) (1ull << 32);
+  expect((int64_t) pow64 == 0, "2^64 truncates to 0");
+  expect(pow64 > (aw::int128) INT64_MAX, "2^64 is greater than INT64_MAX");
+
+  for (int64_t a : kInt128Values)
+    for (int64_t b : kInt128Values)
+      expectProduct(a, b);
+
+#if defined(__SIZEOF_INT128__)
+  // The reference must agree with the native type, which is what makes it a
+  // usable oracle on the platforms that have no native type.
+  for (int64_t a : kInt128Values)
+    for (int64_t b : kInt128Values) {
+      const __int128 native = (__int128) a * b;
+      const Limbs ref = mulReference(a, b);
+      expect((uint64_t) native == ref.lo && (uint64_t) (native >> 64) == ref.hi,
+             "reference limbs match the native 128-bit product");
+    }
+#endif
+
+  // The shapes the planner uses: products, accumulation, negation, ordering
+  // and the truncating conversion back to int64_t.
+  aw::int128 sum = 0;
+  sum += (aw::int128) INT64_MAX * 3;
+  sum -= (aw::int128) INT64_MAX;
+  expect(sum > (aw::int128) INT64_MAX, "accumulated balance exceeds INT64_MAX");
+  expect(sum == (aw::int128) INT64_MAX + (aw::int128) INT64_MAX, "+= and -= accumulate exactly");
+  expect(-(aw::int128) INT64_MIN > (aw::int128) INT64_MAX, "-INT64_MIN is positive");
+  expect((int64_t) ((aw::int128) (1ll << 40) * (1ll << 40)) == 0,
+         "a product truncates to its low limb");
+  expect(-(aw::int128) 5 < (aw::int128) 0 && (aw::int128) 0 < (aw::int128) 5, "negative orders below zero");
+  expect((aw::int128) INT64_MAX < (aw::int128) INT64_MAX + (aw::int128) 1,
+         "INT64_MAX + 1 is larger than INT64_MAX");
+  expect((aw::int128) INT64_MIN - (aw::int128) 1 < (aw::int128) INT64_MIN,
+         "INT64_MIN - 1 is smaller than INT64_MIN");
+
+  // The balance vector of the planner: (n, 0) then += / -= of products.
+  aw::vector<aw::int128> balance(3, 0);
+  balance[0] += (aw::int128) INT64_MAX * INT64_MAX;
+  balance[0] -= (aw::int128) INT64_MAX * (INT64_MAX - 1);
+  balance[2] -= (aw::int128) (1ll << 40) * (1ll << 40);
+  expect(balance[0] == (aw::int128) INT64_MAX, "vector accumulator holds an exact difference");
+  expect(balance[1] == (aw::int128) 0, "(n, 0) zeroes every element");
+  expect(balance[2] == compose(mulReference(-(1ll << 40), 1ll << 40)),
+         "a negative product survives the vector");
 }
 
 void testPushPop() {
@@ -757,6 +880,7 @@ void testLargeValues() {
 int main() {
   testConstruction();
   testAlias();
+  testInt128();
   testPushPop();
   testReserveResize();
   testAssign();

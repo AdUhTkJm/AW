@@ -1,3 +1,4 @@
+#include "aw/Int128.h"
 #include "aw/Plan.h"
 #include "aw/Solver.h"
 
@@ -156,11 +157,11 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
   aw::vector<int64_t> greedy = greedyDagPlan(sub, target, amount, invSrc);
   solver::Options solveOptions = options;
   bool greedyUsable = false;
-  __int128 greedyCost = 0;
+  aw::int128 greedyCost = 0;
   if (!greedy.empty()) {
     for (uint32_t r = 0; r < n; r++)
-      greedyCost += (__int128) objective[r] * greedy[r];
-    greedyUsable = greedyCost > 0 && greedyCost <= (__int128) INT64_MAX;
+      greedyCost += (aw::int128) objective[r] * greedy[r];
+    greedyUsable = greedyCost > 0 && greedyCost <= (aw::int128) INT64_MAX;
   }
   if (greedyUsable) {
     if (options.flash) {
@@ -169,7 +170,7 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
       result.exec = std::move(greedy);
       return result;
     }
-    if (greedyCost <= (__int128) trivialLowerBound(A, rhs) * GREEDY_QUALITY_FACTOR) {
+    if (greedyCost <= (aw::int128) trivialLowerBound(A, rhs) * GREEDY_QUALITY_FACTOR) {
       solveOptions.objectiveUpperBound = (int64_t) greedyCost;
       solveOptions.solutionHint = std::span<const int64_t>(greedy.data(), greedy.size());
     }

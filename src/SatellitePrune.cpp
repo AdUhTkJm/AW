@@ -55,6 +55,7 @@
 #include <ortools/linear_solver/linear_solver.h>
 
 #include "aw/CraftingGraph.h"
+#include "aw/Int128.h"
 #include "aw/Options.h"
 
 namespace aw {
@@ -419,15 +420,15 @@ bool certificateHolds(const CraftingGraph& graph, NodeId cutNode, const Componen
                       std::span<const int32_t> itemPos,
                       std::span<const int64_t> scaled, int64_t scale) noexcept {
   for (uint r : comp.recipes) {
-    __int128 sum = (__int128) scale * columnCoefficient(graph, r, cutNode);
+    aw::int128 sum = (aw::int128) scale * columnCoefficient(graph, r, cutNode);
     const int32_t outPos = itemPos[graph.output[r]];
     if (outPos >= 0)
-      sum += (__int128) scaled[outPos] * graph.outputAmt[r];
+      sum += (aw::int128) scaled[outPos] * graph.outputAmt[r];
     const auto inputs = graph.r2i.targetsOf(r);
     const auto weights = graph.r2i.weightsOf(r);
     for (size_t e = 0; e < inputs.size(); e++)
       if (itemPos[inputs[e]] >= 0)
-        sum -= (__int128) scaled[itemPos[inputs[e]]] * weights[e];
+        sum -= (aw::int128) scaled[itemPos[inputs[e]]] * weights[e];
     if (sum > 0)
       return false;
   }
