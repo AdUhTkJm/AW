@@ -17,7 +17,7 @@ if [ -f "$DUMPS/recipes.awr" ]; then
 fi
 
 # Run tests
-# build/aw_tests
+build/aw_tests
 
 # Run a performance test
 # build/awr_inspect temp/recipes-nast.awr --plan 'mekanism:purification_chamber' --profile temp/a.prof --time-limit 20 --workers 1

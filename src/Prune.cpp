@@ -57,6 +57,19 @@
 namespace aw {
 namespace {
 
+struct ColumnView {
+  const std::span<const NodeId> items;
+  const std::span<const Amount> coeffs;
+
+  ColumnView(const std::span<const NodeId> &items, const std::span<const Amount> &coeffs) noexcept:
+    items(items), coeffs(coeffs) {}
+
+  bool empty() const noexcept { return items.empty(); }
+  size_t size() const noexcept { return items.size(); }
+
+  Amount coeff(NodeId row) const noexcept;
+};
+
 using uint = uint32_t;
 
 // Both passes are on by default. The setters exist so the command line tool
@@ -1449,15 +1462,15 @@ void computeDirectDominancePruning(CraftingGraph &graph,
 
 // Adds `delta` to the coefficient of `row` of a sorted sparse column, writing
 // the result to `outItems`/`outCoeffs`.
-void addToColumn(std::span<const NodeId> items, std::span<const Amount> coeffs,
+void addToColumn(const ColumnView &col,
                  NodeId row, Amount delta, std::vector<NodeId> &outItems,
                  std::vector<Amount> &outCoeffs) noexcept {
   outItems.clear();
   outCoeffs.clear();
   size_t i = 0;
   bool inserted = false;
-  while (i < items.size()) {
-    if (!inserted && row < items[i]) {
+  while (i < col.items.size()) {
+    if (!inserted && row < col.items[i]) {
       if (delta != 0) {
         outItems.push_back(row);
         outCoeffs.push_back(delta);
@@ -1465,8 +1478,8 @@ void addToColumn(std::span<const NodeId> items, std::span<const Amount> coeffs,
       inserted = true;
       continue;
     }
-    if (items[i] == row) {
-      const Amount c = coeffs[i] + delta;
+    if (col.items[i] == row) {
+      const Amount c = col.coeffs[i] + delta;
       if (c != 0) {
         outItems.push_back(row);
         outCoeffs.push_back(c);
@@ -1475,8 +1488,8 @@ void addToColumn(std::span<const NodeId> items, std::span<const Amount> coeffs,
       i++;
       continue;
     }
-    outItems.push_back(items[i]);
-    outCoeffs.push_back(coeffs[i]);
+    outItems.push_back(col.items[i]);
+    outCoeffs.push_back(col.coeffs[i]);
     i++;
   }
   if (!inserted && delta != 0) {
@@ -1485,8 +1498,7 @@ void addToColumn(std::span<const NodeId> items, std::span<const Amount> coeffs,
   }
 }
 
-Amount coeffOf(std::span<const NodeId> items, std::span<const Amount> coeffs,
-               NodeId row) noexcept {
+Amount ColumnView::coeff(NodeId row) const noexcept {
   const auto it = std::lower_bound(items.begin(), items.end(), row);
   if (it == items.end() || *it != row)
     return 0;
@@ -1533,9 +1545,9 @@ struct CostContext {
   // plan can spend for free, so the per-unit bound is not enough. Requiring
   // every item on the chain to be unit-output removes the surplus.
   const std::vector<uint8_t> *unitOutput = nullptr;
-  bool requireUnit = false;
   std::unordered_map<uint64_t, uint8_t> *memo = nullptr;  // 1=in progress, 2=false, 3=true
   uint64_t work = 0;
+  bool requireUnit = false;
 };
 
 bool costsRec(CostContext &ctx, NodeId y, NodeId w, uint32_t depth) noexcept {
@@ -1613,10 +1625,7 @@ bool costsRec(CostContext &ctx, NodeId y, NodeId w, uint32_t depth) noexcept {
 // receives the inputs that were moved. The first row where `cur` exceeds `s` is
 // covered by moving `min(q_Y, deficit)` units from an input Y with
 // `costsRec(Y, d)`, then the next deficit is handled the same way.
-bool substitutionDominates(CostContext &ctx, std::span<const NodeId> curItems,
-                           std::span<const Amount> curCoeffs,
-                           std::span<const NodeId> sItems,
-                           std::span<const Amount> sCoeffs, uint32_t depth,
+bool substitutionDominates(CostContext &ctx, const ColumnView &cur, const ColumnView &s, uint32_t depth,
                            uint64_t &work, std::vector<NodeId> &collapses) noexcept {
   if (work == 0)
     return false;
@@ -1625,15 +1634,15 @@ bool substitutionDominates(CostContext &ctx, std::span<const NodeId> curItems,
   // The first row where `cur` exceeds `s`.
   NodeId d = UINT32_MAX;
   size_t i = 0, j = 0;
-  while (i < curItems.size() || j < sItems.size()) {
+  while (i < cur.items.size() || j < s.items.size()) {
     NodeId next = UINT32_MAX;
-    if (i < curItems.size())
-      next = std::min(next, curItems[i]);
-    if (j < sItems.size())
-      next = std::min(next, sItems[j]);
+    if (i < cur.items.size())
+      next = std::min(next, cur.items[i]);
+    if (j < s.items.size())
+      next = std::min(next, s.items[j]);
     const Amount cu =
-        (i < curItems.size() && curItems[i] == next) ? curCoeffs[i++] : 0;
-    const Amount sv = (j < sItems.size() && sItems[j] == next) ? sCoeffs[j++] : 0;
+        (i < cur.items.size() && cur.items[i] == next) ? cur.coeffs[i++] : 0;
+    const Amount sv = (j < s.items.size() && s.items[j] == next) ? s.coeffs[j++] : 0;
     if (cu > sv) {
       d = next;
       break;
@@ -1646,37 +1655,38 @@ bool substitutionDominates(CostContext &ctx, std::span<const NodeId> curItems,
     return false;
   // A produced row cannot be fixed by paying with a dominator, and a dominator
   // is always a real item, so a deficit on a pseudo-item row is out of reach.
-  if (coeffOf(curItems, curCoeffs, d) > 0 || d >= ctx.graph->nReal)
+  int cd = cur.coeff(d);
+  if (cd > 0 || d >= ctx.graph->nReal)
     return false;
 
-  const Amount deficit = coeffOf(curItems, curCoeffs, d) - coeffOf(sItems, sCoeffs, d);
+  const Amount deficit = cd - s.coeff(d);
   if (deficit <= 0)
     return false;
 
   std::vector<NodeId> tmpItems, nextItems;
   std::vector<Amount> tmpCoeffs, nextCoeffs;
 
-  for (size_t k = 0; k < curItems.size(); k++) {
-    const NodeId y = curItems[k];
-    const Amount coeff = curCoeffs[k];
+  for (size_t k = 0; k < cur.size(); k++) {
+    const NodeId y = cur.items[k];
+    const Amount coeff = cur.coeffs[k];
     if (coeff >= 0 || y == d)
       continue;
     if (!costsRec(ctx, y, d, MAX_COST_DEPTH))
       continue;
     Amount t = std::min(-coeff, deficit);
     // Moving t units of y onto d must not push y's own row into deficit.
-    const Amount room = coeffOf(sItems, sCoeffs, y) - coeff;
+    const Amount room = s.coeff(y) - coeff;
     if (t > room)
       t = room;
     if (t <= 0)
       continue;
 
-    addToColumn(curItems, curCoeffs, y, t, tmpItems, tmpCoeffs);
-    addToColumn(tmpItems, tmpCoeffs, d, -t, nextItems, nextCoeffs);
+    addToColumn(cur, y, t, tmpItems, tmpCoeffs);
+    addToColumn(ColumnView(tmpItems, tmpCoeffs), d, -t, nextItems, nextCoeffs);
 
     const size_t before = collapses.size();
     collapses.push_back(y);
-    if (substitutionDominates(ctx, nextItems, nextCoeffs, sItems, sCoeffs,
+    if (substitutionDominates(ctx, ColumnView(nextItems, nextCoeffs), s,
                               depth - 1, work, collapses))
       return true;
     collapses.resize(before);
@@ -1819,9 +1829,9 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
           continue;
         const uint S = recs[j];
         collapses.clear();
-        if (!substitutionDominates(ctx, uItems, uCoeffs, vec.itemsOf(S),
-                                   vec.coeffsOf(S), MAX_SUBSTITUTION_DEPTH, work,
-                                   collapses))
+        if (!substitutionDominates(ctx, ColumnView(uItems, uCoeffs),
+                                   ColumnView(vec.itemsOf(S), vec.coeffsOf(S)),
+                                   MAX_SUBSTITUTION_DEPTH, work, collapses))
           continue;
         // Resolve the guards; a collapsed tag too wide to list makes the edge
         // unusable, so it is dropped along with the rest of this attempt.

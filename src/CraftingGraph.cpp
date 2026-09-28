@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
 
 namespace aw {
 CraftingGraph graph;

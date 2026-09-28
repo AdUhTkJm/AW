@@ -1,11 +1,8 @@
 #ifndef CRAFTING_GRAPH_H
 #define CRAFTING_GRAPH_H
-#include <cstddef>
-#include <cstdint>
-#include <memory>
+
 #include <span>
-#include <stdexcept>
-#include <vector>
+#include "aw/utils/PodVector.h"
 
 namespace aw {
 
