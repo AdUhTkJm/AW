@@ -441,21 +441,21 @@ aw::vector<PairKey> mergeNewPairs(aw::vector<PairKey> &dst,
   size_t i = 0, j = 0;
   while (i < dst.size() && j < cand.size()) {
     if (dst[i] < cand[j]) {
-      merged.push_back(dst[i++]);
+      merged.push_back_unchecked(dst[i++]);
     } else if (cand[j] < dst[i]) {
       added.push_back(cand[j]);
-      merged.push_back(cand[j++]);
+      merged.push_back_unchecked(cand[j++]);
     } else {
-      merged.push_back(dst[i]);
+      merged.push_back_unchecked(dst[i]);
       i++;
       j++;
     }
   }
   while (i < dst.size())
-    merged.push_back(dst[i++]);
+    merged.push_back_unchecked(dst[i++]);
   while (j < cand.size()) {
     added.push_back(cand[j]);
-    merged.push_back(cand[j++]);
+    merged.push_back_unchecked(cand[j++]);
   }
   dst.swap(merged);
   return added;
@@ -491,7 +491,7 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
         simple = false;
         break;
       }
-      ms.push_back(inputs[0]);
+      ms.push_back_unchecked(inputs[0]);
     }
     if (!simple)
       continue;
@@ -519,7 +519,7 @@ void computeTagPruning(CraftingGraph &graph) noexcept {
     order.reserve(nItem);
     for (NodeId t = nReal; t < nItem; t++)
       if (simpleTag[t])
-        order.push_back(t);
+        order.push_back_unchecked(t);
     std::sort(order.begin(), order.end(), [&members](uint32_t a, uint32_t b) noexcept {
       if (members[a].size() != members[b].size())
         return members[a].size() < members[b].size();
@@ -1752,7 +1752,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
         simple = false;
         break;
       }
-      ms.push_back(inputs[0]);
+      ms.push_back_unchecked(inputs[0]);
     }
     if (!simple)
       continue;

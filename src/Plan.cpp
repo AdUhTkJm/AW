@@ -49,7 +49,7 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
   A.rows = m;
   A.cols = n;
   A.colStart.reserve((size_t) n + 1);
-  A.colStart.push_back(0);
+  A.colStart.push_back_unchecked(0);
   aw::vector<ColumnEntry> column;
   // Note that our matrix is column-major, so we're processing column-by-column here.
   for (uint32_t r = 0; r < n; r++) {
@@ -87,7 +87,7 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
       A.rowIndex.push_back(column[k].row);
       A.value.push_back(column[k].value);
     }
-    A.colStart.push_back((uint32_t) A.rowIndex.size());
+    A.colStart.push_back_unchecked((uint32_t) A.rowIndex.size());
   }
 
   // Push b[i].

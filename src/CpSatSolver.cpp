@@ -230,7 +230,7 @@ Matrix selectColumns(const Matrix &A, std::span<const int64_t> c,
   out.rows = A.rows;
   out.cols = (uint32_t) keep.size();
   out.colStart.reserve(keep.size() + 1);
-  out.colStart.push_back(0);
+  out.colStart.push_back_unchecked(0);
   outC.clear();
   outC.reserve(keep.size());
   for (uint32_t r : keep) {
@@ -238,8 +238,8 @@ Matrix selectColumns(const Matrix &A, std::span<const int64_t> c,
       out.rowIndex.push_back(A.rowIndex[k]);
       out.value.push_back(A.value[k]);
     }
-    out.colStart.push_back((uint32_t) out.rowIndex.size());
-    outC.push_back(c[r]);
+    out.colStart.push_back_unchecked((uint32_t) out.rowIndex.size());
+    outC.push_back_unchecked(c[r]);
   }
   return out;
 }
@@ -621,8 +621,8 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
             }
             if (bound < natural)
               tightened = true;
-            keep.push_back(r);
-            keepUpper.push_back(bound);
+            keep.push_back_unchecked(r);
+            keepUpper.push_back_unchecked(bound);
           }
           if (fixed > 0 || tightened) {
             aw::vector<int64_t> reducedC;

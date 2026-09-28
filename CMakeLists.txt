@@ -121,6 +121,14 @@ if(AW_BUILD_TESTS)
    target_link_libraries(aw_tests PRIVATE aw_crafting)
    target_compile_options(aw_tests PRIVATE ${AW_STRICT_FLAGS})
    add_test(NAME crafting_graph COMMAND aw_tests)
+
+   # Container conformance suite for aw::PodVector. Header-only, so it needs no
+   # link to aw_crafting, but it is built with the same strict flags.
+   add_executable(aw_podvector_tests tests/TestPodVector.cpp)
+   target_include_directories(aw_podvector_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+   target_compile_features(aw_podvector_tests PRIVATE cxx_std_20)
+   target_compile_options(aw_podvector_tests PRIVATE ${AW_STRICT_FLAGS})
+   add_test(NAME pod_vector COMMAND aw_podvector_tests)
 endif()
 
 if(AW_BUILD_JNI)

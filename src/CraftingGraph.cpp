@@ -275,7 +275,7 @@ void canonicalizeRecipes() noexcept {
     for (uint e = wsOffsets[j]; e < wsOffsets[j + 1]; e++) {
       if (e > wsOffsets[j] && wsTargets[e] == wsTargets[e - 1])
         continue;
-      newWsTargets.push_back(wsTargets[e]);
+      newWsTargets.push_back_unchecked(wsTargets[e]);
     }
     newWsOffsets[j + 1] = newWsTargets.size();
   }
@@ -450,8 +450,8 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
     for (size_t k = 0; k < recipes[consumer].inputs.size(); k++) {
       if (recipes[consumer].inputs[k] == t)
         continue;
-      newInputs.push_back(recipes[consumer].inputs[k]);
-      newAmounts.push_back(recipes[consumer].amounts[k]);
+      newInputs.push_back_unchecked(recipes[consumer].inputs[k]);
+      newAmounts.push_back_unchecked(recipes[consumer].amounts[k]);
     }
 
     // Drop the consumer and every member edge of the tag, then add a copy of

@@ -504,7 +504,10 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         break;
       }
     }
-    auto kept = aw::vector<uint8_t>(graph.nItem), keptEither = aw::vector<uint8_t>::zeroes(graph.nItem);
+    // Both flags are read for every real item, so they must start zeroed:
+    // PodVector does not value-initialize, unlike the std::vector this replaced.
+    auto kept = aw::vector<uint8_t>::zeroes(graph.nItem);
+    auto keptEither = aw::vector<uint8_t>::zeroes(graph.nItem);
     for (size_t r = 0; r < graph.nRecipe; ++r) {
       if (graph.output[r] >= graph.nReal)
         continue;
@@ -1137,7 +1140,7 @@ int main(int argc, char** argv) {
     aw::vector<aw::Handle> all;
     all.reserve(graph.nReal);
     for (aw::Handle h = 1; h <= graph.nReal; ++h)
-      all.push_back(h);
+      all.push_back_unchecked(h);
 
     const aw::Subgraph sub = aw::reachableSubgraph(target, all);
     if (sub.graph.nItem == 0) {
@@ -1184,7 +1187,7 @@ int main(int argc, char** argv) {
     if (allStations) {
       stations.reserve(graph.nReal);
       for (aw::Handle h = 1; h <= graph.nReal; ++h)
-        stations.push_back(h);
+        stations.push_back_unchecked(h);
     }
 
     // Inventory is given per handle and stored per source item node. It is built

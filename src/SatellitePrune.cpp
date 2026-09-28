@@ -582,12 +582,12 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
   candidates.reserve(nItem);
   for (uint j = 0; j < nItem; j++)
     if (itemSeen[j] && cycleItem[j])
-      candidates.push_back(j);
+      candidates.push_back_unchecked(j);
   if (!cycleItem[target])
-    candidates.push_back(target);
+    candidates.push_back_unchecked(target);
   for (uint j = 0; j < nItem; j++)
     if (itemSeen[j] && !cycleItem[j] && j != target)
-      candidates.push_back(j);
+      candidates.push_back_unchecked(j);
 
   aw::vector<uint32_t> visited(nItem, UINT32_MAX);
   aw::vector<uint32_t> itemStamp(nItem, UINT32_MAX);

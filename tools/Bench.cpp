@@ -616,7 +616,7 @@ int main(int argc, char **argv) {
   // baselines can be compared against.
   aw::vector<aw::Handle> stations;
   stations.reserve(graph.nReal);
-  for (aw::Handle handle = 1; handle <= graph.nReal; handle++) stations.push_back(handle);
+  for (aw::Handle handle = 1; handle <= graph.nReal; handle++) stations.push_back_unchecked(handle);
 
   const size_t missingCap = 12;
   long long rows = 0;
