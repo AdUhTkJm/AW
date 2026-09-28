@@ -7,15 +7,8 @@
 
 #include "aw/Solver.h"
 
-#include <algorithm>
 #include <chrono>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <span>
-#include <vector>
 
 #include <absl/types/span.h>
 #include <ortools/linear_solver/linear_solver.h>
@@ -77,7 +70,7 @@ int64_t ceilDiv(int64_t numerator, int64_t denominator) {
 
 // The largest value any variable may take to keep everything in range of int64_t.
 int64_t absoluteCap(const Matrix &A, std::span<const int64_t> c) {
-  std::vector<uint64_t> rowAbs(A.rows, 0);
+  auto rowAbs = aw::vector<uint64_t>::zeroes(A.rows);
   for (size_t k = 0; k < A.rowIndex.size(); k++)
     rowAbs[A.rowIndex[k]] = satAdd(rowAbs[A.rowIndex[k]], magnitude(A.value[k]));
 
@@ -106,7 +99,7 @@ int64_t absoluteCap(const Matrix &A, std::span<const int64_t> c) {
 // something to seed from, reports the whole graph unreachable. The cap is
 // therefore grown empirically instead.
 int64_t lowerBoundOnTotal(const Matrix &A, std::span<const int64_t> b) {
-  std::vector<int64_t> maxPositive((size_t) A.rows, 0);
+  auto maxPositive = aw::vector<int64_t>::zeroes(A.rows);
   for (size_t k = 0; k < A.rowIndex.size(); k++) {
     const int64_t value = A.value[k];
     if (value > 0)
@@ -145,14 +138,14 @@ void fillStatus(const sat::CpSolverResponse &response, Result &result) {
 // Row-major view of the same matrix, so a constraint is one pass over a
 // contiguous run.
 struct RowMajor {
-  std::vector<uint32_t> start;   // rows + 1
-  std::vector<uint32_t> column;  // nnz
-  std::vector<int64_t> value;    // nnz
+  aw::vector<uint32_t> start;   // rows + 1
+  aw::vector<uint32_t> column;  // nnz
+  aw::vector<int64_t> value;    // nnz
 };
 
 RowMajor transpose(const Matrix &A) {
   RowMajor rows;
-  rows.start.assign((size_t) A.rows + 1, 0);
+  rows.start.zero_out(A.rows + 1);
   for (uint32_t k = 0; k < A.rowIndex.size(); k++)
     rows.start[A.rowIndex[k] + 1]++;
   for (uint32_t i = 0; i < A.rows; i++)
@@ -161,7 +154,7 @@ RowMajor transpose(const Matrix &A) {
   const uint32_t nnz = (uint32_t) A.rowIndex.size();
   rows.column.resize(nnz);
   rows.value.resize(nnz);
-  std::vector<uint32_t> cursor(rows.start.begin(), rows.start.end() - 1);
+  aw::vector<uint32_t> cursor(rows.start.begin(), rows.start.end() - 1);
   for (uint32_t r = 0; r < A.cols; r++) {
     for (uint32_t k = A.colStart[r]; k < A.colStart[r + 1]; k++) {
       const uint32_t at = cursor[A.rowIndex[k]]++;
@@ -178,7 +171,7 @@ RowMajor transpose(const Matrix &A) {
 struct LpResult {
   bool ok = false;
   double value = 0.0;
-  std::vector<double> reducedCost;  // A.cols entries
+  aw::vector<double> reducedCost;  // A.cols entries
 };
 
 LpResult lpRelaxation(const Matrix &A, const RowMajor &rows,
@@ -190,7 +183,7 @@ LpResult lpRelaxation(const Matrix &A, const RowMajor &rows,
                                        operations_research::MPSolver::GLOP_LINEAR_PROGRAMMING);
   solver.SuppressOutput();
 
-  std::vector<operations_research::MPVariable*> variables;
+  aw::vector<operations_research::MPVariable*> variables;
   variables.reserve(A.cols);
   for (uint32_t r = 0; r < A.cols; r++)
     variables.push_back(solver.MakeNumVar(0.0, solver.infinity(), ""));
@@ -232,7 +225,7 @@ LpResult lpRelaxation(const Matrix &A, const RowMajor &rows,
 // A copy of `A` that keeps only the columns in `keep` (ascending), together
 // with the matching objective coefficients.
 Matrix selectColumns(const Matrix &A, std::span<const int64_t> c,
-                     const std::vector<uint32_t> &keep, std::vector<int64_t> &outC) {
+                     const aw::vector<uint32_t> &keep, aw::vector<int64_t> &outC) {
   Matrix out;
   out.rows = A.rows;
   out.cols = (uint32_t) keep.size();
@@ -253,9 +246,9 @@ Matrix selectColumns(const Matrix &A, std::span<const int64_t> c,
 
 // Re-expands a solution over the kept columns into the full column space, so
 // callers always see one count per recipe with zeros at the fixed columns.
-std::vector<int64_t> expandSolution(std::span<const int64_t> reduced,
-                                    const std::vector<uint32_t> &keep, uint32_t cols) {
-  std::vector<int64_t> full(cols, 0);
+aw::vector<int64_t> expandSolution(std::span<const int64_t> reduced,
+                                    const aw::vector<uint32_t> &keep, uint32_t cols) {
+  auto full = aw::vector<int64_t>::zeroes(cols);
   for (size_t k = 0; k < keep.size(); k++)
     full[keep[k]] = reduced[k];
   return full;
@@ -275,11 +268,11 @@ std::vector<int64_t> expandSolution(std::span<const int64_t> reduced,
 // optimum. The row capacity is computed once and shared by every member edge,
 // so a tag with thousands of members stays linear. `ceiling` is the
 // int64-range fallback for a zero-cost column that produces into no row.
-std::vector<int64_t> columnDomains(const Matrix &A, const RowMajor &rows,
+aw::vector<int64_t> columnDomains(const Matrix &A, const RowMajor &rows,
                                    std::span<const int64_t> b, std::span<const int64_t> c,
                                    int64_t cap, int64_t ceiling,
                                    std::span<const int64_t> upper) {
-  std::vector<int64_t> domain((size_t) A.cols);
+  aw::vector<int64_t> domain((size_t) A.cols);
   for (uint32_t r = 0; r < A.cols; r++) {
     int64_t hi = c[r] != 0 ? cap : ceiling;
     if (!upper.empty() && upper[r] < hi)
@@ -291,7 +284,7 @@ std::vector<int64_t> columnDomains(const Matrix &A, const RowMajor &rows,
   // negative entries are the consumers, which in the planner are costed
   // columns, so `cap` bounds them. A zero-cost consumer (a nested tag) is left
   // at `ceiling`, which only over-estimates the capacity and stays valid.
-  std::vector<uint8_t> needsCapacity((size_t) A.rows, 0);
+  auto needsCapacity = aw::vector<uint8_t>::zeroes(A.rows);
   for (uint32_t r = 0; r < A.cols; r++) {
     if (c[r] != 0)
       continue;
@@ -300,7 +293,7 @@ std::vector<int64_t> columnDomains(const Matrix &A, const RowMajor &rows,
         needsCapacity[A.rowIndex[k]] = 1;
   }
 
-  std::vector<uint64_t> rowCapacity((size_t) A.rows, 0);
+  auto rowCapacity = aw::vector<uint64_t>::zeroes(A.rows);
   for (uint32_t row = 0; row < A.rows; row++) {
     if (!needsCapacity[row])
       continue;
@@ -343,16 +336,16 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
                     std::span<const int64_t> upper = {}) {
   Result result;
 
-  const std::vector<int64_t> domain = columnDomains(A, rows, b, c, cap, ceiling, upper);
+  const aw::vector<int64_t> domain = columnDomains(A, rows, b, c, cap, ceiling, upper);
 
   sat::CpModelBuilder model;
-  std::vector<sat::IntVar> variables;
+  aw::vector<sat::IntVar> variables;
   variables.reserve(A.cols);
   for (uint32_t r = 0; r < A.cols; r++)
     variables.push_back(model.NewIntVar(Domain(0, domain[r])));
 
-  std::vector<sat::IntVar> terms;
-  std::vector<int64_t> coefficients;
+  aw::vector<sat::IntVar> terms;
+  aw::vector<int64_t> coefficients;
   for (uint32_t i = 0; i < A.rows; i++) {
     terms.clear();
     coefficients.clear();
@@ -513,7 +506,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
 
   // A row that demands something but has no way to produce it is infeasible no
   // matter what the cap is. Prune them away first.
-  std::vector<uint8_t> hasProducer((size_t) A.rows, 0);
+  auto hasProducer = aw::vector<uint8_t>::zeroes(A.rows);
   for (uint32_t k = 0; k < A.rowIndex.size(); k++) {
     if (A.value[k] > 0)
       hasProducer[A.rowIndex[k]] = 1;
@@ -597,9 +590,9 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
           // making this too eager, and the fixing boundary keeps an extra
           // unit of slack.
           const double threshold = (double) probe.objective - lp.value;
-          std::vector<uint32_t> keep;
+          aw::vector<uint32_t> keep;
           keep.reserve(A.cols);
-          std::vector<int64_t> keepUpper;
+          aw::vector<int64_t> keepUpper;
           keepUpper.reserve(A.cols);
           uint32_t fixed = 0;
           bool tightened = false;
@@ -632,7 +625,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
             keepUpper.push_back(bound);
           }
           if (fixed > 0 || tightened) {
-            std::vector<int64_t> reducedC;
+            aw::vector<int64_t> reducedC;
             const Matrix reduced = selectColumns(A, c, keep, reducedC);
             const RowMajor reducedRows = transpose(reduced);
             double budget = -1.0;

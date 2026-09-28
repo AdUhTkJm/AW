@@ -15,8 +15,8 @@ using Amount = int64_t;
 // A compressed sparse row matrix, unweighted.
 // Row `r` owns targets[offsets[r] .. offsets[r+1]).
 struct BaseSparseSets {
-  std::vector<NodeId> offsets;  // V + 1
-  std::vector<NodeId> targets;  // E
+  aw::vector<NodeId> offsets;  // V + 1
+  aw::vector<NodeId> targets;  // E
 
   [[nodiscard]]
   size_t numVertices() const noexcept {
@@ -36,7 +36,7 @@ struct BaseSparseSets {
 
 // Add weights to SparseSets.
 struct SparseGraph : BaseSparseSets {
-  std::vector<Amount> weights;  // E
+  aw::vector<Amount> weights;  // E
 
   [[nodiscard]]
   size_t numEdges() const noexcept {
@@ -63,8 +63,8 @@ struct BaseCraftingGraph {
   SparseGraph i2r;
   SparseGraph r2i;
 
-  std::vector<NodeId> output;
-  std::vector<Amount> outputAmt;
+  aw::vector<NodeId> output;
+  aw::vector<Amount> outputAmt;
 
   [[nodiscard]]
   NodeId recipeNode(uint32_t recipe) const noexcept {
@@ -93,11 +93,11 @@ struct BaseCraftingGraph {
 // "针对多个零库存物品的推广".
 struct PackCertificate {
   // Source recipe ids with z_r > 0, ascending.
-  std::vector<uint32_t> support;
+  aw::vector<uint32_t> support;
   // Parallel to `support`; every count is at least 1.
-  std::vector<Amount> count;
+  aw::vector<Amount> count;
   // Real items whose balance was used as "no stock" (b = 0), ascending.
-  std::vector<NodeId> zeroStock;
+  aw::vector<NodeId> zeroStock;
 };
 
 // Budget for the multi-item "wasteful pack" certificates. The defaults keep
@@ -194,7 +194,7 @@ struct CraftingGraph : BaseCraftingGraph {
   // A member that any recipe can produce in a batch (more than one unit per
   // execution) is never marked: the batch surplus is a free way to satisfy T,
   // so dropping the edge can cost real steps. See `Batching guard` in Prune.cpp.
-  std::vector<uint8_t> tagEdgeDominated;  // nRecipe entries
+  aw::vector<uint8_t> tagEdgeDominated;  // nRecipe entries
 
   // Real-recipe (composite) pruning. `recipeDominated[r] == 1` means recipe r
   // outputs a real resource and is dominated by a sibling recipe of the same
@@ -204,19 +204,19 @@ struct CraftingGraph : BaseCraftingGraph {
   // workstation r does not. The availability condition is therefore deferred to
   // query time: r is only dropped when one of the dominators listed in
   // `recipeDominatorWorkstations[r]` is available (and the guard has no stock).
-  std::vector<uint8_t> recipeDominated;  // nRecipe entries
+  aw::vector<uint8_t> recipeDominated;  // nRecipe entries
 
   // For a dominated recipe, the real input Y that the witness inlined. The
   // recipe is only dropped when inventory[Y] == 0, so stocked Y can still be
   // spent. UINT32_MAX otherwise.
-  std::vector<NodeId> recipeGuardInput;  // nRecipe entries
+  aw::vector<NodeId> recipeGuardInput;  // nRecipe entries
 
   // For a dominated recipe r, the union of the workstations of every kept
   // sibling that dominates r (transitively). r may be dropped when one of them
   // is available and the guard has no stock, because that sibling can then
   // replace r. Empty for an undominated recipe, and also for a dominated recipe
   // whose only replacements cannot be run at all, which is then never dropped.
-  std::vector<std::vector<NodeId>> recipeDominatorWorkstations;  // nRecipe entries
+  aw::vector<aw::vector<NodeId>> recipeDominatorWorkstations;  // nRecipe entries
 
   // Direct (column) dominance. `recipeDirectDominated[r] == 1` means recipe r
   // outputs a real resource and a sibling recipe of the same output has a
@@ -231,15 +231,15 @@ struct CraftingGraph : BaseCraftingGraph {
   // drop is deferred to query time. `recipeDirectDominatorWorkstations[r]` is
   // the union of the workstations of every maximal-column sibling that
   // dominates r; r is dropped when one of them is available.
-  std::vector<uint8_t> recipeDirectDominated;  // nRecipe entries
-  std::vector<std::vector<NodeId>> recipeDirectDominatorWorkstations;  // nRecipe entries
+  aw::vector<uint8_t> recipeDirectDominated;  // nRecipe entries
+  aw::vector<aw::vector<NodeId>> recipeDirectDominatorWorkstations;  // nRecipe entries
 
   // Multi-item "wasteful pack" certificates. `packDominated[r] == 1` means
   // recipe r carries the certificate in `packCertificates[r]` and is never
   // executed by an optimal plan, provided the certificate's zero-stock items
   // are indeed out of stock and every support recipe is reachable.
-  std::vector<uint8_t> packDominated;              // nRecipe entries
-  std::vector<PackCertificate> packCertificates;   // nRecipe entries
+  aw::vector<uint8_t> packDominated;              // nRecipe entries
+  aw::vector<PackCertificate> packCertificates;   // nRecipe entries
 
   // Dominated-input substitution. `recipeSubstituted[r] == 1` means recipe r
   // outputs a real resource and loses to a sibling once one or more of its
@@ -254,9 +254,9 @@ struct CraftingGraph : BaseCraftingGraph {
   // `recipeSubstitutedDominatorWorkstations[r]` is the union of the kept
   // replacements' workstations. See docs/algorithm.typ, section
   // "基于支配的剪枝：支配输入的替换".
-  std::vector<uint8_t> recipeSubstituted;  // nRecipe entries
-  std::vector<std::vector<NodeId>> recipeSubstitutedGuards;  // nRecipe entries
-  std::vector<std::vector<NodeId>>
+  aw::vector<uint8_t> recipeSubstituted;  // nRecipe entries
+  aw::vector<aw::vector<NodeId>> recipeSubstitutedGuards;  // nRecipe entries
+  aw::vector<aw::vector<NodeId>>
       recipeSubstitutedDominatorWorkstations;  // nRecipe entries
 
   [[nodiscard]]
@@ -276,9 +276,9 @@ struct Subgraph {
 
   // Remappers.
   // graph item node -> source item node, ascending.
-  std::vector<NodeId> itemOrigin;
+  aw::vector<NodeId> itemOrigin;
   // graph recipe id -> source recipe id, ascending.
-  std::vector<NodeId> recipeOrigin;
+  aw::vector<NodeId> recipeOrigin;
 
   // Translates source-graph item id to id in this subgraph.
   // UINT32_MAX on failure.

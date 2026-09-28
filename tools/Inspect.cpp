@@ -9,19 +9,12 @@
 //
 // Note that -fno-exception is also enabled for this file.
 
-#include <algorithm>
 #include <chrono>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <span>
-#include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
 
 #include "aw/CraftingGraph.h"
 #include "aw/Options.h"
@@ -58,19 +51,19 @@ struct ProfileGuard {
   }
 };
 
-std::vector<std::byte> readFile(const std::string &path) {
+aw::vector<std::byte> readFile(const std::string &path) {
   std::ifstream in(path, std::ios::binary | std::ios::ate);
   if (!in)
-    fail("cannot open file " + path, std::vector<std::byte>());
+    fail("cannot open file " + path, aw::vector<std::byte>());
   
   const std::streamsize size = in.tellg();
   if (size < 0)
-    fail("cannot compute size of " + path, std::vector<std::byte>());
+    fail("cannot compute size of " + path, aw::vector<std::byte>());
   in.seekg(0, std::ios::beg);
 
-  std::vector<std::byte> bytes(size);
+  aw::vector<std::byte> bytes(size);
   if (size > 0 && !in.read((char*) bytes.data(), size))
-    fail("cannot read from " + path, std::vector<std::byte>());
+    fail("cannot read from " + path, aw::vector<std::byte>());
   
   return bytes;
 }
@@ -112,7 +105,7 @@ bool parseHandle(const std::string &text, aw::Handle &out) {
   return true;
 }
 
-bool parseHandleList(const std::string &text, std::vector<aw::Handle> &out) {
+bool parseHandleList(const std::string &text, aw::vector<aw::Handle> &out) {
   size_t start = 0;
   while (true) {
     const size_t comma = text.find(',', start);
@@ -142,7 +135,7 @@ bool parseHandleList(const std::string &text, std::vector<aw::Handle> &out) {
 // lists are too long to read in a listing.
 struct NameTable {
   // Indexed by handle - 1. Empty when the image has no entry for it.
-  std::vector<std::string> names;
+  aw::vector<std::string> names;
   // Resource name -> handle. When a name is not unique the first handle wins.
   std::unordered_map<std::string, aw::Handle> byName;
   std::unordered_set<std::string> ambiguous;
@@ -463,7 +456,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
       // be empty: a real recipe with no workstation can be a representative in
       // graphs where that happens, and such a dominated recipe is simply never
       // dropped.
-      const std::vector<aw::NodeId> &ws = graph.recipeDominatorWorkstations[r];
+      const aw::vector<aw::NodeId> &ws = graph.recipeDominatorWorkstations[r];
       bool wsOk = true;
       for (size_t k = 0; k < ws.size(); ++k) {
         if (ws[k] >= graph.nItem || (k > 0 && ws[k] <= ws[k - 1]))
@@ -474,7 +467,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         break;
       }
     }
-    std::vector<uint8_t> kept(graph.nItem, 0);
+    auto kept = aw::vector<uint8_t>::zeroes(graph.nItem);
     for (size_t r = 0; r < graph.nRecipe; ++r)
       if (graph.output[r] < graph.nReal && !graph.recipeDominated[r])
         kept[graph.output[r]] = 1;
@@ -500,7 +493,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         report("a pseudo-resource recipe is marked as directly dominated");
         break;
       }
-      const std::vector<aw::NodeId> &ws = graph.recipeDirectDominatorWorkstations[r];
+      const aw::vector<aw::NodeId> &ws = graph.recipeDirectDominatorWorkstations[r];
       bool wsOk = true;
       for (size_t k = 0; k < ws.size(); ++k) {
         if (ws[k] >= graph.nItem || (k > 0 && ws[k] <= ws[k - 1]))
@@ -511,7 +504,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         break;
       }
     }
-    std::vector<uint8_t> kept(graph.nItem, 0), keptEither(graph.nItem, 0);
+    auto kept = aw::vector<uint8_t>(graph.nItem), keptEither = aw::vector<uint8_t>::zeroes(graph.nItem);
     for (size_t r = 0; r < graph.nRecipe; ++r) {
       if (graph.output[r] >= graph.nReal)
         continue;
@@ -551,7 +544,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         report("a pseudo-resource recipe is marked as substituted");
         break;
       }
-      const std::vector<aw::NodeId> &guards = graph.recipeSubstitutedGuards[r];
+      const aw::vector<aw::NodeId> &guards = graph.recipeSubstitutedGuards[r];
       bool guardsOk = true;
       for (size_t k = 0; k < guards.size(); ++k) {
         if (guards[k] >= graph.nReal || (k > 0 && guards[k] <= guards[k - 1])) {
@@ -563,7 +556,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         report("a substituted recipe has a bad stock guard");
         break;
       }
-      const std::vector<aw::NodeId> &ws =
+      const aw::vector<aw::NodeId> &ws =
           graph.recipeSubstitutedDominatorWorkstations[r];
       bool wsOk = true;
       for (size_t k = 0; k < ws.size(); ++k) {
@@ -584,8 +577,8 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
       graph.packCertificates.size() != graph.nRecipe) {
     report("pack pruning arrays do not match the recipe count");
   } else {
-    std::vector<int64_t> net(graph.nItem, 0);
-    std::vector<aw::NodeId> touched;
+    auto net = aw::vector<int64_t>::zeroes(graph.nItem);
+    aw::vector<aw::NodeId> touched;
     for (size_t r = 0; r < graph.nRecipe; ++r) {
       if (!graph.packDominated[r])
         continue;
@@ -695,7 +688,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
   }
 
   // Every recipe must appear exactly once, in the row of the item it outputs.
-  std::vector<uint32_t> seen(graph.nRecipe, 0);
+  auto seen = aw::vector<uint32_t>::zeroes(graph.nRecipe);
   for (size_t item = 0; item < graph.nItem; ++item) {
     auto targets = graph.i2r.targetsOf(item);
     auto weights = graph.i2r.weightsOf(item);
@@ -721,7 +714,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
 
   // Check that there's no duplication.
   {
-    std::vector<uint32_t> order(graph.nRecipe);
+    aw::vector<uint32_t> order(graph.nRecipe);
     for (uint32_t r = 0; r < graph.nRecipe; ++r)
       order[r] = r;
 
@@ -796,7 +789,7 @@ void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
   size_t leaves = 0;
   size_t multi = 0;
   size_t bulk = 0;
-  std::vector<aw::NodeId> leafItems;
+  aw::vector<aw::NodeId> leafItems;
   for (aw::NodeId i = 0; i < g.nItem; i++) {
     const size_t producers = g.i2r.targetsOf(i).size();
     if (producers == 0) {
@@ -863,7 +856,7 @@ int main(int argc, char** argv) {
   uint64_t planAmount = 1;
   aw::solver::Options solverOptions;
   aw::Handle reach = 0;
-  std::vector<aw::Handle> workstations;
+  aw::vector<aw::Handle> workstations;
 
   bool check = false;
   bool dump = false;
@@ -1047,7 +1040,7 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  const std::vector<std::byte> bytes = readFile(path);
+  const aw::vector<std::byte> bytes = readFile(path);
 
   // Single-use tag inlining is read at registration time.
   if (inlineTags == "pre")
@@ -1141,7 +1134,7 @@ int main(int argc, char** argv) {
     }
 
     // "All workstations present": allow every real resource as a station.
-    std::vector<aw::Handle> all;
+    aw::vector<aw::Handle> all;
     all.reserve(graph.nReal);
     for (aw::Handle h = 1; h <= graph.nReal; ++h)
       all.push_back(h);
@@ -1186,7 +1179,7 @@ int main(int argc, char** argv) {
       return EXIT_FAILURE;
     }
 
-    std::vector<aw::Handle> stations = workstations;
+    aw::vector<aw::Handle> stations = workstations;
     const bool allStations = stations.empty();
     if (allStations) {
       stations.reserve(graph.nReal);
@@ -1196,7 +1189,7 @@ int main(int argc, char** argv) {
 
     // Inventory is given per handle and stored per source item node. It is built
     // before the reachability pass so the dominated tag edges can consult it.
-    std::vector<aw::Amount> inventory(graph.nItem, 0);
+    auto inventory = aw::vector<aw::Amount>::zeroes(graph.nItem);
     if (!invArg.empty()) {
       size_t start = 0;
       while (true) {

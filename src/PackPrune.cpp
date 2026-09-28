@@ -105,31 +105,31 @@ struct PackSearch {
   const PackPruneOptions &opt;
 
   // The pack z and the derived consumption bounds.
-  std::vector<int64_t> z;     // nRecipe
-  std::vector<int64_t> cons;  // nItem: consumption implied by z
-  std::vector<int64_t> need;  // nItem: max(cons, propagated lower bound)
+  aw::vector<int64_t> z;     // nRecipe
+  aw::vector<int64_t> cons;  // nItem: consumption implied by z
+  aw::vector<int64_t> need;  // nItem: max(cons, propagated lower bound)
 
   // Superset of recipes ever raised (never reverted; z decides at a leaf).
-  std::vector<uint32_t> support;
-  std::vector<uint8_t> inSupport;
+  aw::vector<uint32_t> support;
+  aw::vector<uint8_t> inSupport;
 
   // Superset of items ever given a positive `need`.
-  std::vector<uint32_t> needList;
-  std::vector<uint8_t> inNeed;
+  aw::vector<uint32_t> needList;
+  aw::vector<uint8_t> inNeed;
 
   // Union of items whose balance was used as b = 0.
-  std::vector<uint8_t> inG;
-  std::vector<NodeId> zeroStock;
+  aw::vector<uint8_t> inG;
+  aw::vector<NodeId> zeroStock;
 
   // Per-item minimum input rates (CSR).
-  std::vector<uint32_t> rateOffsets;  // nItem + 1
-  std::vector<NodeId> rateInput;
-  std::vector<int64_t> rateNum;
-  std::vector<int64_t> rateDen;
+  aw::vector<uint32_t> rateOffsets;  // nItem + 1
+  aw::vector<NodeId> rateInput;
+  aw::vector<int64_t> rateNum;
+  aw::vector<int64_t> rateDen;
 
   // True when no recipe consumes the item. A pack that produces such an item
   // can never have A z <= 0, so the search stops as soon as one is produced.
-  std::vector<uint8_t> unconsumed;  // nItem
+  aw::vector<uint8_t> unconsumed;  // nItem
 
   // Undo log, so branching can backtrack without copying the state.
   struct Undo {
@@ -138,7 +138,7 @@ struct PackSearch {
     int64_t old;
   };
   enum : uint8_t { kUndoZ, kUndoCons, kUndoNeed, kUndoNet };
-  std::vector<Undo> undo;
+  aw::vector<Undo> undo;
 
   int64_t totalZ = 0;
   uint64_t nodes = 0;
@@ -155,13 +155,13 @@ struct PackSearch {
 
   // Leaf accounting for the pointwise minimum.
   int64_t seenLeaves = 0;
-  std::vector<uint32_t> positiveCount;  // nRecipe
-  std::vector<int64_t> minPositive;     // nRecipe
+  aw::vector<uint32_t> positiveCount;  // nRecipe
+  aw::vector<int64_t> minPositive;     // nRecipe
 
   // Scratch.
-  std::vector<std::pair<NodeId, int64_t>> pending;
-  std::vector<int64_t> net;  // nItem
-  std::vector<uint32_t> netTouched;
+  aw::vector<std::pair<NodeId, int64_t>> pending;
+  aw::vector<int64_t> net;  // nItem
+  aw::vector<uint32_t> netTouched;
 
   std::chrono::steady_clock::time_point passStart;
 
@@ -365,8 +365,8 @@ struct PackSearch {
       uint32_t producer;
       int64_t amount;
     };
-    std::vector<Raw> raw;
-    std::vector<Rate> rates;
+    aw::vector<Raw> raw;
+    aw::vector<Rate> rates;
 
     for (NodeId i = 0; i < nItem; i++) {
       const auto producers = graph.i2r.targetsOf(i);
@@ -659,7 +659,7 @@ struct PackSearch {
     if (aborted || seenLeaves == 0)
       return false;
 
-    std::vector<std::pair<uint32_t, int64_t>> positive;
+    aw::vector<std::pair<uint32_t, int64_t>> positive;
     for (uint32_t r : support)
       if (positiveCount[r] == seenLeaves && minPositive[r] > 0)
         positive.push_back({r, minPositive[r]});

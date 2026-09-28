@@ -17,7 +17,7 @@ struct PlanResult {
   // Executions per recipe, indexed by subgraph recipe id. Empty unless the
   // solver found a solution. Counts are whole numbers: a recipe is crafted an
   // integer number of times.
-  std::vector<int64_t> exec;
+  aw::vector<int64_t> exec;
 
   // False when the solver stopped on its gap or time budget rather than
   // proving optimality. The result is still usable; it is just not guaranteed

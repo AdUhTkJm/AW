@@ -91,11 +91,11 @@ struct Layout {
   uint nOutput = 0;
   uint maxHandle = 0;
   // Maps `handle-1` to its number of recipes (recipes per item).
-  std::vector<uint> rpi;
+  aw::vector<uint> rpi;
   // Maps `recipe` to its number of items (items per recipe).
-  std::vector<uint> ipr;
+  aw::vector<uint> ipr;
   // Maps `recipe` to its number of workstations.
-  std::vector<uint> wpr;
+  aw::vector<uint> wpr;
 
   void noteHandle(uint handle) noexcept {
     if (handle <= maxHandle)
@@ -182,7 +182,7 @@ Layout scan(std::span<const std::byte> bytes) noexcept {
   return layout;
 }
 
-void prefixSum(std::vector<uint> &v) noexcept {
+void prefixSum(aw::vector<uint> &v) noexcept {
   v.insert(v.begin(), 0);
   for (size_t i = 0; i + 1 < v.size(); i++)
     v[i + 1] += v[i];
@@ -222,14 +222,14 @@ void canonicalizeRecipes() noexcept {
     return;
 
   // Sort recipes.
-  std::vector<uint> order(nRecipe);
+  aw::vector<uint> order(nRecipe);
   for (uint r = 0; r < nRecipe; r++)
     order[r] = r;
   std::sort(order.begin(), order.end(), RecipeKeyLess{graph});
 
   const RecipeKeyLess less { graph };
   // Deduplication and grouping.
-  std::vector<uint> rep(nRecipe, UINT32_MAX);
+  aw::vector<uint> rep(nRecipe, UINT32_MAX);
   for (uint i = 0; i < nRecipe;) {
     uint j = i + 1;
     while (j < nRecipe && !less(order[i], order[j]))
@@ -245,7 +245,7 @@ void canonicalizeRecipes() noexcept {
   }
 
   uint newNRecipe = 0;
-  std::vector<uint> newId(nRecipe, UINT32_MAX);
+  aw::vector<uint> newId(nRecipe, UINT32_MAX);
   for (uint r = 0; r < nRecipe; r++) {
     if (rep[r] == r)
       newId[r] = newNRecipe++;
@@ -254,21 +254,21 @@ void canonicalizeRecipes() noexcept {
     return;
 
   // Rebuild workstations.
-  std::vector<uint> wsOffsets(newNRecipe, 0);
+  aw::vector<uint> wsOffsets(newNRecipe, 0);
   for (uint r = 0; r < nRecipe; r++)
     wsOffsets[newId[rep[r]]] += graph.workstations.targetsOf(r).size();
   prefixSum(wsOffsets);
 
-  std::vector<NodeId> wsTargets(wsOffsets.back());
-  std::vector<uint> wsCursor(wsOffsets.begin(), wsOffsets.end() - 1);
+  aw::vector<NodeId> wsTargets(wsOffsets.back());
+  aw::vector<uint> wsCursor(wsOffsets.begin(), wsOffsets.end() - 1);
   for (uint r = 0; r < nRecipe; r++) {
     const uint dst = newId[rep[r]];
     for (NodeId station : graph.workstations.targetsOf(r))
       wsTargets[wsCursor[dst]++] = station;
   }
 
-  std::vector<uint> newWsOffsets(newNRecipe + 1, 0);
-  std::vector<NodeId> newWsTargets;
+  aw::vector<uint> newWsOffsets(newNRecipe + 1, 0);
+  aw::vector<NodeId> newWsTargets;
   newWsTargets.reserve(wsTargets.size());
   for (uint j = 0; j < newNRecipe; j++) {
     std::sort(wsTargets.begin() + wsOffsets[j], wsTargets.begin() + wsOffsets[j + 1]);
@@ -283,16 +283,16 @@ void canonicalizeRecipes() noexcept {
   graph.workstations.targets = std::move(newWsTargets);
 
   // Rebuild item -> recipe edges.
-  std::vector<uint> itemOffsets(graph.nItem, 0);
+  aw::vector<uint> itemOffsets(graph.nItem, 0);
   for (uint r = 0; r < nRecipe; r++) {
     if (rep[r] == r)
       itemOffsets[graph.output[r]]++;
   }
   prefixSum(itemOffsets);
 
-  std::vector<NodeId> itemTargets(newNRecipe, 0);
-  std::vector<Amount> itemWeights(newNRecipe, 0);
-  std::vector<uint> itemCursor(itemOffsets.begin(), itemOffsets.end() - 1);
+  aw::vector<NodeId> itemTargets(newNRecipe, 0);
+  aw::vector<Amount> itemWeights(newNRecipe, 0);
+  aw::vector<uint> itemCursor(itemOffsets.begin(), itemOffsets.end() - 1);
   for (uint r = 0; r < nRecipe; r++) {
     if (rep[r] != r)
       continue;
@@ -305,15 +305,15 @@ void canonicalizeRecipes() noexcept {
   graph.i2r.weights = std::move(itemWeights);
 
   // Rebuild recipe -> item edges.
-  std::vector<uint> inputOffsets(newNRecipe, 0);
+  aw::vector<uint> inputOffsets(newNRecipe, 0);
   for (uint r = 0; r < nRecipe; r++) {
     if (rep[r] == r)
       inputOffsets[newId[r]] = (uint) graph.r2i.targetsOf(r).size();
   }
   prefixSum(inputOffsets);
 
-  std::vector<NodeId> inputTargets(inputOffsets.back(), 0);
-  std::vector<Amount> inputWeights(inputOffsets.back(), 0);
+  aw::vector<NodeId> inputTargets(inputOffsets.back(), 0);
+  aw::vector<Amount> inputWeights(inputOffsets.back(), 0);
   for (uint r = 0; r < nRecipe; r++) {
     if (rep[r] != r)
       continue;
@@ -330,8 +330,8 @@ void canonicalizeRecipes() noexcept {
   graph.r2i.targets = std::move(inputTargets);
   graph.r2i.weights = std::move(inputWeights);
 
-  std::vector<NodeId> output(newNRecipe, 0);
-  std::vector<Amount> outputAmt(newNRecipe, 0);
+  aw::vector<NodeId> output(newNRecipe, 0);
+  aw::vector<Amount> outputAmt(newNRecipe, 0);
   for (uint r = 0; r < nRecipe; r++) {
     if (rep[r] != r)
       continue;
@@ -360,9 +360,9 @@ void canonicalizeRecipes() noexcept {
 struct MutableRecipe {
   NodeId out = 0;
   Amount outAmt = 0;
-  std::vector<NodeId> ws;
-  std::vector<NodeId> inputs;
-  std::vector<Amount> amounts;
+  aw::vector<NodeId> ws;
+  aw::vector<NodeId> inputs;
+  aw::vector<Amount> amounts;
   // Source recipe id, or UINT32_MAX for a recipe the query-time inliner made.
   uint32_t origin = UINT32_MAX;
 };
@@ -373,7 +373,7 @@ struct MutableRecipe {
 // reachability and pruning, so a tag's surviving member edges are exactly the
 // members whose stock the player can still spend.
 template <typename Allowed>
-bool inlineSingleUseTagsCore(std::vector<MutableRecipe> &recipes, uint nReal,
+bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
                              uint nItem, Allowed allowed) {
   if (nItem <= nReal || recipes.empty())
     return false;
@@ -381,8 +381,8 @@ bool inlineSingleUseTagsCore(std::vector<MutableRecipe> &recipes, uint nReal,
   // A tag is "simple" when every one of its member edges is a single real input
   // of amount 1 with no workstation. A tag with any other kind of recipe is
   // left alone, so no nested or weighted tag ever has to be unfolded.
-  std::vector<uint8_t> simpleTag(nItem, 1);
-  std::vector<uint8_t> hasRecipe(nItem, 0);
+  aw::vector<uint8_t> simpleTag(nItem, 1);
+  aw::vector<uint8_t> hasRecipe(nItem, 0);
   for (const MutableRecipe& rec : recipes) {
     if (rec.out < nReal)
       continue;
@@ -395,7 +395,7 @@ bool inlineSingleUseTagsCore(std::vector<MutableRecipe> &recipes, uint nReal,
     if (!hasRecipe[t])
       simpleTag[t] = 0;
 
-  std::vector<std::vector<NodeId>> members(nItem);
+  aw::vector<aw::vector<NodeId>> members(nItem);
   for (uint r = 0; r < recipes.size(); r++) {
     const MutableRecipe& rec = recipes[r];
     if (rec.out < nReal || !simpleTag[rec.out] || !allowed(r))
@@ -405,9 +405,9 @@ bool inlineSingleUseTagsCore(std::vector<MutableRecipe> &recipes, uint nReal,
 
   // The consumer side of a tag: the number of input slots that name it, the
   // (single) recipe that owns the slot and the amount it consumes.
-  std::vector<uint32_t> consumerCount(nItem, 0);
-  std::vector<uint32_t> consumerRecipe(nItem, 0);
-  std::vector<Amount> consumerAmount(nItem, 0);
+  aw::vector<uint32_t> consumerCount(nItem, 0);
+  aw::vector<uint32_t> consumerRecipe(nItem, 0);
+  aw::vector<Amount> consumerAmount(nItem, 0);
   bool changed = false;
 
   while (true) {
@@ -439,12 +439,12 @@ bool inlineSingleUseTagsCore(std::vector<MutableRecipe> &recipes, uint nReal,
 
     const uint t = chosen;
     const uint32_t consumer = consumerRecipe[t];
-    const std::vector<NodeId> ms = members[t];
+    const aw::vector<NodeId> ms = members[t];
 
     // The consumer without its tag input. Inputs are strictly ascending, so
     // this keeps them ordered.
-    std::vector<NodeId> newInputs;
-    std::vector<Amount> newAmounts;
+    aw::vector<NodeId> newInputs;
+    aw::vector<Amount> newAmounts;
     newInputs.reserve(recipes[consumer].inputs.size());
     newAmounts.reserve(recipes[consumer].inputs.size());
     for (size_t k = 0; k < recipes[consumer].inputs.size(); k++) {
@@ -457,7 +457,7 @@ bool inlineSingleUseTagsCore(std::vector<MutableRecipe> &recipes, uint nReal,
     // Drop the consumer and every member edge of the tag, then add a copy of
     // the consumer per member. recipes[consumer] is skipped rather than moved,
     // so it is still readable while the copies are built.
-    std::vector<MutableRecipe> next;
+    aw::vector<MutableRecipe> next;
     next.reserve(recipes.size() - 1);
     for (uint i = 0; i < recipes.size(); i++) {
       if (i == consumer || recipes[i].out == t)
@@ -488,7 +488,7 @@ bool inlineSingleUseTagsCore(std::vector<MutableRecipe> &recipes, uint nReal,
 }
 
 // Flattens `graph`'s recipes into the mutable form.
-void extractRecipes(const CraftingGraph& graph, std::vector<MutableRecipe> &out) {
+void extractRecipes(const CraftingGraph& graph, aw::vector<MutableRecipe> &out) {
   out.clear();
   out.reserve(graph.nRecipe);
   for (uint r = 0; r < graph.nRecipe; r++) {
@@ -507,12 +507,12 @@ void extractRecipes(const CraftingGraph& graph, std::vector<MutableRecipe> &out)
 
 // Rebuilds every CSR field from a rewritten recipe list, then merges the
 // duplicates the rewrite may have produced.
-void rebuildFromRecipes(CraftingGraph& graph, std::vector<MutableRecipe> &recipes) {
+void rebuildFromRecipes(CraftingGraph& graph, aw::vector<MutableRecipe> &recipes) {
   const uint nItem = graph.nItem;
   const uint newNRecipe = (uint) recipes.size();
 
   // Rebuild item -> recipe.
-  std::vector<uint> itemOffsets(nItem, 0);
+  aw::vector<uint> itemOffsets(nItem, 0);
   for (const MutableRecipe& rec : recipes)
     itemOffsets[rec.out]++;
   prefixSum(itemOffsets);
@@ -520,7 +520,7 @@ void rebuildFromRecipes(CraftingGraph& graph, std::vector<MutableRecipe> &recipe
   graph.i2r.targets.resize(newNRecipe);
   graph.i2r.weights.resize(newNRecipe);
   {
-    std::vector<uint> cursor(graph.i2r.offsets.begin(), graph.i2r.offsets.end() - 1);
+    aw::vector<uint> cursor(graph.i2r.offsets.begin(), graph.i2r.offsets.end() - 1);
     for (uint r = 0; r < newNRecipe; r++) {
       const uint slot = cursor[recipes[r].out]++;
       graph.i2r.targets[slot] = graph.recipeNode(r);
@@ -616,7 +616,7 @@ bool dropNonPositiveInputs(CraftingGraph& graph) noexcept {
   if (!any)
     return false;
 
-  std::vector<MutableRecipe> recipes;
+  aw::vector<MutableRecipe> recipes;
   extractRecipes(graph, recipes);
   for (MutableRecipe& rec : recipes) {
     size_t kept = 0;
@@ -671,7 +671,7 @@ bool dropUselessRecipes(CraftingGraph& graph) noexcept {
   if (!any)
     return false;
 
-  std::vector<MutableRecipe> recipes;
+  aw::vector<MutableRecipe> recipes;
   extractRecipes(graph, recipes);
   size_t kept = 0;
   for (size_t i = 0; i < recipes.size(); i++) {
@@ -692,7 +692,7 @@ bool dropUselessRecipes(CraftingGraph& graph) noexcept {
 // Registration-time inliner: flatten every single-use tag, using every member
 // edge, before the dominance passes run.
 void inlineSingleUseTags(CraftingGraph& graph) noexcept {
-  std::vector<MutableRecipe> recipes;
+  aw::vector<MutableRecipe> recipes;
   extractRecipes(graph, recipes);
   if (!inlineSingleUseTagsCore(recipes, graph.nReal, graph.nItem,
                                [](uint) { return true; }))
@@ -739,7 +739,7 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
   const uint nOutput = in.readVarInt();
 
   // This tracks the next free slot in each row.
-  std::vector<uint> itemCursor(graph.i2r.offsets.begin(), graph.i2r.offsets.end() - 1);
+  aw::vector<uint> itemCursor(graph.i2r.offsets.begin(), graph.i2r.offsets.end() - 1);
 
   uint output = 0;
   uint recipe = 0;
@@ -840,7 +840,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   const uint nRecipe = graph.nRecipe;
 
   // Turn workstation availability into a bitset (in fact a byteset).
-  std::vector<uint8_t> allowed(nItem, 0);
+  aw::vector<uint8_t> allowed(nItem, 0);
   for (Handle handle : workstations) {
     if (handle >= 1 && handle <= nItem)
       allowed[handle - 1] = 1;
@@ -852,10 +852,10 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   const bool pruneSubstitution = isSubstitutionPruningEnabled();
   const bool prunePack = isPackPruningEnabled();
 
-  std::vector<uint8_t> itemSeen(nItem, 0);
-  std::vector<uint8_t> recipeSeen(nRecipe, 0);
-  std::vector<uint8_t> disabled(nRecipe, 0);
-  std::vector<NodeId> queue;
+  aw::vector<uint8_t> itemSeen(nItem, 0);
+  aw::vector<uint8_t> recipeSeen(nRecipe, 0);
+  aw::vector<uint8_t> disabled(nRecipe, 0);
+  aw::vector<NodeId> queue;
 
   // Ordinary BFS. `disabled` forces a recipe out of the walk without touching
   // the flags, so the pack-certificate post-pass can rebuild the subgraph.
@@ -990,7 +990,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   // avoids all of them, so the optimum is unchanged.
   if (prunePack && graph.packDominated.size() == nRecipe) {
     bool any = false;
-    std::vector<uint8_t> drop(nRecipe, 0);
+    aw::vector<uint8_t> drop(nRecipe, 0);
     for (uint recipe = 0; recipe < nRecipe; recipe++) {
       if (!recipeSeen[recipe] || !graph.packDominated[recipe])
         continue;
@@ -1027,7 +1027,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   if (isSatellitePruningEnabled()) {
     constexpr uint MAX_SATELLITE_ROUNDS = 4;
     const NodeId target = CraftingGraph::itemNode(output);
-    std::vector<uint8_t> drop(nRecipe, 0);
+    aw::vector<uint8_t> drop(nRecipe, 0);
     for (uint round = 0; round < MAX_SATELLITE_ROUNDS; round++) {
       std::fill(drop.begin(), drop.end(), 0);
       if (!computeSatellitePruning(graph, target, itemSeen, recipeSeen, inventory, drop))
@@ -1048,13 +1048,13 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
     const NodeId target = CraftingGraph::itemNode(output);
 
     // How many surviving recipes produce each item.
-    std::vector<uint> produced(nItem, 0);
+    aw::vector<uint> produced(nItem, 0);
     for (uint r = 0; r < nRecipe; r++)
       if (recipeSeen[r])
         produced[graph.output[r]]++;
 
     // Item -> surviving recipes that consume it, as a CSR.
-    std::vector<uint> consOffsets(nItem + 1, 0);
+    aw::vector<uint> consOffsets(nItem + 1, 0);
     for (uint r = 0; r < nRecipe; r++) {
       if (!recipeSeen[r])
         continue;
@@ -1063,9 +1063,9 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
     }
     for (NodeId item = 0; item < nItem; item++)
       consOffsets[item + 1] += consOffsets[item];
-    std::vector<uint> consTargets(consOffsets.back());
+    aw::vector<uint> consTargets(consOffsets.back());
     {
-      std::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
+      aw::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
       for (uint r = 0; r < nRecipe; r++) {
         if (!recipeSeen[r])
           continue;
@@ -1084,8 +1084,8 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
       return graph.i2r.targetsOf(item).empty();
     };
 
-    std::vector<NodeId> dead;
-    std::vector<uint8_t> queued(nItem, 0);
+    aw::vector<NodeId> dead;
+    aw::vector<uint8_t> queued(nItem, 0);
     for (NodeId item = 0; item < nItem; item++) {
       if (itemSeen[item] && !usable(item)) {
         queued[item] = 1;
@@ -1121,7 +1121,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   // Collect the surviving recipes as an explicit, rewritable list. Everything
   // below is built from it, which is what lets the query-time inliner add
   // recipes that have no single source counterpart.
-  std::vector<MutableRecipe> built;
+  aw::vector<MutableRecipe> built;
   built.reserve(nRecipe);
   for (uint r = 0; r < nRecipe; r++) {
     if (!recipeSeen[r])
@@ -1154,7 +1154,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
 
     // A flattened tag has neither producers nor consumers left. Drop it so it
     // does not become an empty balance row in the plan matrix.
-    std::vector<uint8_t> used(nItem, 0);
+    aw::vector<uint8_t> used(nItem, 0);
     used[CraftingGraph::itemNode(output)] = 1;
     for (const MutableRecipe& rec : built) {
       used[rec.out] = 1;
@@ -1168,7 +1168,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
 
   // Start filling the remapping between source graph and subgraph.
   // Use UINT32_MAX for empty entries.
-  std::vector<NodeId> itemMap(nItem, UINT32_MAX);
+  aw::vector<NodeId> itemMap(nItem, UINT32_MAX);
   // Note that we can compute the amount of real items in subgraph alongside the way.
   uint subreal = 0;
   for (NodeId item = 0; item < nItem; item++) {
@@ -1200,7 +1200,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   sub.i2r.targets.resize(subRecipes);
   sub.i2r.weights.resize(subRecipes);
   {
-    std::vector<uint> cursor(sub.i2r.offsets.begin(), sub.i2r.offsets.end() - 1);
+    aw::vector<uint> cursor(sub.i2r.offsets.begin(), sub.i2r.offsets.end() - 1);
     for (uint i = 0; i < subRecipes; i++) {
       const uint slot = cursor[itemMap[built[i].out]]++;
       sub.i2r.targets[slot] = sub.nItem + i;

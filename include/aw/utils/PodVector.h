@@ -12,9 +12,9 @@
 
 namespace aw {
 
-// Vector for POD types, or more specifically, ints.
+// Vector for POD types.
 // Cannot hold more than 2^32 elements, but we never need that much.
-template<typename T> requires std::is_integral_v<T>
+template<typename T>
 class PodVector {
   using uint = uint32_t;
 
@@ -35,10 +35,20 @@ public:
   using size_type = uint;
   using difference_type = std::make_signed_t<uint>;
 
-  PodVector() noexcept: cap(8), sz(0), dat((T*) malloc(sz * 8)) {}
+  PodVector() noexcept: cap(8), sz(0), dat((T*) malloc(cap * sizeof(T))) {}
 
-  explicit PodVector(size_t count) noexcept:
+  explicit PodVector(size_type count) noexcept:
     cap(std::max<uint>(count, 8)), sz(count), dat((T*) (malloc(cap * sizeof(T)))) {}
+
+  static PodVector zeroes(size_type count) noexcept {
+    PodVector v(count);
+    memset(v.dat, 0, v.sz * sizeof(T));
+    return v;
+  }
+
+  PodVector(T *begin, T *end): cap(end - begin), sz(cap), dat((T*) malloc(cap * sizeof(T))) {
+    memcpy(dat, begin, sz * sizeof(T));
+  }
 
   ~PodVector() noexcept {
     free(dat);
@@ -66,9 +76,9 @@ public:
     return *this;
   }
 
-  PodVector(PodVector &&other) noexcept 
-    : dat(other.dat), cap(other.cap), sz(other.sz) {
-    other.dat = malloc(0);
+  PodVector(PodVector &&other) noexcept:
+    cap(other.cap), sz(other.sz), dat(other.dat) {
+    other.dat = (T*) malloc(0);
     other.cap = 0;
     other.sz = 0;
   }
@@ -83,7 +93,7 @@ public:
     cap = other.cap;
     sz = other.sz;
 
-    other.dat = malloc(0);
+    other.dat = (T*) malloc(0);
     other.cap = 0;
     other.sz = 0;
     return *this;
@@ -108,6 +118,15 @@ public:
       reserve_unchecked(growth(newsz));
     
     sz = newsz;
+  }
+
+  void zero_out(size_t newsz) noexcept {
+    if (newsz > cap) {
+      dat = (T*) calloc(sz = cap = newsz, sizeof(T));
+      return;
+    }
+
+    memset(dat, (sz = newsz) * sizeof(T), 0);
   }
 
   void clear() noexcept {
@@ -143,9 +162,13 @@ public:
     --sz;
   }
 
-  // --- 访问器 ---
   reference operator[](size_type index) noexcept { return dat[index]; }
-  const_reference operator[](size_type index) const noexcept { return dat[index]; }
+  T operator[](size_type index) const noexcept { return dat[index]; }
+
+  reference front() noexcept { return dat[0]; }
+  T front() const noexcept { return dat[0]; }
+  reference back() noexcept { return dat[sz - 1]; }
+  T back() const noexcept { return dat[sz - 1]; }
 
   pointer data() noexcept { return dat; }
   const_pointer data() const noexcept { return dat; }

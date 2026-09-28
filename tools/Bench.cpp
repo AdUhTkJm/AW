@@ -116,17 +116,17 @@ private:
 struct Target {
   aw::Handle handle = 0;
   std::string name;
-  std::vector<aw::Amount> amounts;
+  aw::vector<aw::Amount> amounts;
 };
 
-bool readTsv(const std::string &path, std::vector<std::vector<std::string>> &rows) {
+bool readTsv(const std::string &path, aw::vector<aw::vector<std::string>> &rows) {
   std::ifstream in(path);
   if (!in) return false;
   std::string line;
   while (std::getline(in, line)) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
     if (line.empty() || line[0] == '#') continue;
-    std::vector<std::string> parts;
+    aw::vector<std::string> parts;
     size_t start = 0;
     while (true) {
       const size_t tab = line.find('\t', start);
@@ -146,7 +146,7 @@ struct StockEntry {
 };
 
 bool readMeta(const std::string &path, std::map<std::string, std::string> &out) {
-  std::vector<std::vector<std::string>> rows;
+  aw::vector<aw::vector<std::string>> rows;
   if (!readTsv(path, rows)) return false;
   for (const auto &row : rows)
     if (row.size() >= 2) out[row[0]] = row[1];
@@ -173,7 +173,7 @@ bool parseDouble(const std::string &text, double &out) {
   return true;
 }
 
-bool splitCommas(const std::string &text, std::vector<std::string> &out) {
+bool splitCommas(const std::string &text, aw::vector<std::string> &out) {
   size_t start = 0;
   while (start <= text.size()) {
     const size_t comma = text.find(',', start);
@@ -266,12 +266,12 @@ struct MissingItem {
 //   rhs(target) = amount, rhs(i) = -stock(i)
 // and reports every row that came up short -- the same currency in which the
 // Java baselines report `missing`.
-std::vector<MissingItem> deriveMissing(const aw::Subgraph &sub, aw::NodeId target,
+aw::vector<MissingItem> deriveMissing(const aw::Subgraph &sub, aw::NodeId target,
                                        aw::Amount amount,
-                                       const std::vector<aw::Amount> &inventory,
-                                       const std::vector<int64_t> &exec) {
+                                       const aw::vector<aw::Amount> &inventory,
+                                       const aw::vector<int64_t> &exec) {
   const aw::BaseCraftingGraph &g = sub.graph;
-  std::vector<__int128> balance(g.nItem, 0);
+  aw::vector<__int128> balance(g.nItem, 0);
   for (uint32_t r = 0; r < g.nRecipe; r++) {
     const __int128 times = exec[r];
     if (times == 0) continue;
@@ -282,7 +282,7 @@ std::vector<MissingItem> deriveMissing(const aw::Subgraph &sub, aw::NodeId targe
       balance[inputs[k]] -= (__int128) weights[k] * times;
   }
 
-  std::vector<MissingItem> missing;
+  aw::vector<MissingItem> missing;
   for (uint32_t i = 0; i < g.nItem; i++) {
     __int128 required;
     if (i == target) {
@@ -307,7 +307,7 @@ std::vector<MissingItem> deriveMissing(const aw::Subgraph &sub, aw::NodeId targe
 
 std::map<aw::Handle, std::string> loadNames(const std::string &path) {
   std::map<aw::Handle, std::string> names;
-  std::vector<std::vector<std::string>> rows;
+  aw::vector<aw::vector<std::string>> rows;
   if (!readTsv(path, rows)) return names;
   for (const auto &row : rows) {
     if (row.size() < 3) continue;
@@ -349,7 +349,7 @@ int main(int argc, char **argv) {
   std::string namesPath;
   std::string amountsArg;
   std::string groupsArg;
-  std::vector<std::pair<std::string, std::string>> stageArgs;  // profile -> label
+  aw::vector<std::pair<std::string, std::string>> stageArgs;  // profile -> label
   bool nonoptimal = true;
   bool flash = false;
   bool quiet = false;
@@ -424,9 +424,9 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  std::vector<Target> targets;
+  aw::vector<Target> targets;
   {
-    std::vector<std::vector<std::string>> rows;
+    aw::vector<aw::vector<std::string>> rows;
     if (!readTsv(planPrefix + ".targets.tsv", rows)) {
       std::fprintf(stderr, "cannot read %s.targets.tsv\n", planPrefix.c_str());
       return EXIT_FAILURE;
@@ -440,7 +440,7 @@ int main(int argc, char **argv) {
       target.name = row[1];
       // `--amounts` overrides the amounts recorded in the plan file.
       const std::string amountText = amountsArg.empty() ? row[2] : amountsArg;
-      std::vector<std::string> pieces;
+      aw::vector<std::string> pieces;
       if (!splitCommas(amountText, pieces)) continue;
       for (const auto &piece : pieces) {
         long long value = 0;
@@ -458,7 +458,7 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  std::vector<std::string> groups;
+  aw::vector<std::string> groups;
   if (!groupsArg.empty()) {
     if (!splitCommas(groupsArg, groups)) { std::fprintf(stderr, "bad --groups\n"); return EXIT_FAILURE; }
   } else {
@@ -468,9 +468,9 @@ int main(int argc, char **argv) {
 
   // Stock per group, keyed by 1-based handle. The library wants a vector indexed
   // by source item node (handle - 1).
-  std::map<std::string, std::vector<StockEntry>> groupStock;
+  std::map<std::string, aw::vector<StockEntry>> groupStock;
   for (const std::string &group : groups) {
-    std::vector<std::vector<std::string>> rows;
+    aw::vector<aw::vector<std::string>> rows;
     if (!readTsv(planPrefix + ".stock." + group + ".tsv", rows)) {
       std::fprintf(stderr, "cannot read %s.stock.%s.tsv\n", planPrefix.c_str(), group.c_str());
       return EXIT_FAILURE;
@@ -485,7 +485,7 @@ int main(int argc, char **argv) {
   }
 
   // Stage list.
-  std::vector<std::pair<const Stage *, std::string>> stages;
+  aw::vector<std::pair<const Stage *, std::string>> stages;
   if (stageArgs.empty()) {
     for (const Stage &stage : kStages) stages.push_back({&stage, stage.name});
   } else {
@@ -508,7 +508,7 @@ int main(int argc, char **argv) {
   }
   const std::vector<char> raw((std::istreambuf_iterator<char>(in)),
                               std::istreambuf_iterator<char>());
-  std::vector<std::byte> bytes(raw.size());
+  aw::vector<std::byte> bytes(raw.size());
   std::memcpy(bytes.data(), raw.data(), raw.size());
 
   configureForRegistration(nonoptimal, packSeconds, satelliteSeconds);
@@ -614,7 +614,7 @@ int main(int argc, char **argv) {
   // All workstations available: every real item handle is allowed, which is the
   // worst case for the pruning and the only setting the workstation-less Java
   // baselines can be compared against.
-  std::vector<aw::Handle> stations;
+  aw::vector<aw::Handle> stations;
   stations.reserve(graph.nReal);
   for (aw::Handle handle = 1; handle <= graph.nReal; handle++) stations.push_back(handle);
 
@@ -631,7 +631,7 @@ int main(int argc, char **argv) {
 
     for (const std::string &group : groups) {
       // Build the full inventory vector once per group.
-      std::vector<aw::Amount> inventory(graph.nItem, 0);
+      auto inventory = aw::vector<aw::Amount>::zeroes(graph.nItem);
       for (const auto &entry : groupStock[group]) {
         if (entry.handle > graph.nItem) continue;
         inventory[entry.handle - 1] += entry.amount;
@@ -697,7 +697,7 @@ int main(int argc, char **argv) {
               }
             }
 
-            std::vector<MissingItem> missing;
+            aw::vector<MissingItem> missing;
             if (ok) missing = deriveMissing(sub, node, amount, inventory, plan.exec);
 
             uint32_t multi = 0;

@@ -50,7 +50,7 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
   A.cols = n;
   A.colStart.reserve((size_t) n + 1);
   A.colStart.push_back(0);
-  std::vector<ColumnEntry> column;
+  aw::vector<ColumnEntry> column;
   // Note that our matrix is column-major, so we're processing column-by-column here.
   for (uint32_t r = 0; r < n; r++) {
     // Push "produced(i) - consumed(i)".
@@ -91,7 +91,7 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
   }
 
   // Push b[i].
-  std::vector<int64_t> rhs(m, 0);
+  aw::vector<int64_t> rhs(m, 0);
   for (uint32_t i = 0; i < m; i++) {
     if (i == target) {
       // Always produce `amount` new units; the target inventory is not
@@ -109,7 +109,7 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
   // node; those are exactly the synthetic member edges. Everything else costs
   // one crafting step. See include/aw/Solver.h for how the solver keeps the
   // free columns bounded without an equality.
-  std::vector<int64_t> objective(n);
+  aw::vector<int64_t> objective(n);
   for (uint32_t r = 0; r < n; r++)
     objective[r] = g.output[r] < g.nReal ? 1 : 0;
 

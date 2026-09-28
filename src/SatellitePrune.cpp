@@ -121,8 +121,8 @@ Amount columnCoefficient(const CraftingGraph& graph, uint recipe, NodeId item) n
 // so the articulation search below may skip the parent *vertex*.
 
 struct Undirected {
-  std::vector<uint> offsets;  // V + 1
-  std::vector<uint> targets;
+  aw::vector<uint> offsets;  // V + 1
+  aw::vector<uint> targets;
 
   [[nodiscard]]
   std::span<const uint> neighbours(uint v) const noexcept {
@@ -135,7 +135,7 @@ void buildUndirected(const CraftingGraph& graph, std::span<const uint8_t> recipe
   const uint nItem = graph.nItem;
   const uint nNodes = nItem + graph.nRecipe;
 
-  std::vector<uint> counts(nNodes, 0);
+  aw::vector<uint> counts(nNodes, 0);
   for (uint r = 0; r < graph.nRecipe; r++) {
     if (!recipeSeen[r])
       continue;
@@ -153,7 +153,7 @@ void buildUndirected(const CraftingGraph& graph, std::span<const uint8_t> recipe
     out.offsets[v + 1] = out.offsets[v] + counts[v];
   out.targets.assign(out.offsets[nNodes], 0);
 
-  std::vector<uint> cursor(out.offsets.begin(), out.offsets.end() - 1);
+  aw::vector<uint> cursor(out.offsets.begin(), out.offsets.end() - 1);
   auto link = [&](uint a, uint b) noexcept {
     out.targets[cursor[a]++] = b;
   };
@@ -194,9 +194,9 @@ void buildUndirected(const CraftingGraph& graph, std::span<const uint8_t> recipe
 // target-free, so no component has to be searched for the target and the "rest"
 // of the graph never has to be walked.
 struct DfsTree {
-  std::vector<int32_t> disc;  // -1 when unseen
-  std::vector<int32_t> low;
-  std::vector<uint> parent;
+  aw::vector<int32_t> disc;  // -1 when unseen
+  aw::vector<int32_t> low;
+  aw::vector<uint> parent;
 };
 
 void buildDfsTree(const Undirected& und, uint root, uint nNodes, DfsTree& out) noexcept {
@@ -204,8 +204,8 @@ void buildDfsTree(const Undirected& und, uint root, uint nNodes, DfsTree& out) n
   out.low.assign(nNodes, 0);
   out.parent.assign(nNodes, UINT32_MAX);
 
-  std::vector<uint> nodeStack;
-  std::vector<uint> edgeStack;
+  aw::vector<uint> nodeStack;
+  aw::vector<uint> edgeStack;
   int32_t timer = 0;
   out.disc[root] = out.low[root] = timer++;
   nodeStack.push_back(root);
@@ -240,7 +240,7 @@ void buildDfsTree(const Undirected& und, uint root, uint nNodes, DfsTree& out) n
 // Collects the DFS subtree rooted at `v` into `nodes`, reusing it as the work
 // stack. Only tree children are followed, so the walk costs the subtree size.
 void collectSubtree(const Undirected& und, const DfsTree& tree, uint v,
-                    std::vector<uint> &nodes) noexcept {
+                    aw::vector<uint> &nodes) noexcept {
   nodes.clear();
   nodes.push_back(v);
   for (size_t q = 0; q < nodes.size(); q++) {
@@ -270,14 +270,14 @@ void collectSubtree(const Undirected& und, const DfsTree& tree, uint v,
 // inside a cycle first.
 
 struct ItemGraph {
-  std::vector<uint> offsets;  // nItem + 1
-  std::vector<uint> targets;
+  aw::vector<uint> offsets;  // nItem + 1
+  aw::vector<uint> targets;
 };
 
 void buildItemGraph(const CraftingGraph& graph, std::span<const uint8_t> recipeSeen,
                     ItemGraph& out) noexcept {
   const uint nItem = graph.nItem;
-  std::vector<uint> counts(nItem, 0);
+  aw::vector<uint> counts(nItem, 0);
   for (uint r = 0; r < graph.nRecipe; r++) {
     if (!recipeSeen[r])
       continue;
@@ -292,7 +292,7 @@ void buildItemGraph(const CraftingGraph& graph, std::span<const uint8_t> recipeS
     out.offsets[v + 1] = out.offsets[v] + counts[v];
   out.targets.assign(out.offsets[nItem], 0);
 
-  std::vector<uint> cursor(out.offsets.begin(), out.offsets.end() - 1);
+  aw::vector<uint> cursor(out.offsets.begin(), out.offsets.end() - 1);
   for (uint r = 0; r < graph.nRecipe; r++) {
     if (!recipeSeen[r])
       continue;
@@ -307,14 +307,14 @@ void buildItemGraph(const CraftingGraph& graph, std::span<const uint8_t> recipeS
 // UINT32_MAX when the item is not in the subgraph. The number of components is
 // returned.
 uint32_t computeItemSccs(const ItemGraph& graph, std::span<const uint8_t> itemSeen,
-                         uint nItem, std::vector<uint32_t> &comp) noexcept {
+                         uint nItem, aw::vector<uint32_t> &comp) noexcept {
   comp.assign(nItem, UINT32_MAX);
-  std::vector<uint32_t> index(nItem, UINT32_MAX);
-  std::vector<uint32_t> low(nItem, 0);
-  std::vector<uint8_t> onStack(nItem, 0);
-  std::vector<uint> stack;
-  std::vector<uint> nodeStack;
-  std::vector<uint> edgeStack;
+  aw::vector<uint32_t> index(nItem, UINT32_MAX);
+  aw::vector<uint32_t> low(nItem, 0);
+  aw::vector<uint8_t> onStack(nItem, 0);
+  aw::vector<uint> stack;
+  aw::vector<uint> nodeStack;
+  aw::vector<uint> edgeStack;
   uint32_t timer = 0;
   uint32_t nComp = 0;
 
@@ -370,22 +370,22 @@ uint32_t computeItemSccs(const ItemGraph& graph, std::span<const uint8_t> itemSe
 // ---------------------------------------------------------------------------
 
 struct Component {
-  std::vector<NodeId> items;
-  std::vector<uint> recipes;
+  aw::vector<NodeId> items;
+  aw::vector<uint> recipes;
 };
 
 // Looks for y >= 0 with sum_j y_j A_{j,r} + A_{A,r} <= 0 for every recipe r of
 // G, minimising sum y so the point is as small as possible. False means "no
 // certificate was found", which only ever costs pruning power.
 bool solveCertificate(const CraftingGraph& graph, NodeId cutNode, const Component& comp,
-                      std::span<const int32_t> itemPos, std::vector<double> &y) noexcept {
+                      std::span<const int32_t> itemPos, aw::vector<double> &y) noexcept {
   try {
     std::unique_ptr<MPSolver> solver(MPSolver::CreateSolver("GLOP"));
     if (!solver)
       return false;
     solver->SuppressOutput();
 
-    std::vector<MPVariable*> var(comp.items.size(), nullptr);
+    aw::vector<MPVariable*> var(comp.items.size(), nullptr);
     for (size_t i = 0; i < comp.items.size(); i++) {
       var[i] = solver->MakeNumVar(0.0, CERTIFICATE_ITEM_CAP, "");
       solver->MutableObjective()->SetCoefficient(var[i], 1.0);
@@ -443,8 +443,8 @@ bool certificateHolds(const CraftingGraph& graph, NodeId cutNode, const Componen
 }
 
 bool componentIsDead(const CraftingGraph& graph, NodeId cutNode, const Component& comp,
-                     std::span<const int32_t> itemPos, std::vector<double> &y,
-                     std::vector<int64_t> &scaled) noexcept {
+                     std::span<const int32_t> itemPos, aw::vector<double> &y,
+                     aw::vector<int64_t> &scaled) noexcept {
   // Cheap and exact: with no recipe of G producing A, (A z)_A <= 0 for every z,
   // so the degenerate certificate Y = 0 is always available.
   bool producesCut = false;
@@ -504,7 +504,7 @@ bool componentIsDead(const CraftingGraph& graph, NodeId cutNode, const Component
 // escapes live; running out of budget only means an escape is not tried.
 bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> itemSeen,
                  std::span<const uint8_t> recipeSeen, std::span<const Amount> inventory,
-                 std::vector<uint8_t> &drop,
+                 aw::vector<uint8_t> &drop,
                  std::chrono::steady_clock::time_point started) noexcept {
   const uint nItem = graph.nItem;
   if (target >= nItem || !itemSeen[target])
@@ -513,11 +513,11 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
   // SCCs of the item level consume->produce graph, used only to order escapes.
   ItemGraph itemEdges;
   buildItemGraph(graph, recipeSeen, itemEdges);
-  std::vector<uint32_t> comp;
+  aw::vector<uint32_t> comp;
   const uint32_t nComp = computeItemSccs(itemEdges, itemSeen, nItem, comp);
-  std::vector<uint8_t> cycleItem(nItem, 0);
+  aw::vector<uint8_t> cycleItem(nItem, 0);
   if (nComp > 0) {
-    std::vector<uint> sizes(nComp, 0);
+    aw::vector<uint> sizes(nComp, 0);
     for (uint j = 0; j < nItem; j++)
       if (itemSeen[j] && comp[j] != UINT32_MAX)
         sizes[comp[j]]++;
@@ -529,7 +529,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
   // Dependency graph: x -> every input of a recipe that produces x. Following
   // it from the required items visits everything useful for producing them, so
   // an item reachable without A can leave the island.
-  std::vector<uint> depOffsets(nItem + 1, 0);
+  aw::vector<uint> depOffsets(nItem + 1, 0);
   for (uint r = 0; r < graph.nRecipe; r++) {
     if (!recipeSeen[r])
       continue;
@@ -537,9 +537,9 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
   }
   for (uint j = 0; j < nItem; j++)
     depOffsets[j + 1] += depOffsets[j];
-  std::vector<uint> depTargets(depOffsets[nItem]);
+  aw::vector<uint> depTargets(depOffsets[nItem]);
   {
-    std::vector<uint> cursor(depOffsets.begin(), depOffsets.end() - 1);
+    aw::vector<uint> cursor(depOffsets.begin(), depOffsets.end() - 1);
     for (uint r = 0; r < graph.nRecipe; r++) {
       if (!recipeSeen[r])
         continue;
@@ -550,7 +550,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
 
   // Recipes consuming each item, restricted to the subgraph; producers come
   // straight from i2r.
-  std::vector<uint> consOffsets(nItem + 1, 0);
+  aw::vector<uint> consOffsets(nItem + 1, 0);
   for (uint r = 0; r < graph.nRecipe; r++) {
     if (!recipeSeen[r])
       continue;
@@ -559,9 +559,9 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
   }
   for (uint j = 0; j < nItem; j++)
     consOffsets[j + 1] += consOffsets[j];
-  std::vector<uint> consTargets(consOffsets[nItem]);
+  aw::vector<uint> consTargets(consOffsets[nItem]);
   {
-    std::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
+    aw::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
     for (uint r = 0; r < graph.nRecipe; r++) {
       if (!recipeSeen[r])
         continue;
@@ -572,13 +572,13 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
 
   // The items the plan has to supply: the target and everything already held.
   // Both must stay outside every island, so the reverse walk starts there.
-  std::vector<uint> required;
+  aw::vector<uint> required;
   required.push_back(target);
   for (uint j = 0; j < nItem; j++)
     if (j != target && held(inventory, j) != 0)
       required.push_back(j);
 
-  std::vector<uint> candidates;
+  aw::vector<uint> candidates;
   candidates.reserve(nItem);
   for (uint j = 0; j < nItem; j++)
     if (itemSeen[j] && cycleItem[j])
@@ -589,14 +589,14 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
     if (itemSeen[j] && !cycleItem[j] && j != target)
       candidates.push_back(j);
 
-  std::vector<uint32_t> visited(nItem, UINT32_MAX);
-  std::vector<uint32_t> itemStamp(nItem, UINT32_MAX);
-  std::vector<uint32_t> recipeStamp(graph.nRecipe, UINT32_MAX);
-  std::vector<uint> queue;
-  std::vector<int32_t> itemPos(nItem, -1);
+  aw::vector<uint32_t> visited(nItem, UINT32_MAX);
+  aw::vector<uint32_t> itemStamp(nItem, UINT32_MAX);
+  aw::vector<uint32_t> recipeStamp(graph.nRecipe, UINT32_MAX);
+  aw::vector<uint> queue;
+  aw::vector<int32_t> itemPos(nItem, -1);
   Component island;
-  std::vector<double> y;
-  std::vector<int64_t> scaled;
+  aw::vector<double> y;
+  aw::vector<int64_t> scaled;
 
   const uint nSeen = (uint) std::count(itemSeen.begin(), itemSeen.end(), (uint8_t) 1);
   bool any = false;
@@ -724,7 +724,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
 
 bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> itemSeen,
          std::span<const uint8_t> recipeSeen, std::span<const Amount> inventory,
-         std::vector<uint8_t> &drop) noexcept {
+         aw::vector<uint8_t> &drop) noexcept {
   const uint nItem = graph.nItem;
   const uint nNodes = nItem + graph.nRecipe;
   if (target >= nItem || !itemSeen[target])
@@ -735,11 +735,11 @@ bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> ite
   buildUndirected(graph, recipeSeen, und);
   buildDfsTree(und, target, nNodes, tree);
 
-  std::vector<uint> subtree;
-  std::vector<int32_t> itemPos(nItem, -1);
+  aw::vector<uint> subtree;
+  aw::vector<int32_t> itemPos(nItem, -1);
   Component comp;
-  std::vector<double> y;
-  std::vector<int64_t> scaled;
+  aw::vector<double> y;
+  aw::vector<int64_t> scaled;
 
   const auto started = std::chrono::steady_clock::now();
   bool any = false;
@@ -838,7 +838,7 @@ bool computeSatellitePruning(const CraftingGraph& graph, NodeId target,
                              std::span<const uint8_t> itemSeen,
                              std::span<const uint8_t> recipeSeen,
                              std::span<const Amount> inventory,
-                             std::vector<uint8_t> &drop) noexcept {
+                             aw::vector<uint8_t> &drop) noexcept {
   if (!satelliteEnabled || !satelliteSettings.enabled)
     return false;
   static const bool debug = std::getenv("AW_SATELLITE_DEBUG") != nullptr;

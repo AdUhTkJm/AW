@@ -27,7 +27,7 @@ void expect(bool condition, const char* what) {
 
 bool subgraphHasRecipe(const aw::Subgraph &sub, uint32_t source);
 
-void emitVarInt(std::vector<std::byte> &out, std::uint64_t value) {
+void emitVarInt(aw::vector<std::byte> &out, std::uint64_t value) {
   while ((value & ~0x7FULL) != 0) {
     out.push_back(static_cast<std::byte>((value & 0x7F) | 0x80));
     value >>= 7;
@@ -41,7 +41,7 @@ void emitVarInt(std::vector<std::byte> &out, std::uint64_t value) {
 // workstation is dropped by registerCraftingGraph, so every real recipe here
 // names one.
 struct AwrWriter {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   std::uint32_t previousHandle = 0;
 
   void header(std::uint32_t nReal, std::uint32_t entries) {
@@ -81,8 +81,8 @@ struct AwrWriter {
 //   item 1 <- r0 (x4, needs item2 x2 + item3 x1), r1 (x1, needs item1 x5,
 //        workstations [1, 2])
 //   item 3 <- r2 (x1, needs item1 x1 + item3 x1)
-std::vector<std::byte> buildSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 2);  // realResourceCount
   emitVarInt(out, 2);  // entryCount
 
@@ -128,8 +128,8 @@ std::vector<std::byte> buildSample() {
 //   r2: item 1 x3 <- item 1 x1      (the only net producer)
 //
 // Registration must drop r0 and r1 and keep r2, with no query involved.
-std::vector<std::byte> buildLossySample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildLossySample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 1);  // realResourceCount
   emitVarInt(out, 1);  // entryCount
   emitVarInt(out, 1);  // output delta -> handle 1
@@ -174,7 +174,7 @@ std::vector<std::byte> buildLossySample() {
 // united), and r3 turns into an input-less recipe. Item 2 is an unstocked leaf
 // no recipe produces, so r0 and r1 are unusable without stock and the
 // input-less r3 is the only route to item 1.
-std::vector<std::byte> buildZeroInputSample() {
+aw::vector<std::byte> buildZeroInputSample() {
   AwrWriter w;
   w.header(2, 1);  // real handles 1..2, one entry, for handle 1
   w.item(1, 4);
@@ -192,7 +192,7 @@ std::vector<std::byte> buildZeroInputSample() {
 //
 // The x0 edge is dropped and the recipe survives, so item 1 stays feasible.
 // Dropping the recipe instead would make item 1 unreachable for every query.
-std::vector<std::byte> buildDegenerateOnlyInputSample() {
+aw::vector<std::byte> buildDegenerateOnlyInputSample() {
   AwrWriter w;
   w.header(2, 1);  // real handles 1..2, one entry, for handle 1
   w.item(1, 1);
@@ -209,8 +209,8 @@ std::vector<std::byte> buildDegenerateOnlyInputSample() {
 //             <- rD (x1, no workstations, inputs item-2 x1)   (synthetic)
 //
 // Recipe ids in file order: rA=0, rB=1, rC=2, rD=3.
-std::vector<std::byte> buildReachSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildReachSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 4);  // realResourceCount
   emitVarInt(out, 2);  // entries: outputs 1 and 5
 
@@ -261,8 +261,8 @@ std::vector<std::byte> buildReachSample() {
 // item 3 has no producer. Recipe ids in file order: rT=0, rT2=1, rA=2. When
 // only workstation 1 is allowed, item 2 keeps a producer in the source graph
 // but has none in the subgraph, so the cleanup must drop rT.
-std::vector<std::byte> buildDeadNodeSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildDeadNodeSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 3);  // realResourceCount
   emitVarInt(out, 2);  // entries: outputs 1 and 2
 
@@ -304,8 +304,8 @@ std::vector<std::byte> buildDeadNodeSample() {
 //
 //   item 1 <- r0 (x1, workstation [1], input item 2 x1)
 //   item 2 <- r1 (x2, workstation [2], input item 1 x1)
-std::vector<std::byte> buildPlanSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildPlanSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 2);  // realResourceCount
   emitVarInt(out, 2);  // entries: handles 1 and 2
 
@@ -334,8 +334,8 @@ std::vector<std::byte> buildPlanSample() {
 }
 
 // item 1 <- r0 consumes item 2, which has no recipe at all.
-std::vector<std::byte> buildPlanLeafSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildPlanLeafSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 2);  // realResourceCount
   emitVarInt(out, 1);  // entries: handle 1
   emitVarInt(out, 1);  // output delta -> handle 1
@@ -360,8 +360,8 @@ std::vector<std::byte> buildPlanLeafSample() {
 //          <- rD (x1, workstations [1],    input item 2 x2)  different input
 //
 // item 2 is a leaf, item 3 is an unused real resource.
-std::vector<std::byte> buildDuplicateSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildDuplicateSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 3);  // realResourceCount; workstations 1..3 are real
   emitVarInt(out, 1);  // one entry: output handle 1
 
@@ -414,8 +414,8 @@ std::vector<std::byte> buildDuplicateSample() {
 //   handle 5 P       <- r2 (x1, ws [4], T x1)
 //   handle 6 T       <- r3 (x1, no ws, stained x1)   (synthetic)
 //                    <- r4 (x1, no ws, glass x1)     (synthetic)
-std::vector<std::byte> buildGlassSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildGlassSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 5);  // realResourceCount
   emitVarInt(out, 4);  // entries: handles 1, 2, 5, 6
 
@@ -487,8 +487,8 @@ std::vector<std::byte> buildGlassSample() {
 //
 // With every edge costing 1, route A wins (4 < 6). With tag edges free, route
 // B wins (1 < 4).
-std::vector<std::byte> buildFreeTagSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildFreeTagSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 6);  // realResourceCount
   emitVarInt(out, 5);  // entries: handles 3, 4, 5, 6, 7
 
@@ -563,8 +563,8 @@ std::vector<std::byte> buildFreeTagSample() {
   return out;
 }
 
-std::vector<std::byte> buildCounterSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildCounterSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 7);  // realResourceCount
   emitVarInt(out, 7);  // entries: handles 3, 4, 5, 6, 7, 8, 9
 
@@ -664,8 +664,8 @@ std::vector<std::byte> buildCounterSample() {
 //   handle 1 m <- r0 (x8, ws [2], w x1)
 //   handle 3 T <- r1 (x1, no ws, m x1)
 //              <- r2 (x1, no ws, w x1)
-std::vector<std::byte> buildBulkSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildBulkSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 2);  // realResourceCount
   emitVarInt(out, 2);  // entries: handles 1, 3
 
@@ -714,7 +714,7 @@ std::vector<std::byte> buildBulkSample() {
 //   handle 7 T_ALL <- r8 (x1, no ws, W x1)      (synthetic)
 //                  <- r9 (x1, no ws, M x1)
 //                  <- r10 (x1, no ws, N x1)
-std::vector<std::byte> buildFusedQuartzSample() {
+aw::vector<std::byte> buildFusedQuartzSample() {
   AwrWriter w;
   w.header(4, 6);  // real handles 1..4; entries 1, 2, 3, 5, 6, 7
   w.item(1, 1);
@@ -748,7 +748,7 @@ std::vector<std::byte> buildFusedQuartzSample() {
 //   handle 6 T <- r4 (x1, no ws, W x1)       (synthetic; T = {W, M})
 //              <- r5 (x1, no ws, M x1)
 //   handle 7 K <- r6 (x1, no ws, Z x1)       (synthetic)
-std::vector<std::byte> buildTransitiveClosureSample() {
+aw::vector<std::byte> buildTransitiveClosureSample() {
   AwrWriter w;
   w.header(5, 6);  // real handles 1..5; entries 1, 2, 3, 5, 6, 7
   w.item(1, 1);
@@ -788,7 +788,7 @@ std::vector<std::byte> buildTransitiveClosureSample() {
 // composite pass leaves r1 alone and the substitution is the only reason r0 can
 // go. When `breakChain` is set, C is made from z instead of w, so B (and hence
 // T) does not cost w and r0 must survive.
-std::vector<std::byte> buildSubstitutionSample(bool breakChain = false) {
+aw::vector<std::byte> buildSubstitutionSample(bool breakChain = false) {
   AwrWriter w;
   w.header(8, 6);  // real handles 1..8; entries 1, 2, 3, 4, 5, 9
   w.item(1, 2);
@@ -822,7 +822,7 @@ std::vector<std::byte> buildSubstitutionSample(bool breakChain = false) {
 //   handle 5 u    (leaf)
 // Recipe ids: r0=0, r1=1, r2=2, r3=3. w has a producer so r1 is not
 // composite-dominated and the substitution is the only reason r0 can go.
-std::vector<std::byte> buildSubstitutionRealSample() {
+aw::vector<std::byte> buildSubstitutionRealSample() {
   AwrWriter w;
   w.header(5, 3);  // real handles 1..5; entries 1, 2, 3
   w.item(1, 2);
@@ -854,8 +854,8 @@ std::vector<std::byte> buildSubstitutionRealSample() {
 // back out of the surplus. Without it the T must come from w, which forces a
 // second r0/r1 pair, so the same target costs 6 real crafts and dropping the
 // edge raises the optimum.
-std::vector<std::byte> buildBatchRecycleSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildBatchRecycleSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 4);  // realResourceCount: base, w, m, goal
   emitVarInt(out, 6);  // entries: handles 1..6
 
@@ -944,11 +944,11 @@ std::vector<std::byte> buildBatchRecycleSample() {
 //   handle n+2      T      <- (x1, no ws, w x1) and <- (x1, no ws, m_i x1)
 constexpr uint32_t k_wideTagMembers = 6000;
 
-std::vector<std::byte> buildWideTagSample() {
+aw::vector<std::byte> buildWideTagSample() {
   const uint32_t n = k_wideTagMembers;
   const uint32_t witness = 1;
 
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, n + 1);  // realResourceCount: w + m_i
   emitVarInt(out, n + 1);  // entries: handles 2..n+1 and the tag
 
@@ -989,8 +989,8 @@ std::vector<std::byte> buildWideTagSample() {
 //   handle 4 black        <- r4 (x256, ws [1], black_dye x1)
 //                         <- r5 (x224, ws [1], black_candle x1)
 //   handles 5, 6 are leaves.
-std::vector<std::byte> buildBlackCandleSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildBlackCandleSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 6);  // realResourceCount
   emitVarInt(out, 4);  // entries: handles 1, 2, 3, 4
 
@@ -1069,8 +1069,8 @@ std::vector<std::byte> buildBlackCandleSample() {
 //   handle 2 torch      <- r2 (x4, ws [1], stick x1 + J x1)
 //   handle 3 coal_block <- r3 (x1, ws [1], coal x9)
 //   handle 6 J = {stick, leaf}, handles 4 and 5 are leaves.
-std::vector<std::byte> buildCoalRegressionSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildCoalRegressionSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 5);  // realResourceCount
   emitVarInt(out, 4);  // entries: handles 1, 2, 3, 6
 
@@ -1143,8 +1143,8 @@ std::vector<std::byte> buildCoalRegressionSample() {
 //              <- S (x4, ws [1], Z x1)
 //   handle 2 Y <- r (x1, ws [1], Z x1)
 //   handle 3 Z is a leaf.
-std::vector<std::byte> buildAmountRatioSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildAmountRatioSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 3);
   emitVarInt(out, 2);
 
@@ -1187,8 +1187,8 @@ std::vector<std::byte> buildAmountRatioSample() {
 //              <- S (x1, ws [1], Z x1)
 //   handle 2 Y <- r (x1, ws [1], K x1)
 //   handles 3 Z and 4 K are leaves.
-std::vector<std::byte> buildIndependentRouteSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildIndependentRouteSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 4);
   emitVarInt(out, 2);
 
@@ -1232,8 +1232,8 @@ std::vector<std::byte> buildIndependentRouteSample() {
 //              <- S (x1, ws [1], Z x1)
 //   handle 2 Y <- r (x2, ws [1], Z x1)
 //   handle 3 Z is a leaf.
-std::vector<std::byte> buildIntegerScalingSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildIntegerScalingSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 3);
   emitVarInt(out, 2);
 
@@ -1282,8 +1282,8 @@ std::vector<std::byte> buildIntegerScalingSample() {
 // ceil(3 / 2) = 2, so `2 Y + R` leaves a spare Y and is not bounded by S. The
 // nonoptimal relaxation floors to 1, which wrongly bounds R by S. Recipe ids:
 // R=0, S=1, r=2, z=3.
-std::vector<std::byte> buildRelaxedCompositeSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildRelaxedCompositeSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 4);  // realResourceCount
   emitVarInt(out, 3);  // entries: handles 1, 2, 3
 
@@ -1342,8 +1342,8 @@ std::vector<std::byte> buildRelaxedCompositeSample() {
 //   handle 3 Z <- (x1, ws [4=A], BASE x1)
 //   handle 6 BASE is a leaf.
 // Recipe ids in file order: R=0, S=1, r=2, Z's recipe=3.
-std::vector<std::byte> buildWorkstationGuardSample(bool sSuperset) {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildWorkstationGuardSample(bool sSuperset) {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 6);  // realResourceCount
   emitVarInt(out, 3);  // entries: handles 1, 2, 3
 
@@ -1410,8 +1410,8 @@ std::vector<std::byte> buildWorkstationGuardSample(bool sSuperset) {
 //   handle 4 P  <- p  (x1, ws [7], ORE x1)
 //   handles 5..9 ORE, Q, WS_A, WS_B, WS_C are leaves.
 // Recipe ids in file order: R=0, S1=1, S2=2, r1=3, r2=4, p=5.
-std::vector<std::byte> buildMultiDominatorSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildMultiDominatorSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 9);  // realResourceCount
   emitVarInt(out, 4);  // entries: handles 1, 2, 3, 4
 
@@ -1488,8 +1488,8 @@ std::vector<std::byte> buildMultiDominatorSample() {
 //   handle 2 A <- r2 (x1, ws [4], B x1)
 //   handle 3 B    (leaf)
 //   handles 4, 5 are WS_A and WS_B.
-std::vector<std::byte> buildDirectDominanceSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildDirectDominanceSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 5);  // realResourceCount
   emitVarInt(out, 2);  // entries: handles 1, 2
 
@@ -1537,8 +1537,8 @@ std::vector<std::byte> buildDirectDominanceSample() {
 //
 // essence has a producer on purpose, so the composite pass leaves r1 alone and
 // the direct flag below is the only thing under test.
-std::vector<std::byte> buildNormalizedDominanceSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildNormalizedDominanceSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 4);  // realResourceCount: X, essence, Z, WS
   emitVarInt(out, 2);  // entries: handles 1, 2
 
@@ -1581,8 +1581,8 @@ std::vector<std::byte> buildNormalizedDominanceSample() {
 //               <- r1 (x6, ws [4], A x6)   ; same A per X
 //   handle 2 A <- r2 (x1, ws [4], Z x1)
 //   handle 3 Z is a leaf, handle 4 is WS.
-std::vector<std::byte> buildEqualRatioSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildEqualRatioSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 4);  // realResourceCount: X, A, Z, WS
   emitVarInt(out, 2);  // entries: handles 1, 2
 
@@ -1631,8 +1631,8 @@ std::vector<std::byte> buildEqualRatioSample() {
 //   handle 2 stick     (leaf)
 //   handle 3 pickaxe <- r1 (x1, ws [1], ingot x3 + stick x2)
 //   handle 4 nugget  <- r2 (x1, ws [1], pickaxe x1)
-std::vector<std::byte> buildPackSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildPackSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 4);  // realResourceCount
   emitVarInt(out, 3);  // entries: handles 1, 3, 4
 
@@ -1682,8 +1682,8 @@ std::vector<std::byte> buildPackSample() {
 //              <- r2 (x2, ws [1], C x1)
 //   handle 3 B <- r3 (x1, ws [1], X x1)
 //   handle 4 C   (leaf)
-std::vector<std::byte> buildPackBranchSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildPackBranchSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 4);  // realResourceCount
   emitVarInt(out, 3);  // entries: handles 1, 2, 3
 
@@ -1742,8 +1742,8 @@ std::vector<std::byte> buildPackBranchSample() {
 // With variantOut == 1 the branch is break-even (1 plate -> 1 variant ->
 // 1 plate) and can never repay the plate, so it is dead. With variantOut == 2
 // it is gainful and must be kept.
-std::vector<std::byte> buildSatelliteSample(uint64_t variantOut) {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildSatelliteSample(uint64_t variantOut) {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 5);  // realResourceCount
   emitVarInt(out, 3);  // entries: handles 1, 2, 3
 
@@ -1808,8 +1808,8 @@ std::vector<std::byte> buildSatelliteSample(uint64_t variantOut) {
 // The E/W/O cycle can never net-produce CB, but X is consumed both by it and
 // by the Y -> T chain, so removing CB leaves E/W/O connected to the target in
 // the undirected graph. The escape enumeration still finds it.
-std::vector<std::byte> buildSatelliteLeakSample() {
-  std::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+aw::vector<std::byte> buildSatelliteLeakSample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(out, 9);  // realResourceCount (handle 9 is the workbench)
   emitVarInt(out, 7);  // entries: handles 1, 2, 3, 5, 6, 7, 8
 
@@ -1918,7 +1918,7 @@ std::vector<std::byte> buildSatelliteLeakSample() {
 
 aw::solver::Matrix makeMatrix(
     uint32_t rows, uint32_t cols,
-    const std::vector<std::vector<std::pair<uint32_t, int64_t>>> &columns) {
+    const aw::vector<aw::vector<std::pair<uint32_t, int64_t>>> &columns) {
   aw::solver::Matrix A;
   A.rows = rows;
   A.cols = cols;
@@ -1940,8 +1940,8 @@ void testSolver() {
   // The LP relaxation is 2.5 at (1, 1.5); whole executions cost 3.
   {
     const aw::solver::Matrix A = makeMatrix(2, 2, {{{0, 1}, {1, 1}}, {{0, 2}}});
-    const std::vector<int64_t> b = {4, 1};
-    const std::vector<int64_t> c = {1, 1};
+    const aw::vector<int64_t> b = {4, 1};
+    const aw::vector<int64_t> c = {1, 1};
     const aw::solver::Result r = aw::solver::solve(A, b, c);
     expect(r.status == aw::PlanStatus::OK, "simple solve succeeds");
     expect(r.provenOptimal, "small solve is proven optimal");
@@ -1953,8 +1953,8 @@ void testSolver() {
   // 2 x0 >= 5 has no integer point at 2.5, so the solver must round up.
   {
     const aw::solver::Matrix A = makeMatrix(1, 1, {{{0, 2}}});
-    const std::vector<int64_t> b = {5};
-    const std::vector<int64_t> c = {1};
+    const aw::vector<int64_t> b = {5};
+    const aw::vector<int64_t> c = {1};
     const aw::solver::Result r = aw::solver::solve(A, b, c);
     expect(r.status == aw::PlanStatus::OK && r.objective == 3,
            "integrality rounds a fractional bound up");
@@ -1963,8 +1963,8 @@ void testSolver() {
   // An empty row reads 0 >= b, so a positive requirement is unsatisfiable.
   {
     const aw::solver::Matrix A = makeMatrix(2, 1, {{{0, 1}}});
-    const std::vector<int64_t> b = {1, 1};
-    const std::vector<int64_t> c = {1};
+    const aw::vector<int64_t> b = {1, 1};
+    const aw::vector<int64_t> c = {1};
     const aw::solver::Result r = aw::solver::solve(A, b, c);
     expect(r.status == aw::PlanStatus::INFEASIBLE, "infeasible model is detected");
   }
@@ -1972,8 +1972,8 @@ void testSolver() {
   // x0 >= 5 and -x0 >= -1 cannot both hold.
   {
     const aw::solver::Matrix A = makeMatrix(2, 1, {{{0, 1}, {1, -1}}});
-    const std::vector<int64_t> b = {5, -1};
-    const std::vector<int64_t> c = {1};
+    const aw::vector<int64_t> b = {5, -1};
+    const aw::vector<int64_t> c = {1};
     const aw::solver::Result r = aw::solver::solve(A, b, c);
     expect(r.status == aw::PlanStatus::INFEASIBLE, "contradictory rows are detected");
   }
@@ -1981,8 +1981,8 @@ void testSolver() {
   // A negative right hand side is free starting stock.
   {
     const aw::solver::Matrix A = makeMatrix(1, 1, {{{0, 1}}});
-    const std::vector<int64_t> b = {-5};
-    const std::vector<int64_t> c = {1};
+    const aw::vector<int64_t> b = {-5};
+    const aw::vector<int64_t> c = {1};
     const aw::solver::Result r = aw::solver::solve(A, b, c);
     expect(r.status == aw::PlanStatus::OK && r.objective == 0 && r.x[0] == 0,
            "negative rhs needs no production");
@@ -1992,8 +1992,8 @@ void testSolver() {
   // hard limit.
   {
     const aw::solver::Matrix A = makeMatrix(1, 1, {{{0, 1}}});
-    const std::vector<int64_t> b = {5};
-    const std::vector<int64_t> c = {1};
+    const aw::vector<int64_t> b = {5};
+    const aw::vector<int64_t> c = {1};
     aw::solver::Options tight;
     tight.objectiveCap = 1;
     const aw::solver::Result r = aw::solver::solve(A, b, c, tight);
@@ -2004,8 +2004,8 @@ void testSolver() {
   // One worker and a fixed seed must be reproducible.
   {
     const aw::solver::Matrix A = makeMatrix(1, 2, {{{0, 1}}, {{0, 1}}});
-    const std::vector<int64_t> b = {7};
-    const std::vector<int64_t> c = {1, 2};
+    const aw::vector<int64_t> b = {7};
+    const aw::vector<int64_t> c = {1, 2};
     aw::solver::Options single;
     single.numWorkers = 1;
     const aw::solver::Result first = aw::solver::solve(A, b, c, single);
@@ -2022,8 +2022,8 @@ void testReducedCostFixing() {
   // min x0 + x1  s.t.  2 x0 >= 7.  The LP is 3.5 while the integer optimum is
   // 4, and x1 is pure overhead, so x1's reduced cost (1) exceeds the 0.5 gap.
   const aw::solver::Matrix A = makeMatrix(1, 2, {{{0, 2}}, {}});
-  const std::vector<int64_t> b = {7};
-  const std::vector<int64_t> c = {1, 1};
+  const aw::vector<int64_t> b = {7};
+  const aw::vector<int64_t> c = {1, 1};
 
   {
     aw::solver::Options options;
@@ -2049,8 +2049,8 @@ void testReducedCostFixing() {
   // dropping it. Exercise that path and check it keeps the optimum.
   {
     const aw::solver::Matrix A2 = makeMatrix(1, 2, {{{0, 2}}, {{0, 1}}});
-    const std::vector<int64_t> b2 = {7};
-    const std::vector<int64_t> c2 = {1, 1};
+    const aw::vector<int64_t> b2 = {7};
+    const aw::vector<int64_t> c2 = {1, 1};
     aw::solver::Options options;
     options.reducedCostGap = 0.5;
     const aw::solver::Result r = aw::solver::solve(A2, b2, c2, options);
@@ -2071,8 +2071,8 @@ void testFlash() {
   // floor rather than the exact cost.
   {
     const aw::solver::Matrix A = makeMatrix(2, 2, {{{0, 1}, {1, 1}}, {{0, 2}}});
-    const std::vector<int64_t> b = {4, 1};
-    const std::vector<int64_t> c = {1, 1};
+    const aw::vector<int64_t> b = {4, 1};
+    const aw::vector<int64_t> c = {1, 1};
     aw::solver::Options options;
     options.flash = true;
     const aw::solver::Result r = aw::solver::solve(A, b, c, options);
@@ -2088,8 +2088,8 @@ void testFlash() {
   // infeasible and is abandoned for a cap that admits a plan.
   {
     const aw::solver::Matrix A = makeMatrix(1, 1, {{{0, 1}}});
-    const std::vector<int64_t> b = {5};
-    const std::vector<int64_t> c = {1};
+    const aw::vector<int64_t> b = {5};
+    const aw::vector<int64_t> c = {1};
     aw::solver::Options options;
     options.flash = true;
     options.objectiveCap = 1;
@@ -2102,8 +2102,8 @@ void testFlash() {
   // the model that fixes a column with a 0.5 gap reports none under flash.
   {
     const aw::solver::Matrix A = makeMatrix(1, 2, {{{0, 2}}, {}});
-    const std::vector<int64_t> b = {7};
-    const std::vector<int64_t> c = {1, 1};
+    const aw::vector<int64_t> b = {7};
+    const aw::vector<int64_t> c = {1, 1};
     aw::solver::Options options;
     options.reducedCostGap = 0.5;
     options.flash = true;
@@ -2120,8 +2120,8 @@ void testZeroCostColumns() {
   // solver cannot pump it even though the row is only `>=`.
   {
     const aw::solver::Matrix A = makeMatrix(2, 2, {{{0, 1}}, {{1, 1}}});
-    const std::vector<int64_t> b = {0, 1};
-    const std::vector<int64_t> c = {0, 1};
+    const aw::vector<int64_t> b = {0, 1};
+    const aw::vector<int64_t> c = {0, 1};
     const aw::solver::Result r = aw::solver::solve(A, b, c);
     expect(r.status == aw::PlanStatus::OK && r.provenOptimal && r.objective == 1,
            "an unconsumed free column costs nothing and is not pumped");
@@ -2134,8 +2134,8 @@ void testZeroCostColumns() {
   // natural cap, not from `cap` itself.
   {
     const aw::solver::Matrix A = makeMatrix(2, 2, {{{0, 1}}, {{0, -8}, {1, 1}}});
-    const std::vector<int64_t> b = {0, 1};
-    const std::vector<int64_t> c = {0, 1};
+    const aw::vector<int64_t> b = {0, 1};
+    const aw::vector<int64_t> c = {0, 1};
     const aw::solver::Result r = aw::solver::solve(A, b, c);
     expect(r.status == aw::PlanStatus::OK && r.provenOptimal && r.objective == 1,
            "a free column may exceed the objective cap");
@@ -2147,8 +2147,8 @@ void testZeroCostColumns() {
   // is still a feasibility problem, not `x = 0`.
   {
     const aw::solver::Matrix A = makeMatrix(1, 1, {{{0, 1}}});
-    const std::vector<int64_t> b = {3};
-    const std::vector<int64_t> c = {0};
+    const aw::vector<int64_t> b = {3};
+    const aw::vector<int64_t> c = {0};
     const aw::solver::Result r = aw::solver::solve(A, b, c);
     expect(r.status == aw::PlanStatus::OK && r.objective == 0 && r.x.size() == 1 &&
                r.x[0] >= 3,
@@ -2177,7 +2177,7 @@ void testPlan() {
   expect(none.exec[1] == 4, "r1 count");
 
   // 100 spare item 2 units cover the cycle losses, so r0 alone suffices.
-  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  aw::vector<aw::Amount> inventory(graph.nItem, 0);
   inventory[1] = 100;
   const aw::PlanResult stocked = aw::planCrafting(sub, target, 4, inventory);
   expect(stocked.status == aw::PlanStatus::OK, "plan with inventory is optimal");
@@ -2249,7 +2249,7 @@ void testDuplicateRecipes() {
 
 void testSample() {
   std::cout << "[Test] sample dump\n";
-  const std::vector<std::byte> bytes = buildSample();
+  const aw::vector<std::byte> bytes = buildSample();
   aw::registerCraftingGraph(bytes);
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
 
@@ -2311,7 +2311,7 @@ void testNetLossRecipes() {
   aw::setSatellitePruningEnabled(false);
   aw::setDeadNodePruningEnabled(false);
   const aw::Handle all[] = {1};
-  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  aw::vector<aw::Amount> inventory(graph.nItem, 0);
   inventory[0] = 100;
   const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
   aw::setDeadNodePruningEnabled(true);
@@ -2402,7 +2402,7 @@ void testDegenerateOnlyInput() {
 
 void testReachability() {
   std::cout << "[Test] reachable subgraph\n";
-  const std::vector<std::byte> bytes = buildReachSample();
+  const aw::vector<std::byte> bytes = buildReachSample();
   aw::registerCraftingGraph(bytes);
   expect(aw::getCraftingError() == nullptr, "reach sample parses");
   const aw::CraftingGraph& graph = aw::getCraftingGraph();
@@ -2414,7 +2414,7 @@ void testReachability() {
   // a component that holds stock (it is a way to spend it) even though nothing
   // produces item node 1. With no stock that branch would be dropped, which is
   // what testSatellitePruning covers.
-  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  aw::vector<aw::Amount> inventory(graph.nItem, 0);
   inventory[1] = 10;
   aw::Subgraph sub = aw::reachableSubgraph(1, allowed, inventory);
 
@@ -2500,7 +2500,7 @@ void testDeadNodePruning() {
   }
 
   const aw::Handle onlyT[] = {1};  // rT and rT2 run; rA needs workstation 2.
-  std::vector<aw::Amount> inventory(3, 0);
+  aw::vector<aw::Amount> inventory(3, 0);
 
   // With the cleanup off, item 2 is a leaf that no surviving recipe produces,
   // and rT is still in the subgraph.
@@ -2530,7 +2530,7 @@ void testDeadNodePruning() {
 
   // Stock on item 2 makes rT usable, so nothing is dead.
   {
-    std::vector<aw::Amount> stocked = inventory;
+    aw::vector<aw::Amount> stocked = inventory;
     stocked[1] = 5;  // item 2
     const aw::Subgraph sub = aw::reachableSubgraph(1, onlyT, stocked);
     expect(sub.graph.nItem == 3 && sub.graph.nRecipe == 2,
@@ -2540,7 +2540,7 @@ void testDeadNodePruning() {
 
   // The cleanup must not change the plan optimum.
   {
-    std::vector<aw::Amount> stocked = inventory;
+    aw::vector<aw::Amount> stocked = inventory;
     stocked[2] = 10;  // item 3, the shared raw input
     auto total = [](const aw::PlanResult &plan) {
       int64_t sum = 0;
@@ -2575,15 +2575,15 @@ void testRejectsBadInput() {
   };
 
   expect(rejects({}), "empty blob");
-  const std::vector<std::byte> wrongMagic = {std::byte{'X'}, std::byte{'W'}, std::byte{'R'},
+  const aw::vector<std::byte> wrongMagic = {std::byte{'X'}, std::byte{'W'}, std::byte{'R'},
                          std::byte{1}, std::byte{0}, std::byte{0}};
   expect(rejects(wrongMagic), "bad magic");
 
-  std::vector<std::byte> truncated = buildSample();
+  aw::vector<std::byte> truncated = buildSample();
   truncated.resize(truncated.size() - 1);
   expect(rejects(truncated), "truncated");
 
-  std::vector<std::byte> trailing = buildSample();
+  aw::vector<std::byte> trailing = buildSample();
   trailing.push_back(std::byte{0});
   expect(rejects(trailing), "trailing byte");
 
@@ -2593,7 +2593,7 @@ void testRejectsBadInput() {
   expect(rejects(zeroDelta), "handle 0 output");
 
   // A workstation must name a real resource (handle <= realResourceCount).
-  std::vector<std::byte> badStation = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  aw::vector<std::byte> badStation = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
   emitVarInt(badStation, 1);  // one real resource
   emitVarInt(badStation, 1);  // one output
   emitVarInt(badStation, 1);  // output handle 1
@@ -2614,7 +2614,7 @@ void testRejectsBadInput() {
          "previous graph is still coherent after a rejected blob");
 
   // A failure must not poison the next attempt with a stale error.
-  const std::vector<std::byte> bad = {std::byte{'X'}};
+  const aw::vector<std::byte> bad = {std::byte{'X'}};
   aw::registerCraftingGraph(bad);
   expect(aw::getCraftingError() != nullptr, "bad blob reports an error");
   aw::registerCraftingGraph(buildSample());
@@ -2656,7 +2656,7 @@ void testTagPruning() {
   }
   {
     // Stocking the dominated member keeps its tag edge usable.
-    std::vector<aw::Amount> inventory(nItem, 0);
+    aw::vector<aw::Amount> inventory(nItem, 0);
     inventory[1] = 10;  // handle 2 (stained glass)
     const aw::Subgraph sub = aw::reachableSubgraph(5, all, inventory);
     expect(keepsStainedEdge(sub), "inventory keeps the dominated tag edge");
@@ -2769,7 +2769,7 @@ void testTagPruningParity() {
   const aw::Handle all[] = {1, 2, 3, 4, 5};
 
   // Leaves are free only via inventory, so stock every item with no recipe.
-  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  aw::vector<aw::Amount> inventory(graph.nItem, 0);
   for (aw::NodeId m = 0; m < graph.nReal; m++)
     if (graph.i2r.targetsOf(m).empty())
       inventory[m] = 1000000000ULL;
@@ -2815,7 +2815,7 @@ void testTagBatchingGuard() {
   expect(batchedEdgeKept, "the batched member T <- m survives the guard");
 
   const aw::Handle all[] = {1, 2, 3, 4};
-  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  aw::vector<aw::Amount> inventory(graph.nItem, 0);
 
   // Count only real recipes: the synthetic tag edges are free.
   auto realSteps = [&](bool prune) {
@@ -2866,7 +2866,7 @@ void testNonoptimal() {
     }
     expect(batchedEdgeDominated, "the relaxed pass drops the batched tag edge");
 
-    std::vector<aw::Amount> inventory(graph.nItem, 0);
+    aw::vector<aw::Amount> inventory(graph.nItem, 0);
     const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
     const aw::NodeId target = sub.translate(3);
     const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
@@ -2914,7 +2914,7 @@ void testNonoptimal() {
       aw::options.nonoptimal = relaxed;
       aw::registerCraftingGraph(buildNormalizedDominanceSample());
       const aw::CraftingGraph &g = aw::getCraftingGraph();
-      std::vector<aw::Amount> inventory(g.nItem, 0);
+      aw::vector<aw::Amount> inventory(g.nItem, 0);
       inventory[2] = 1000;  // Z, the leaf behind essence
       const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
       const aw::PlanResult r = aw::planCrafting(sub, sub.translate(0), 6, inventory);
@@ -2938,7 +2938,7 @@ void testNonoptimal() {
     const aw::CraftingGraph &g = aw::getCraftingGraph();
     expect(g.recipeDirectDominated[0] == 0 && g.recipeDirectDominated[1] == 0,
            "equal per-unit columns stay incomparable");
-    std::vector<aw::Amount> inventory(g.nItem, 0);
+    aw::vector<aw::Amount> inventory(g.nItem, 0);
     inventory[2] = 1000;  // Z
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
     const aw::PlanResult r = aw::planCrafting(sub, sub.translate(0), 1, inventory);
@@ -2966,7 +2966,7 @@ void testTagInlining() {
     aw::setTagInliningMode(mode);
     aw::registerCraftingGraph(buildGlassSample());
     const aw::CraftingGraph &graph = aw::getCraftingGraph();
-    std::vector<aw::Amount> inventory(graph.nItem, 0);
+    aw::vector<aw::Amount> inventory(graph.nItem, 0);
     for (aw::NodeId m = 0; m < graph.nReal; m++)
       if (graph.i2r.targetsOf(m).empty())
         inventory[m] = 1000000000ULL;
@@ -3016,7 +3016,7 @@ void testFreeTagObjective() {
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
 
   const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
-  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  aw::vector<aw::Amount> inventory(graph.nItem, 0);
   inventory[0] = 1000000000ULL;  // m1
   inventory[1] = 1000000000ULL;  // m2
 
@@ -3077,7 +3077,7 @@ void testRecipePruning() {
   {
     // Stocking the guard input keeps the dropped recipe reachable.
     const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
-    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
     inventory[0] = 10;  // black_candle
     const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
     bool kept = false;
@@ -3167,7 +3167,7 @@ void testRecipePruningWorkstations() {
   const aw::Handle both[] = {4, 5};
 
   // BASE (handle 6 -> item node 5) is the only leaf; the player holds it.
-  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  aw::vector<aw::Amount> inventory(graph.nItem, 0);
   inventory[5] = 100;
 
   // R (recipe 0) is dominated by S, which runs on WS_B only. A player who does
@@ -3194,8 +3194,8 @@ void testRecipePruningWorkstations() {
     return std::pair<aw::PlanStatus, int64_t>(r.status, total);
   };
 
-  const std::vector<aw::Handle> cases[] = {{4}, {4, 5}};
-  for (const std::vector<aw::Handle> &ws : cases) {
+  const aw::vector<aw::Handle> cases[] = {{4}, {4, 5}};
+  for (const aw::vector<aw::Handle> &ws : cases) {
     const auto full = plan(false, ws);
     const auto pruned = plan(true, ws);
     expect(full.first == aw::PlanStatus::OK, "the unpruned route plans");
@@ -3216,13 +3216,13 @@ void testRecipeDominatorWorkstations() {
   {
     // WS_B is handle 8 -> node 7 and WS_C is handle 9 -> node 8. Both sink
     // representatives contribute, so either station alone can drop R.
-    const std::vector<aw::NodeId> want = {7, 8};
+    const aw::vector<aw::NodeId> want = {7, 8};
     expect(graph.recipeDominatorWorkstations[0] == want,
            "both dominators contribute their stations");
   }
 
   // Leaves are free only through inventory.
-  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  aw::vector<aw::Amount> inventory(graph.nItem, 0);
   for (aw::NodeId m = 0; m < graph.nReal; m++)
     if (graph.i2r.targetsOf(m).empty())
       inventory[m] = 1000000000LL;
@@ -3253,8 +3253,8 @@ void testRecipeDominatorWorkstations() {
     return std::pair<aw::PlanStatus, int64_t>(r.status, total);
   };
 
-  const std::vector<aw::Handle> cases[] = {{7}, {7, 8}, {7, 9}, {7, 8, 9}};
-  for (const std::vector<aw::Handle> &ws : cases) {
+  const aw::vector<aw::Handle> cases[] = {{7}, {7, 8}, {7, 9}, {7, 8, 9}};
+  for (const aw::vector<aw::Handle> &ws : cases) {
     const auto full = plan(false, ws);
     const auto pruned = plan(true, ws);
     expect(full.first == aw::PlanStatus::OK, "the unpruned route plans");
@@ -3271,7 +3271,7 @@ void testRecipePruningParity() {
   const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
 
   // Leaves (handles 5 and 6) are free only through inventory.
-  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  aw::vector<aw::Amount> inventory(graph.nItem, 0);
   for (aw::NodeId m = 0; m < graph.nReal; m++)
     if (graph.i2r.targetsOf(m).empty())
       inventory[m] = 1000000000LL;
@@ -3314,14 +3314,14 @@ void testDirectDominancePruning() {
     expect(graph.recipeDirectDominated[1] == 0, "the maximal column survives");
     expect(graph.recipeDominated[0] == 0 && graph.recipeDominated[1] == 0,
            "the composite pass cannot see this pair");
-    const std::vector<aw::NodeId> want = {4};  // node 4 = handle 5 = WS_B
+    const aw::vector<aw::NodeId> want = {4};  // node 4 = handle 5 = WS_B
     expect(graph.recipeDirectDominatorWorkstations[0] == want,
            "the dominator's workstation is recorded");
   }
 
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
   // B (handle 3 -> node 2) is a leaf, so the inventory must hold it.
-  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  aw::vector<aw::Amount> inventory(graph.nItem, 0);
   inventory[2] = 100;
 
   const aw::Handle onlyA[] = {4};    // WS_A
@@ -3333,7 +3333,7 @@ void testDirectDominancePruning() {
          "without the dominator's station the dominated recipe survives");
   {
     // Nothing is inlined, so holding the shared input never revives it.
-    std::vector<aw::Amount> stocked = inventory;
+    aw::vector<aw::Amount> stocked = inventory;
     stocked[1] = 100;  // A
     expect(!subgraphHasRecipe(aw::reachableSubgraph(1, both, stocked), 0),
            "stock of the shared input does not keep the dominated recipe");
@@ -3350,8 +3350,8 @@ void testDirectDominancePruning() {
     return std::pair<aw::PlanStatus, int64_t>(r.status, total);
   };
 
-  const std::vector<aw::Handle> cases[] = {{4}, {4, 5}};
-  for (const std::vector<aw::Handle> &ws : cases) {
+  const aw::vector<aw::Handle> cases[] = {{4}, {4, 5}};
+  for (const aw::vector<aw::Handle> &ws : cases) {
     for (aw::Amount amount : {2, 3, 8}) {
       const auto full = plan(false, ws, amount);
       const auto pruned = plan(true, ws, amount);
@@ -3376,10 +3376,10 @@ void testSubstitutionPruning() {
            "one substitution flag per recipe");
     expect(graph.recipeSubstituted[0] == 1, "X <- T is substituted");
     expect(graph.recipeSubstituted[1] == 0, "the dominator survives");
-    const std::vector<aw::NodeId> guards = {1, 2};  // A, B
+    const aw::vector<aw::NodeId> guards = {1, 2};  // A, B
     expect(graph.recipeSubstitutedGuards[0] == guards,
            "the tag expands into its members for the stock guard");
-    const std::vector<aw::NodeId> ws = {5};  // WS
+    const aw::vector<aw::NodeId> ws = {5};  // WS
     expect(graph.recipeSubstitutedDominatorWorkstations[0] == ws,
            "the dominator's workstation is recorded");
   }
@@ -3387,13 +3387,13 @@ void testSubstitutionPruning() {
   // Stocking a tag member keeps the recipe: the free member can still be spent
   // on the tag instead of paying for it with w.
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
-  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  aw::vector<aw::Amount> inventory(graph.nItem, 0);
   inventory[4] = 1000000000LL;  // w, so the sample is feasible
   const aw::Handle all[] = {1, 2, 3, 4, 5, 6, 7, 8};
   expect(!subgraphHasRecipe(aw::reachableSubgraph(1, all, inventory), 0),
          "with no member stock the substituted recipe is dropped");
   {
-    std::vector<aw::Amount> stocked = inventory;
+    aw::vector<aw::Amount> stocked = inventory;
     stocked[1] = 1;  // A (handle 2)
     expect(subgraphHasRecipe(aw::reachableSubgraph(1, all, stocked), 0),
            "stocking a tag member keeps the substituted recipe");
@@ -3411,13 +3411,13 @@ void testSubstitutionPruning() {
   expect(aw::getCraftingGraph().recipeSubstituted[0] == 1,
          "a real input that costs w is substituted");
   expect(aw::getCraftingGraph().recipeSubstitutedGuards[0] ==
-             std::vector<aw::NodeId>{1},
+             aw::vector<aw::NodeId>{1},
          "the real input is its own guard");
 
   // Substitution preserves the optimum: leaves are free only through stock.
   aw::registerCraftingGraph(buildSubstitutionSample());
   const aw::CraftingGraph &g = aw::getCraftingGraph();
-  std::vector<aw::Amount> inv(g.nItem, 0);
+  aw::vector<aw::Amount> inv(g.nItem, 0);
   for (aw::NodeId m = 0; m < g.nReal; m++)
     if (g.i2r.targetsOf(m).empty())
       inv[m] = 1000000000LL;
@@ -3448,7 +3448,7 @@ void testReducedCostParity() {
   const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
 
   // Leaves are free only through inventory.
-  std::vector<aw::Amount> inventory(graph.nItem, 0);
+  aw::vector<aw::Amount> inventory(graph.nItem, 0);
   for (aw::NodeId m = 0; m < graph.nReal; m++)
     if (graph.i2r.targetsOf(m).empty())
       inventory[m] = 1000000000LL;
@@ -3518,7 +3518,7 @@ void testPackPruning() {
     expect(sub.graph.nRecipe == 0, "the whole certified cycle is dropped");
   }
   {
-    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
     inventory[3] = 10;  // nugget
     // Satellite elimination is off here: stick is still an unstocked leaf, so
     // the generalized pass drops the pickaxe recipe no matter what the pack
@@ -3556,13 +3556,13 @@ void testPackPruningParity() {
 
   // Copper: ingot and stick are leaves, so stock them.
   {
-    const std::vector<std::byte> bytes = buildPackSample();
+    const aw::vector<std::byte> bytes = buildPackSample();
     auto plan = [&](bool prune, aw::Amount amount) {
       aw::setPackPruningEnabled(prune);
       aw::registerCraftingGraph(bytes);
       const aw::Handle all[] = {1, 2, 3, 4};
       const aw::CraftingGraph &graph = aw::getCraftingGraph();
-      std::vector<aw::Amount> inventory(graph.nItem, 0);
+      aw::vector<aw::Amount> inventory(graph.nItem, 0);
       inventory[0] = 1000000;  // ingot
       inventory[1] = 1000000;  // stick
       const aw::Subgraph sub = aw::reachableSubgraph(3, all, inventory);
@@ -3581,7 +3581,7 @@ void testPackPruningParity() {
   // Split production: B and C are leaves. No certificate exists, so parity is
   // the soundness check for the R3 branch.
   {
-    const std::vector<std::byte> bytes = buildPackBranchSample();
+    const aw::vector<std::byte> bytes = buildPackBranchSample();
     aw::setPackPruningEnabled(true);
     aw::registerCraftingGraph(bytes);
     expect(aw::getCraftingGraph().packDominated[0] == 0,
@@ -3592,7 +3592,7 @@ void testPackPruningParity() {
       aw::registerCraftingGraph(bytes);
       const aw::Handle all[] = {1, 2, 3, 4};
       const aw::CraftingGraph &graph = aw::getCraftingGraph();
-      std::vector<aw::Amount> inventory(graph.nItem, 0);
+      aw::vector<aw::Amount> inventory(graph.nItem, 0);
       inventory[2] = 1000000;  // B
       inventory[3] = 1000000;  // C
       const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
@@ -3610,13 +3610,13 @@ void testPackPruningParity() {
 
   // Black candle: the composite-pruning sample also carries pack certificates.
   {
-    const std::vector<std::byte> bytes = buildBlackCandleSample();
+    const aw::vector<std::byte> bytes = buildBlackCandleSample();
     auto plan = [&](bool prune, aw::Amount amount) {
       aw::setPackPruningEnabled(prune);
       aw::registerCraftingGraph(bytes);
       const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
       const aw::CraftingGraph &graph = aw::getCraftingGraph();
-      std::vector<aw::Amount> inventory(graph.nItem, 0);
+      aw::vector<aw::Amount> inventory(graph.nItem, 0);
       for (aw::NodeId m = 0; m < graph.nReal; m++)
         if (graph.i2r.targetsOf(m).empty())
           inventory[m] = 1000000000LL;
@@ -3650,7 +3650,7 @@ void testSatellitePruning() {
   aw::setPackPruningEnabled(false);
 
   auto stockedOre = []() {
-    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
     inventory[3] = 1000;  // ore is handle 4, node 3
     return inventory;
   };
@@ -3661,7 +3661,7 @@ void testSatellitePruning() {
   // is a dead component too.
   aw::registerCraftingGraph(buildSatelliteSample(1));
   {
-    const std::vector<aw::Amount> inventory = stockedOre();
+    const aw::vector<aw::Amount> inventory = stockedOre();
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
     expect(!subgraphHasRecipe(sub, 2), "the break-even island is dropped");
     expect(!subgraphHasRecipe(sub, 3), "its recycling edge goes with it");
@@ -3670,7 +3670,7 @@ void testSatellitePruning() {
   }
   {
     // A stocked variant is a way to spend stock, so nothing may be dropped.
-    std::vector<aw::Amount> inventory = stockedOre();
+    aw::vector<aw::Amount> inventory = stockedOre();
     inventory[2] = 10;  // variant is handle 3, node 2
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
     expect(subgraphHasRecipe(sub, 2) && subgraphHasRecipe(sub, 3),
@@ -3681,7 +3681,7 @@ void testSatellitePruning() {
     // so the certificate accepts the whole component hanging off the target
     // gear and every recipe goes. This only hides the missing ore; the plan is
     // infeasible either way.
-    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
     expect(sub.graph.nRecipe == 0,
            "an unstocked raw-material route is dropped too");
@@ -3692,7 +3692,7 @@ void testSatellitePruning() {
   // plate, so it must survive the pass.
   aw::registerCraftingGraph(buildSatelliteSample(2));
   {
-    const std::vector<aw::Amount> inventory = stockedOre();
+    const aw::vector<aw::Amount> inventory = stockedOre();
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
     expect(subgraphHasRecipe(sub, 2) && subgraphHasRecipe(sub, 3),
            "a gainful island is kept");
@@ -3702,7 +3702,7 @@ void testSatellitePruning() {
   aw::setSatellitePruningEnabled(false);
   aw::registerCraftingGraph(buildSatelliteSample(1));
   {
-    const std::vector<aw::Amount> inventory = stockedOre();
+    const aw::vector<aw::Amount> inventory = stockedOre();
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
     expect(subgraphHasRecipe(sub, 2) && subgraphHasRecipe(sub, 3),
            "the pass can be switched off");
@@ -3735,7 +3735,7 @@ void testSatelliteLeakPruning() {
 
   aw::registerCraftingGraph(buildSatelliteLeakSample());
   {
-    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
     expect(!keepsIsland(sub), "an input-sharing island is dropped");
   }
@@ -3743,7 +3743,7 @@ void testSatelliteLeakPruning() {
     // With the shared input and an island item stocked, the island can be
     // entered and the escape paid back from stock, so r3/r4 stay; the W/O
     // sub-cycle can still never repay E, so it goes.
-    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
     inventory[3] = 10;  // handle 4, item node 3 (X)
     inventory[5] = 10;  // handle 6, item node 5 (E)
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
@@ -3756,7 +3756,7 @@ void testSatelliteLeakPruning() {
   aw::setSatellitePruningEnabled(false);
   aw::registerCraftingGraph(buildSatelliteLeakSample());
   {
-    std::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
     expect(keepsIsland(sub), "the generalized pass can be switched off");
   }
@@ -3778,14 +3778,14 @@ void testSatellitePruningParity() {
   };
 
   for (uint64_t variantOut : {1ULL, 2ULL, 3ULL}) {
-    const std::vector<std::byte> bytes = buildSatelliteSample(variantOut);
+    const aw::vector<std::byte> bytes = buildSatelliteSample(variantOut);
     auto plan = [&](bool prune, aw::Amount amount, aw::Amount oreStock,
                    aw::Amount variantStock) {
       aw::setSatellitePruningEnabled(prune);
       aw::registerCraftingGraph(bytes);
       const aw::Handle all[] = {1, 2, 3, 4, 5};
       const aw::CraftingGraph& graph = aw::getCraftingGraph();
-      std::vector<aw::Amount> inventory(graph.nItem, 0);
+      aw::vector<aw::Amount> inventory(graph.nItem, 0);
       inventory[3] = oreStock;
       inventory[2] = variantStock;
       const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
@@ -3810,13 +3810,13 @@ void testSatellitePruningParity() {
   // dropping it must not move the optimum. Stocking E makes the island usable
   // and must keep it.
   {
-    const std::vector<std::byte> bytes = buildSatelliteLeakSample();
+    const aw::vector<std::byte> bytes = buildSatelliteLeakSample();
     auto plan = [&](bool prune, aw::Amount amount, aw::Amount eStock) {
       aw::setSatellitePruningEnabled(prune);
       aw::registerCraftingGraph(bytes);
       const aw::Handle all[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
       const aw::CraftingGraph& graph = aw::getCraftingGraph();
-      std::vector<aw::Amount> inventory(graph.nItem, 0);
+      aw::vector<aw::Amount> inventory(graph.nItem, 0);
       inventory[3] = 10;      // handle 4, item node 3 (X, the shared input)
       inventory[5] = eStock;  // handle 6, item node 5 (E)
       const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);

@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "aw/Status.h"
+#include "aw/utils/PodVector.h"
 
 namespace aw::solver {
 
@@ -26,9 +27,9 @@ namespace aw::solver {
 struct Matrix {
   uint32_t rows = 0;
   uint32_t cols = 0;
-  std::vector<uint32_t> colStart;  // cols + 1
-  std::vector<uint32_t> rowIndex;  // nnz
-  std::vector<int64_t> value;      // nnz
+  aw::vector<uint32_t> colStart;  // cols + 1
+  aw::vector<uint32_t> rowIndex;  // nnz
+  aw::vector<int64_t> value;      // nnz
 };
 
 struct Options {
@@ -87,7 +88,7 @@ struct Result {
   PlanStatus status = PlanStatus::INVALID_INPUT;
 
   // Executions per recipe. Empty unless a solution was found.
-  std::vector<int64_t> x;
+  aw::vector<int64_t> x;
   int64_t objective = 0;
 
   bool provenOptimal = false;
