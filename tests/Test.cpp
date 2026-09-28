@@ -3839,6 +3839,84 @@ void testSatellitePruningParity() {
 
 }  // namespace
 
+// Recomputes the balance `planCrafting` hands the solver and returns whether
+// `exec` satisfies it. Mirrors `deriveMissing` in tools/Bench.cpp.
+bool greedyBalances(const aw::Subgraph &sub, aw::NodeId target, aw::Amount amount,
+                    const aw::vector<aw::Amount> &inventory,
+                    const aw::vector<int64_t> &exec) {
+  const aw::BaseCraftingGraph &g = sub.graph;
+  aw::vector<__int128> balance(g.nItem, 0);
+  for (uint32_t r = 0; r < g.nRecipe; r++) {
+    const __int128 times = exec[r];
+    if (times == 0)
+      continue;
+    balance[g.output[r]] += (__int128) g.outputAmt[r] * times;
+    const auto inputs = g.r2i.targetsOf(r);
+    const auto weights = g.r2i.weightsOf(r);
+    for (size_t k = 0; k < inputs.size(); k++)
+      balance[inputs[k]] -= (__int128) weights[k] * times;
+  }
+  for (uint32_t i = 0; i < g.nItem; i++) {
+    const aw::NodeId source = sub.itemOrigin[i];
+    const aw::Amount available = source < inventory.size() ? inventory[source] : 0;
+    const __int128 required = i == target ? (__int128) amount : -(__int128) available;
+    if (balance[i] < required)
+      return false;
+  }
+  return true;
+}
+
+void testGreedyDag() {
+  std::cout << "[Test] greedy DAG pre-pass\n";
+
+  // A DAG with a zero-input route: greedy must find it and produce a plan that
+  // balances.
+  aw::registerCraftingGraph(buildZeroInputSample());
+  expect(aw::getCraftingError() == nullptr, "greedy DAG sample parses");
+  {
+    const aw::Handle all[] = {1, 2};
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+    const aw::NodeId target = sub.translate(0);
+    const aw::vector<int64_t> exec = aw::greedyDagPlan(sub, target, 7, {});
+    expect(!exec.empty(), "greedy finds a zero-input route");
+    expect(exec.size() == sub.graph.nRecipe, "greedy result has one count per recipe");
+    if (!exec.empty())
+      expect(greedyBalances(sub, target, 7, {}, exec), "greedy DAG plan balances");
+    // Flash mode must pass the same plan through untouched and still feasible.
+    aw::solver::Options options;
+    options.flash = true;
+    const aw::PlanResult flash = aw::planCrafting(sub, target, 7, {}, options);
+    expect(flash.status == aw::PlanStatus::OK && greedyBalances(sub, target, 7, {}, flash.exec),
+           "flash returns the greedy plan and it balances");
+  }
+
+  // A pure cycle with no stock: cutting the back-edge removes the only producer
+  // of the second item, so greedy declines instead of inventing a plan.
+  aw::registerCraftingGraph(buildPlanSample());
+  expect(aw::getCraftingError() == nullptr, "greedy cycle sample parses");
+  {
+    const aw::Handle all[] = {1, 2};
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+    const aw::NodeId target = sub.translate(0);
+    expect(aw::greedyDagPlan(sub, target, 4, {}).empty(), "greedy declines an unseeded cycle");
+  }
+
+  // A missing leaf has no producer, so greedy returns nothing and the planner
+  // still reports the leaf rather than a false positive.
+  aw::registerCraftingGraph(buildPlanLeafSample());
+  expect(aw::getCraftingError() == nullptr, "greedy leaf sample parses");
+  {
+    aw::options.satellite.enabled = false;
+    const aw::Handle all[] = {1};
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+    aw::options.satellite.enabled = true;
+    const aw::NodeId target = sub.translate(0);
+    expect(aw::greedyDagPlan(sub, target, 4, {}).empty(), "greedy declines a missing leaf");
+    expect(aw::planCrafting(sub, target, 4, {}).status == aw::PlanStatus::INFEASIBLE,
+           "planner still reports the missing leaf");
+  }
+}
+
 int main() {
   // Nonoptimal mode may prune more than the optimum allows, so the parity tests
   // below -- which assert that pruning preserves the optimum -- must run with
@@ -3858,6 +3936,7 @@ int main() {
   testZeroCostColumns();
   testPlan();
   testPlanInfeasible();
+  testGreedyDag();
   testDuplicateRecipes();
   testTagPruning();
   testWideTagPruning();

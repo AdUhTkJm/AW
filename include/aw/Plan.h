@@ -45,6 +45,17 @@ PlanResult planCrafting(const Subgraph& sub, NodeId target, Amount amount,
                         std::span<const Amount> invSrc,
                         const solver::Options& options = {});
 
+// Greedy DAG pre-pass used by `planCrafting`, and exposed for testing.
+//
+// Builds an acyclic view of the reachable recipe graph by cutting back-edges
+// from a DFS at the target, then resolves each item once in reverse post-order.
+// Returns an empty vector when the retained routes cannot satisfy the request;
+// otherwise the firing vector is verified against the exact balance
+// `planCrafting` hands the solver, so it is always feasible. It never reports
+// a false positive.
+aw::vector<int64_t> greedyDagPlan(const Subgraph& sub, NodeId target, Amount amount,
+                                  std::span<const Amount> invSrc) noexcept;
+
 }  // namespace aw
 
 #endif

@@ -350,6 +350,20 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
   for (uint32_t r = 0; r < A.cols; r++)
     variables.push_back(model.NewIntVar(Domain(0, domain[r])));
 
+  // Warm start from the greedy pre-pass, when it matches this column space.
+  // A hint only guides the search; clamping keeps it inside the domains this
+  // solve actually built.
+  if (options.solutionHint.size() == (size_t) A.cols) {
+    for (uint32_t r = 0; r < A.cols; r++) {
+      int64_t value = options.solutionHint[r];
+      if (value < 0)
+        value = 0;
+      if (value > domain[r])
+        value = domain[r];
+      model.AddHint(variables[r], value);
+    }
+  }
+
   aw::vector<sat::IntVar> terms;
   aw::vector<int64_t> coefficients;
   // Capacity survives clear(): a row never exceeds the total nnz, and the
@@ -553,6 +567,14 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   }
   cap = std::clamp<int64_t>(cap, 1, ceiling);
 
+  // A heuristic pre-pass may know a feasible objective value. It is a valid
+  // upper bound on the optimum, so no starting or grown cap needs to exceed it.
+  const int64_t upperBound =
+      options.objectiveUpperBound > 0 ? std::min<int64_t>(options.objectiveUpperBound, ceiling)
+                                      : 0;
+  if (upperBound > 0)
+    cap = std::min(cap, upperBound);
+
   const bool limited = options.maxTimeSeconds > 0;
   const auto started = std::chrono::steady_clock::now();
   const auto elapsedSeconds = [&started] {
@@ -713,7 +735,13 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
     attempts = attempt + 1;
     if (cap >= ceiling)
       break;
+    // A feasible plan is known at `upperBound`, so a larger cap cannot find a
+    // cheaper one and would only widen the variable domains.
+    if (upperBound > 0 && cap >= upperBound)
+      break;
     cap = std::min(cap * CAP_GROWTH, ceiling);
+    if (upperBound > 0)
+      cap = std::min(cap, upperBound);
   }
 
   if (haveBest)
@@ -730,7 +758,10 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   // admit some plan. Spend whatever is left on one solve there.
   const double remaining = limited ? options.maxTimeSeconds - elapsedSeconds() : -1.0;
   if (!limited || remaining > 0.0) {
-    const Result last = solveWithCap(A, rows, b, c, options, ceiling, ceiling, remaining);
+    // A heuristic upper bound means a feasible plan exists at or below it, so
+    // the last-resort solve does not need the absolute ceiling as its cap.
+    const int64_t lastCap = upperBound > 0 ? std::min(upperBound, ceiling) : ceiling;
+    const Result last = solveWithCap(A, rows, b, c, options, lastCap, ceiling, remaining);
     if (last.status == PlanStatus::OK)
       return last;
     if (last.status == PlanStatus::INFEASIBLE) {

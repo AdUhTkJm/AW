@@ -12,6 +12,37 @@ struct ColumnEntry {
   int64_t value;
 };
 
+// A greedy plan can be wildly above the optimum: a single bad route choice can
+// multiply demand along a long conversion chain (hundreds of millions of
+// executions on the ATM corpus). Such a plan is still a valid answer, but it is
+// useless to hand back in flash mode and dangerous to seed the solver with, so
+// only plans within this factor of a trivial lower bound are used.
+constexpr int64_t GREEDY_QUALITY_FACTOR = 64;
+
+int64_t ceilDiv(int64_t numerator, int64_t denominator) {
+  return numerator / denominator + (numerator % denominator != 0 ? 1 : 0);
+}
+
+// A valid lower bound on the optimum: row i needs b_i, so at least
+// ceil(b_i / maxPositive[i]) executions are needed. Same bound as the solver's
+// own `lowerBoundOnTotal`.
+int64_t trivialLowerBound(const solver::Matrix &A, std::span<const int64_t> b) {
+  aw::vector<int64_t> maxPositive = aw::vector<int64_t>::zeroes(A.rows);
+  for (uint32_t k = 0; k < A.rowIndex.size(); k++) {
+    const int64_t value = A.value[k];
+    if (value > 0 && value > maxPositive[A.rowIndex[k]])
+      maxPositive[A.rowIndex[k]] = value;
+  }
+  int64_t bound = 1;
+  for (uint32_t i = 0; i < A.rows; i++)
+    if (b[i] > 0 && maxPositive[i] > 0) {
+      const int64_t candidate = ceilDiv(b[i], maxPositive[i]);
+      if (candidate > bound)
+        bound = candidate;
+    }
+  return bound;
+}
+
 }  // namespace
 
 // The problem is
@@ -117,7 +148,35 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
   for (uint32_t r = 0; r < n; r++)
     objective[r] = g.output[r] < g.nReal ? 1 : 0;
 
-  const solver::Result solved = solver::solve(A, rhs, objective, options);
+  // Greedy DAG pre-pass. It is cheap (O(V + E)) and either returns a
+  // balance-checked plan or nothing, so it is always run before the solver.
+  // A hit is the whole answer in flash mode; otherwise it seeds the solver as
+  // both the objective cap (a valid upper bound on the optimum) and a solution
+  // hint.
+  aw::vector<int64_t> greedy = greedyDagPlan(sub, target, amount, invSrc);
+  solver::Options solveOptions = options;
+  bool greedyUsable = false;
+  __int128 greedyCost = 0;
+  if (!greedy.empty()) {
+    for (uint32_t r = 0; r < n; r++)
+      greedyCost += (__int128) objective[r] * greedy[r];
+    const __int128 qualityLimit =
+        (__int128) trivialLowerBound(A, rhs) * GREEDY_QUALITY_FACTOR;
+    greedyUsable = greedyCost > 0 && greedyCost <= (__int128) INT64_MAX &&
+                   greedyCost <= qualityLimit;
+  }
+  if (options.flash) {
+    result.status = PlanStatus::OK;
+    result.provenOptimal = false;
+    result.exec = std::move(greedy);
+    return result;
+  }
+  if (greedyUsable) {
+    solveOptions.objectiveUpperBound = (int64_t) greedyCost;
+    solveOptions.solutionHint = std::span<const int64_t>(greedy.data(), greedy.size());
+  }
+
+  const solver::Result solved = solver::solve(A, rhs, objective, solveOptions);
   result.status = solved.status;
   result.provenOptimal = solved.provenOptimal;
   result.gap = solved.gap;

@@ -64,7 +64,7 @@ endif()
 
 find_package(ortools CONFIG REQUIRED)
 
-add_library(aw_crafting STATIC src/CraftingGraph.cpp src/CpSatSolver.cpp src/Options.cpp src/PackPrune.cpp src/Plan.cpp src/Prune.cpp src/SatellitePrune.cpp)
+add_library(aw_crafting STATIC src/CraftingGraph.cpp src/CpSatSolver.cpp src/Greedy.cpp src/Options.cpp src/PackPrune.cpp src/Plan.cpp src/Prune.cpp src/SatellitePrune.cpp)
 target_include_directories(aw_crafting PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(aw_crafting PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(aw_crafting PUBLIC cxx_std_20)
@@ -76,7 +76,7 @@ if(LINUX)
 endif()
 
 if(AW_STRICT_FLAGS)
-   set_source_files_properties(src/CraftingGraph.cpp src/Options.cpp src/PackPrune.cpp src/Plan.cpp src/Prune.cpp
+   set_source_files_properties(src/CraftingGraph.cpp src/Greedy.cpp src/Options.cpp src/PackPrune.cpp src/Plan.cpp src/Prune.cpp
       PROPERTIES COMPILE_OPTIONS "${AW_STRICT_FLAGS}")
 endif()
 

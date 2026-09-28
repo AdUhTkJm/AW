@@ -51,6 +51,15 @@ struct Options {
   // 0 derives one from a lower bound on the optimum. See implementation details.
   int64_t objectiveCap = 0;
 
+  // Known-feasible objective value, from a heuristic pre-pass. 0 means none.
+  // Unlike `objectiveCap` this does NOT replace the derived starting cap; it
+  // only clamps it and bounds the cap-growth retries. A loose heuristic plan
+  // can be orders of magnitude above the optimum, and seeding the variable
+  // domains with it makes propagation blow up, so it is used purely as an
+  // upper bound: a plan exists at this objective, hence no cap above it is
+  // ever worth a retry.
+  int64_t objectiveUpperBound = 0;
+
   // Reduced-cost fixing. The solver probes for any plan within this much of
   // the LP relaxation; if one exists, every column is bounded by
   // floor((incumbent - LP) / d_r), so columns whose bound is 0 are dropped and
@@ -82,6 +91,14 @@ struct Options {
   // `maxTimeSeconds` (plus `relativeGap`) for the opposite trade, where the
   // solver keeps improving until the budget runs out.
   bool flash = false;
+
+  // Optional warm start: one suggested value per column of the model handed to
+  // `solve`. It is installed as a CP-SAT solution hint, so it guides the search
+  // toward a known plan without constraining it. Values are clamped into the
+  // column domain, and the hint is ignored entirely when its length does not
+  // match the model being solved (for example after reduced-cost column
+  // fixing). The planner fills this from its greedy DAG pre-pass.
+  std::span<const int64_t> solutionHint;
 };
 
 struct Result {
