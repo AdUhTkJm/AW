@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "aw/CraftingGraph.h"
+#include "aw/Config.h"
 
 namespace aw {
 namespace {
@@ -43,17 +44,22 @@ PackPruneOptions packOptions;
 // The largest `need` we are willing to track. Values are only used to force
 // producers and to branch, so a clamp keeps a pathological R2' cycle from
 // running away while staying a valid lower bound.
-constexpr int64_t kMaxNeed = int64_t{1} << 40;
-constexpr int kMaxPropIterations = 4096;
 
 bool addOverflow(int64_t a, int64_t b, int64_t &out) noexcept {
+#if __has_builtin(__builtin_add_overflow)
+  return __builtin_add_overflow(a, b, &out);
+#else
   if (b > 0 ? a > INT64_MAX - b : a < INT64_MIN - b)
     return true;
   out = a + b;
   return false;
+#endif
 }
 
 bool mulOverflow(int64_t a, int64_t b, int64_t &out) noexcept {
+#if __has_builtin(__builtin_mul_overflow)
+  return __builtin_mul_overflow(a, b, &out);
+#else
   if (a == 0 || b == 0) {
     out = 0;
     return false;
@@ -64,10 +70,11 @@ bool mulOverflow(int64_t a, int64_t b, int64_t &out) noexcept {
     return true;
   out = a * b;
   return false;
+#endif
 }
 
-int64_t ceilDiv(int64_t numerator, int64_t denominator) noexcept {
-  return numerator / denominator + (numerator % denominator != 0 ? 1 : 0);
+int64_t ceilDiv(int64_t n, int64_t d) noexcept {
+  return n / d + (n % d != 0 ? 1 : 0);
 }
 
 // Compares n1 / d1 with n2 / d2 for non-negative numerators and positive
@@ -76,6 +83,7 @@ int64_t ceilDiv(int64_t numerator, int64_t denominator) noexcept {
 int compareRatio(int64_t n1, int64_t d1, int64_t n2, int64_t d2) noexcept {
   int64_t left = 0, right = 0;
   const bool overflow = mulOverflow(n1, d2, left) || mulOverflow(n2, d1, right);
+  [[likely]]
   if (!overflow)
     return left < right ? -1 : (left > right ? 1 : 0);
   const long double a = (long double) n1 / (long double) d1;
@@ -194,8 +202,8 @@ struct PackSearch {
   }
 
   void writeNeed(NodeId i, int64_t value) noexcept {
-    if (value > kMaxNeed)
-      value = kMaxNeed;
+    if (value > MAX_NEED)
+      value = MAX_NEED;
     if (value <= need[i])
       return;
     undo.push_back({kUndoNeed, i, need[i]});
@@ -453,7 +461,7 @@ struct PackSearch {
         return false;
       if (budgetStop || deadlineHit)
         return true;
-      if (++iterations > kMaxPropIterations)
+      if (++iterations > MAX_PROP_ITERATIONS)
         return true;
       changed = false;
 

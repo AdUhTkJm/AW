@@ -1061,7 +1061,7 @@ int main(int argc, char** argv) {
 
   // Nonoptimal mode is on by default; --optimal restores the exact (but
   // slower) pruning.
-  aw::options().nonoptimal = !optimalPruning;
+  aw::options.nonoptimal = !optimalPruning;
 
   // The certificate pass runs at registration time, so its options have to be
   // installed before the graph is registered.

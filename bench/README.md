@@ -172,7 +172,7 @@ their marks at registration; `setTagPruningEnabled` and friends are read by
 `reachableSubgraph` at query time, so `aw_bench` flips them per stage. `pack` is the
 exception — `computePackPruning` early-returns when disabled — so the tool always enables
 it before registering and only uses the flag as a query-time gate afterwards. Only
-`options().nonoptimal` genuinely cannot be flipped, which is why `aw-optimal` is a second
+`options.nonoptimal` genuinely cannot be flipped, which is why `aw-optimal` is a second
 process. `solver::Options::flash` is read at query time, so `aw-flash` could ride the
 `aw-nonopt` registration, but `run.py` still gives it its own process so its JSONL is a
 self-contained single-row config. Net cost: **three registrations per dataset**, not ten.

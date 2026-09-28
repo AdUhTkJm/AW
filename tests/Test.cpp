@@ -2726,7 +2726,7 @@ void testTagTransitiveClosure() {
 
   // Sample A: M and N require each other, and N only requires W through T_N,
   // which does not contain W.
-  aw::options().nonoptimal = true;
+  aw::options.nonoptimal = true;
   aw::registerCraftingGraph(buildFusedQuartzSample());
   expect(aw::getCraftingError() == nullptr, "fused quartz sample parses");
   {
@@ -2736,7 +2736,7 @@ void testTagTransitiveClosure() {
     expect(g.tagEdgeDominated[9] == 1, "the mutual member is dropped");
     expect(g.tagEdgeDominated[10] == 1, "the other mutual member is dropped");
   }
-  aw::options().nonoptimal = false;
+  aw::options.nonoptimal = false;
   aw::registerCraftingGraph(buildFusedQuartzSample());
   {
     const aw::CraftingGraph &g = aw::getCraftingGraph();
@@ -2746,7 +2746,7 @@ void testTagTransitiveClosure() {
 
   // Sample B: (J, W) is neither a witness pair nor a common-tag pair, so only
   // the closure can put it into the relation.
-  aw::options().nonoptimal = true;
+  aw::options.nonoptimal = true;
   aw::registerCraftingGraph(buildTransitiveClosureSample());
   expect(aw::getCraftingError() == nullptr, "closure sample parses");
   {
@@ -2755,11 +2755,11 @@ void testTagTransitiveClosure() {
     expect(g.tagEdgeDominated[4] == 0, "the dominator keeps its tag edge");
     expect(g.tagEdgeDominated[5] == 1, "the chained member is dropped");
   }
-  aw::options().nonoptimal = false;
+  aw::options.nonoptimal = false;
   aw::registerCraftingGraph(buildTransitiveClosureSample());
   expect(aw::getCraftingGraph().tagEdgeDominated[5] == 0,
          "without the closure the chained member survives");
-  aw::options().nonoptimal = false;
+  aw::options.nonoptimal = false;
 }
 
 void testTagPruningParity() {
@@ -2852,7 +2852,7 @@ void testNonoptimal() {
   // A batched member: without the guard `T <- m` is marked dominated and the
   // batch surplus is no longer a free sink, so the real optimum rises from 4
   // to 6.
-  aw::options().nonoptimal = true;
+  aw::options.nonoptimal = true;
   aw::registerCraftingGraph(buildBatchRecycleSample());
   expect(aw::getCraftingError() == nullptr, "batch recycle sample parses");
   {
@@ -2886,7 +2886,7 @@ void testNonoptimal() {
   expect(aw::getCraftingGraph().recipeDominated[0] == 1,
          "the nonoptimal pass floors the inline count");
 
-  aw::options().nonoptimal = false;
+  aw::options.nonoptimal = false;
   aw::registerCraftingGraph(buildRelaxedCompositeSample());
   expect(aw::getCraftingGraph().recipeDominated[0] == 0,
          "the ceiling keeps R undominated in exact mode");
@@ -2895,12 +2895,12 @@ void testNonoptimal() {
   // cheaper per unit than the six-output recipe that eats an essence, so the
   // relaxed pass drops the latter although one execution of it is not
   // replaceable by one execution of the former.
-  aw::options().nonoptimal = true;
+  aw::options.nonoptimal = true;
   aw::registerCraftingGraph(buildNormalizedDominanceSample());
   expect(aw::getCraftingError() == nullptr, "normalized dominance sample parses");
   expect(aw::getCraftingGraph().recipeDirectDominated[1] == 1,
          "the relaxed pass normalizes the direct comparison");
-  aw::options().nonoptimal = false;
+  aw::options.nonoptimal = false;
   aw::registerCraftingGraph(buildNormalizedDominanceSample());
   expect(aw::getCraftingGraph().recipeDirectDominated[1] == 0,
          "raw column dominance keeps the six-output recipe");
@@ -2911,7 +2911,7 @@ void testNonoptimal() {
   {
     const aw::Handle all[] = {1, 2, 3, 4};
     auto plan = [&](bool relaxed) {
-      aw::options().nonoptimal = relaxed;
+      aw::options.nonoptimal = relaxed;
       aw::registerCraftingGraph(buildNormalizedDominanceSample());
       const aw::CraftingGraph &g = aw::getCraftingGraph();
       std::vector<aw::Amount> inventory(g.nItem, 0);
@@ -2925,7 +2925,7 @@ void testNonoptimal() {
     };
     expect(plan(false) == 4, "the raw plan batches the six-output recipe");
     expect(plan(true) == 6, "the normalized plan falls back to single crafts");
-    aw::options().nonoptimal = false;
+    aw::options.nonoptimal = false;
   }
 
   // Equal per-unit columns must not collapse: a coarse batch cannot replace a
@@ -2933,7 +2933,7 @@ void testNonoptimal() {
   // one nether brick wall into six.
   {
     const aw::Handle all[] = {1, 2, 3, 4};
-    aw::options().nonoptimal = true;
+    aw::options.nonoptimal = true;
     aw::registerCraftingGraph(buildEqualRatioSample());
     const aw::CraftingGraph &g = aw::getCraftingGraph();
     expect(g.recipeDirectDominated[0] == 0 && g.recipeDirectDominated[1] == 0,
@@ -2946,7 +2946,7 @@ void testNonoptimal() {
     for (int64_t x : r.exec)
       total += x;
     expect(total == 2, "the finer recipe serves a single X");
-    aw::options().nonoptimal = false;
+    aw::options.nonoptimal = false;
   }
 }
 
@@ -3843,7 +3843,7 @@ int main() {
   // Nonoptimal mode may prune more than the optimum allows, so the parity tests
   // below -- which assert that pruning preserves the optimum -- must run with
   // it off. The dedicated testNonoptimal exercises the relaxed behaviour.
-  aw::options().nonoptimal = false;
+  aw::options.nonoptimal = false;
 
   testSample();
   testRejectsBadInput();

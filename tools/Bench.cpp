@@ -15,7 +15,7 @@
 // uses the flag as a query-time gate afterwards.
 //
 // The one option that genuinely cannot be flipped after registration is
-// `options().nonoptimal`, which every registration-time pass reads. Hence the
+// `options.nonoptimal`, which every registration-time pass reads. Hence the
 // ground-truth run is a separate process with `--nonoptimal 0`.
 //
 // Output is JSON Lines: one `config` header object, one `registration` object,
@@ -233,7 +233,7 @@ void applyStage(const Stage &stage) {
 // Everything the registration-time passes read. Must run before
 // `registerCraftingGraph`.
 void configureForRegistration(bool nonoptimal, double packSeconds, double satelliteSeconds) {
-  aw::options().nonoptimal = nonoptimal;
+  aw::options.nonoptimal = nonoptimal;
   aw::setTagInliningMode(aw::TagInlineMode::OFF);
   // Pack certificates are always computed; the stage only chooses whether the
   // query applies them, because the query gate is this same flag.

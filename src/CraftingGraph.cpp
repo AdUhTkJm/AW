@@ -1022,11 +1022,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
     }
   }
 
-  // Satellite elimination (docs/algorithm.typ, "孤岛消除"). Unlike the passes
-  // above it needs the target and the inventory, so it cannot be precomputed at
-  // registration time. Dropping a component can expose new articulation points,
-  // hence the repeat; the pass carries its own wall-clock budget, so the loop
-  // bound is only there to keep a pathological graph from spinning.
+  // Satellite elimination. We have to do it per-query, so not always a net gain.
   if (isSatellitePruningEnabled()) {
     constexpr uint MAX_SATELLITE_ROUNDS = 4;
     const NodeId target = CraftingGraph::itemNode(output);
@@ -1242,16 +1238,6 @@ NodeId Subgraph::translate(NodeId sourceNode) const noexcept {
   if (it == end || *it != sourceNode)
     return UINT32_MAX;
   return it - begin;
-}
-
-std::vector<Amount> Subgraph::translateInv(std::span<const Amount> invSrc) const noexcept {
-  std::vector<Amount> inventory(graph.nItem, 0);
-  for (uint32_t i = 0; i < graph.nItem; i++) {
-    const NodeId source = itemOrigin[i];
-    if (source < invSrc.size())
-      inventory[i] = invSrc[source];
-  }
-  return inventory;
 }
 
 } // namespace aw

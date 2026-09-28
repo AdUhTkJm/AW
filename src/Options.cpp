@@ -2,10 +2,6 @@
 
 namespace aw {
 
-Options g_options;
-
-Options &options() noexcept {
-  return g_options;
-}
+Options options;
 
 }  // namespace aw

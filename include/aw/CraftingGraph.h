@@ -286,9 +286,6 @@ struct Subgraph {
   // Translates source-graph item id to id in this subgraph.
   // UINT32_MAX on failure.
   NodeId translate(NodeId source) const noexcept;
-
-  // Translates an entire inventory.
-  std::vector<Amount> translateInv(std::span<const Amount> src) const noexcept;
 };
 
 // Computes a subgraph reachable from `output` with available `workstations`.
@@ -326,7 +323,7 @@ void setSubstitutionPruningEnabled(bool enabled) noexcept;
 bool isSubstitutionPruningEnabled() noexcept;
 
 // Integrality relaxation for the dominance passes now lives in Options.h as
-// `options().nonoptimal`. It is on by default, and read at registration time,
+// `options.nonoptimal`. It is on by default, and read at registration time,
 // so it must be set before registerCraftingGraph. See the field's comment for
 // exactly which guards it drops and which relation it computes instead.
 
