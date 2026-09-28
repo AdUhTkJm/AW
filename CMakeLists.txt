@@ -102,8 +102,39 @@ endif()
 # aw_crafting, so it builds and tests on its own; the JNI shim
 # (src/search/SearchJni.cpp) needs the JVM headers and is therefore compiled
 # straight into aw_jni below.
-add_library(aw_search STATIC src/search/TextIndex.cpp)
+#
+# The pinyin lookup table comes from third_party/pinyin.txt (see
+# scripts/fetch-pinyin.sh). It is generated at configure/build time rather than
+# committed: the header is ~1.2 MB of derivable tables, and the input is pinned.
+# The output lands in the build tree, so the source tree stays clean and the
+# private include keeps it out of the public include/ directory.
+set(AW_PINYIN_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pinyin.txt")
+set(AW_PINYIN_HEADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/pinyin")
+set(AW_PINYIN_HEADER "${AW_PINYIN_HEADER_DIR}/Pinyin.h")
+set(AW_PINYIN_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen-pinyin.py")
+
+if(NOT EXISTS "${AW_PINYIN_SOURCE}")
+   message(FATAL_ERROR
+      "third_party/pinyin.txt not found. Run scripts/fetch-pinyin.sh to download "
+      "the pinned pinyin-data release.")
+endif()
+
+find_package(Python3 COMPONENTS Interpreter)
+if(NOT Python3_Interpreter_FOUND)
+   message(FATAL_ERROR "Python 3 is required to generate Pinyin.h (scripts/gen-pinyin.py).")
+endif()
+
+add_custom_command(
+   OUTPUT "${AW_PINYIN_HEADER}"
+   COMMAND ${CMAKE_COMMAND} -E make_directory "${AW_PINYIN_HEADER_DIR}"
+   COMMAND "${Python3_EXECUTABLE}" "${AW_PINYIN_SCRIPT}" "${AW_PINYIN_SOURCE}" "${AW_PINYIN_HEADER}"
+   DEPENDS "${AW_PINYIN_SCRIPT}" "${AW_PINYIN_SOURCE}"
+   COMMENT "Generating Pinyin.h from third_party/pinyin.txt"
+   VERBATIM)
+
+add_library(aw_search STATIC src/search/TextIndex.cpp "${AW_PINYIN_HEADER}")
 target_include_directories(aw_search PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(aw_search PRIVATE "${AW_PINYIN_HEADER_DIR}")
 target_compile_features(aw_search PUBLIC cxx_std_20)
 if(AW_STRICT_FLAGS)
    set_source_files_properties(src/search/TextIndex.cpp
@@ -171,6 +202,11 @@ if(AW_BUILD_TESTS)
    target_link_libraries(aw_search_tests PRIVATE aw_search)
    target_compile_options(aw_search_tests PRIVATE ${AW_STRICT_FLAGS})
    add_test(NAME search_index COMMAND aw_search_tests)
+
+   # The pinyin table generator, checked against a handful of known readings
+   # (including 重 and the two diaeresis spellings of 女 and 略).
+   add_test(NAME pinyin_generator
+      COMMAND "${Python3_EXECUTABLE}" "${AW_PINYIN_SCRIPT}" --self-test "${AW_PINYIN_SOURCE}")
 endif()
 
 if(AW_BUILD_JNI)
