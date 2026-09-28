@@ -26,10 +26,7 @@
 
 #include "Prune.h"
 
-#include <algorithm>
 #include <chrono>
-#include <cstdint>
-#include <vector>
 
 #include "aw/CraftingGraph.h"
 #include "aw/Options.h"

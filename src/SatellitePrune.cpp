@@ -48,15 +48,9 @@
 
 #include "Prune.h"
 
-#include <algorithm>
 #include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <memory>
 #include <span>
-#include <vector>
 
 #include <ortools/linear_solver/linear_solver.h>
 

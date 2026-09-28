@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <vector>
 
 namespace aw {
 namespace {

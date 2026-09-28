@@ -1,12 +1,11 @@
 #include "aw/CraftingGraph.h"
+#include "aw/Options.h"
 
 #include "Prune.h"
 
-#include <algorithm>
 #include <array>
 #include <climits>
 
-#include "aw/Options.h"
 
 namespace aw {
 CraftingGraph graph;
