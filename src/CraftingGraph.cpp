@@ -856,6 +856,9 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   aw::vector<uint8_t> recipeSeen(nRecipe, 0);
   aw::vector<uint8_t> disabled(nRecipe, 0);
   aw::vector<NodeId> queue;
+  // Enqueued once per item at most, so nItem is a hard bound; the capacity
+  // survives the clear() at the top of every walk.
+  queue.reserve(nItem);
 
   // Ordinary BFS. `disabled` forces a recipe out of the walk without touching
   // the flags, so the pack-certificate post-pass can rebuild the subgraph.
@@ -866,7 +869,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
 
     const NodeId start = CraftingGraph::itemNode(output);
     itemSeen[start] = 1;
-    queue.push_back(start);
+    queue.push_back_unchecked(start);
 
     for (size_t q = 0; q < queue.size(); q++) {
       const NodeId item = queue[q];
@@ -974,7 +977,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
         for (NodeId input : graph.r2i.targetsOf(recipe)) {
           if (!itemSeen[input]) {
             itemSeen[input] = 1;
-            queue.push_back(input);
+            queue.push_back_unchecked(input);
           }
         }
       }
@@ -1085,11 +1088,13 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
     };
 
     aw::vector<NodeId> dead;
+    // The `queued` guard admits each item at most once, so nItem bounds it.
+    dead.reserve(nItem);
     aw::vector<uint8_t> queued(nItem, 0);
     for (NodeId item = 0; item < nItem; item++) {
       if (itemSeen[item] && !usable(item)) {
         queued[item] = 1;
-        dead.push_back(item);
+        dead.push_back_unchecked(item);
       }
     }
 
@@ -1108,7 +1113,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
           produced[out]--;
         if (produced[out] == 0 && itemSeen[out] && !queued[out] && !usable(out)) {
           queued[out] = 1;
-          dead.push_back(out);
+          dead.push_back_unchecked(out);
         }
       }
     }
@@ -1169,12 +1174,14 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   // Start filling the remapping between source graph and subgraph.
   // Use UINT32_MAX for empty entries.
   aw::vector<NodeId> itemMap(nItem, UINT32_MAX);
+  // At most one entry per source item.
+  result.itemOrigin.reserve(nItem);
   // Note that we can compute the amount of real items in subgraph alongside the way.
   uint subreal = 0;
   for (NodeId item = 0; item < nItem; item++) {
     if (itemSeen[item]) {
       itemMap[item] = result.itemOrigin.size();
-      result.itemOrigin.push_back(item);
+      result.itemOrigin.push_back_unchecked(item);
       if (item < graph.nReal)
         subreal++;
     }

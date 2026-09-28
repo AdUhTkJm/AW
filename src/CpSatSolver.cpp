@@ -233,10 +233,16 @@ Matrix selectColumns(const Matrix &A, std::span<const int64_t> c,
   out.colStart.push_back_unchecked(0);
   outC.clear();
   outC.reserve(keep.size());
+  // The copies are exactly as long as the kept columns, so size them up front.
+  size_t nnz = 0;
+  for (uint32_t r : keep)
+    nnz += A.colStart[r + 1] - A.colStart[r];
+  out.rowIndex.reserve(nnz);
+  out.value.reserve(nnz);
   for (uint32_t r : keep) {
     for (uint32_t k = A.colStart[r]; k < A.colStart[r + 1]; k++) {
-      out.rowIndex.push_back(A.rowIndex[k]);
-      out.value.push_back(A.value[k]);
+      out.rowIndex.push_back_unchecked(A.rowIndex[k]);
+      out.value.push_back_unchecked(A.value[k]);
     }
     out.colStart.push_back_unchecked((uint32_t) out.rowIndex.size());
     outC.push_back_unchecked(c[r]);
@@ -346,6 +352,9 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
 
   aw::vector<sat::IntVar> terms;
   aw::vector<int64_t> coefficients;
+  // Capacity survives clear(): a row never exceeds the total nnz, and the
+  // objective below can hold one term per column.
+  coefficients.reserve(std::max<size_t>(A.rowIndex.size(), (size_t) A.cols));
   for (uint32_t i = 0; i < A.rows; i++) {
     terms.clear();
     coefficients.clear();
@@ -353,7 +362,7 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
       if (rows.value[k] == 0)
         continue;
       terms.push_back(variables[rows.column[k]]);
-      coefficients.push_back(rows.value[k]);
+      coefficients.push_back_unchecked(rows.value[k]);
     }
     if (terms.empty()) {
       // An empty row reads 0 >= b[i].
@@ -376,7 +385,7 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
     if (c[r] == 0)
       continue;
     terms.push_back(variables[r]);
-    coefficients.push_back(c[r]);
+    coefficients.push_back_unchecked(c[r]);
   }
   if (!terms.empty()) {
     const sat::LinearExpr objective =

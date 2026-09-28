@@ -573,10 +573,12 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
   // The items the plan has to supply: the target and everything already held.
   // Both must stay outside every island, so the reverse walk starts there.
   aw::vector<uint> required;
-  required.push_back(target);
+  // The target plus each distinct stocked item.
+  required.reserve(nItem + 1);
+  required.push_back_unchecked(target);
   for (uint j = 0; j < nItem; j++)
     if (j != target && held(inventory, j) != 0)
-      required.push_back(j);
+      required.push_back_unchecked(j);
 
   aw::vector<uint> candidates;
   candidates.reserve(nItem);
@@ -593,6 +595,8 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
   aw::vector<uint32_t> itemStamp(nItem, UINT32_MAX);
   aw::vector<uint32_t> recipeStamp(graph.nRecipe, UINT32_MAX);
   aw::vector<uint> queue;
+  // Each item enters the reverse BFS at most once per candidate.
+  queue.reserve(nItem);
   aw::vector<int32_t> itemPos(nItem, -1);
   Component island;
   aw::vector<double> y;
@@ -619,7 +623,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
       if (j == escape)
         continue;
       visited[j] = candidate;
-      queue.push_back(j);
+      queue.push_back_unchecked(j);
     }
     for (size_t q = 0; q < queue.size(); q++) {
       const uint x = queue[q];
@@ -628,7 +632,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
         if (j == escape || visited[j] == candidate)
           continue;
         visited[j] = candidate;
-        queue.push_back(j);
+        queue.push_back_unchecked(j);
       }
     }
 
@@ -772,14 +776,17 @@ bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> ite
     // Component breakdown, plus the cheap gates from the lemma.
     comp.items.clear();
     comp.recipes.clear();
+    // Every subtree node lands in exactly one of the two lists.
+    comp.items.reserve(subtree.size());
+    comp.recipes.reserve(subtree.size());
     bool stocked = false;
     for (uint node : subtree) {
       if (node < nItem) {
-        comp.items.push_back(node);
+        comp.items.push_back_unchecked(node);
         if (held(inventory, node) != 0)
           stocked = true;
       } else {
-        comp.recipes.push_back(node - nItem);
+        comp.recipes.push_back_unchecked(node - nItem);
       }
     }
     if (stocked || comp.recipes.empty()) {

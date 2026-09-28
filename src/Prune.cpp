@@ -311,16 +311,20 @@ uint32_t markSinkRepresentatives(uint k, const aw::vector<uint> &adjOffsets,
   aw::vector<int32_t> disc(k, -1), low(k, 0);
   aw::vector<uint8_t> onStack(k, 0);
   aw::vector<uint32_t> tstack, callNode, callEdge;
+  // A DFS stack never holds more than one frame per node.
+  tstack.reserve(k);
+  callNode.reserve(k);
+  callEdge.reserve(k);
   int32_t timer = 0;
   uint32_t nComp = 0;
   for (uint32_t s = 0; s < k; s++) {
     if (disc[s] != -1)
       continue;
     disc[s] = low[s] = timer++;
-    tstack.push_back(s);
+    tstack.push_back_unchecked(s);
     onStack[s] = 1;
-    callNode.push_back(s);
-    callEdge.push_back(adjOffsets[s]);
+    callNode.push_back_unchecked(s);
+    callEdge.push_back_unchecked(adjOffsets[s]);
     while (!callNode.empty()) {
       const uint32_t v = callNode.back();
       uint32_t &edge = callEdge.back();
@@ -328,10 +332,10 @@ uint32_t markSinkRepresentatives(uint k, const aw::vector<uint> &adjOffsets,
         const uint32_t u = adjTargets[edge++];
         if (disc[u] == -1) {
           disc[u] = low[u] = timer++;
-          tstack.push_back(u);
+          tstack.push_back_unchecked(u);
           onStack[u] = 1;
-          callNode.push_back(u);
-          callEdge.push_back(adjOffsets[u]);
+          callNode.push_back_unchecked(u);
+          callEdge.push_back_unchecked(adjOffsets[u]);
         } else if (onStack[u] && disc[u] < low[v]) {
           low[v] = disc[u];
         }
@@ -409,6 +413,8 @@ constexpr PairKey packPair(NodeId m, NodeId w) noexcept {
 void intersectSorted(const aw::vector<NodeId> &a, const aw::vector<NodeId> &b,
                      aw::vector<NodeId> &out) noexcept {
   out.clear();
+  // The intersection of two sorted sets is no longer than the shorter one.
+  out.reserve(std::min(a.size(), b.size()));
   size_t i = 0, j = 0;
   while (i < a.size() && j < b.size()) {
     if (a[i] < b[j]) {
@@ -416,7 +422,7 @@ void intersectSorted(const aw::vector<NodeId> &a, const aw::vector<NodeId> &b,
     } else if (b[j] < a[i]) {
       j++;
     } else {
-      out.push_back(a[i]);
+      out.push_back_unchecked(a[i]);
       i++;
       j++;
     }
@@ -435,6 +441,8 @@ aw::vector<PairKey> mergeNewPairs(aw::vector<PairKey> &dst,
   aw::vector<PairKey> added;
   if (cand.empty())
     return added;
+  // Every new key comes from `cand`, so size the result up front.
+  added.reserve(cand.size());
 
   aw::vector<PairKey> merged;
   merged.reserve(dst.size() + cand.size());
@@ -443,7 +451,7 @@ aw::vector<PairKey> mergeNewPairs(aw::vector<PairKey> &dst,
     if (dst[i] < cand[j]) {
       merged.push_back_unchecked(dst[i++]);
     } else if (cand[j] < dst[i]) {
-      added.push_back(cand[j]);
+      added.push_back_unchecked(cand[j]);
       merged.push_back_unchecked(cand[j++]);
     } else {
       merged.push_back_unchecked(dst[i]);
@@ -454,7 +462,7 @@ aw::vector<PairKey> mergeNewPairs(aw::vector<PairKey> &dst,
   while (i < dst.size())
     merged.push_back_unchecked(dst[i++]);
   while (j < cand.size()) {
-    added.push_back(cand[j]);
+    added.push_back_unchecked(cand[j]);
     merged.push_back_unchecked(cand[j++]);
   }
   dst.swap(merged);
@@ -1215,12 +1223,14 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
       continue;
 
     recs.clear();
+    recs.reserve(recipeNodes.size());
     for (NodeId recipeNode : recipeNodes)
-      recs.push_back(recipeNode - graph.nItem);
+      recs.push_back_unchecked(recipeNode - graph.nItem);
     const uint k = (uint) recs.size();
 
     adj.assign(k, {});
     guard.assign(k, UINT32_MAX);
+    candidates.reserve(k);
 
     for (uint i = 0; i < k; i++) {
       const uint R = recs[i];
@@ -1247,7 +1257,7 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
         candidates.clear();
         for (uint j = 0; j < k; j++)
           if (j != i)
-            candidates.push_back(j);
+            candidates.push_back_unchecked(j);
 
         if (producers.empty()) {
           // Y cannot be produced. Unless the player holds stock (which the
@@ -1377,10 +1387,12 @@ void computeDirectDominancePruning(CraftingGraph &graph,
 
     recs.clear();
     outAmt.clear();
+    recs.reserve(recipeNodes.size());
+    outAmt.reserve(recipeNodes.size());
     for (NodeId recipeNode : recipeNodes) {
       const uint r = recipeNode - graph.nItem;
-      recs.push_back(r);
-      outAmt.push_back(graph.outputAmt[r]);
+      recs.push_back_unchecked(r);
+      outAmt.push_back_unchecked(graph.outputAmt[r]);
     }
     const uint k = (uint) recs.size();
 
@@ -1513,17 +1525,20 @@ bool collectGuards(const CraftingGraph &graph, NodeId y,
                    aw::vector<NodeId> &out) noexcept {
   out.clear();
   if (y < graph.nReal) {
-    out.push_back(y);
+    out.reserve(1);
+    out.push_back_unchecked(y);
     return true;
   }
   const auto recipes = graph.i2r.targetsOf(y);
   if (recipes.size() > MAX_SUBSTITUTION_GUARD_ITEMS)
     return false;
+  // At most one guard per tag member recipe.
+  out.reserve(recipes.size());
   for (NodeId recipeNode : recipes) {
     const auto inputs = graph.r2i.targetsOf(recipeNode - graph.nItem);
     if (inputs.size() != 1)
       return false;
-    out.push_back(inputs[0]);
+    out.push_back_unchecked(inputs[0]);
   }
   std::sort(out.begin(), out.end());
   out.erase(std::unique(out.begin(), out.end()), out.end());
@@ -1685,7 +1700,7 @@ bool substitutionDominates(CostContext &ctx, const ColumnView &cur, const Column
     addToColumn(ColumnView(tmpItems, tmpCoeffs), d, -t, nextItems, nextCoeffs);
 
     const size_t before = collapses.size();
-    collapses.push_back(y);
+    collapses.push_back_unchecked(y);
     if (substitutionDominates(ctx, ColumnView(nextItems, nextCoeffs), s,
                               depth - 1, work, collapses))
       return true;
@@ -1804,6 +1819,8 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
   aw::vector<aw::vector<NodeId>> compGuards;
 
   aw::vector<NodeId> collapses, resolved, tmpGuards;
+  // The recursive search abandons any branch that would exceed the depth cap.
+  collapses.reserve(MAX_SUBSTITUTION_DEPTH);
 
   for (NodeId X = 0; X < nReal && work != 0; X++) {
     const auto recipeNodes = graph.i2r.targetsOf(X);
@@ -1813,8 +1830,9 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
       continue;
 
     recs.clear();
+    recs.reserve(recipeNodes.size());
     for (NodeId recipeNode : recipeNodes)
-      recs.push_back(recipeNode - graph.nItem);
+      recs.push_back_unchecked(recipeNode - graph.nItem);
     const uint k = (uint) recs.size();
 
     adj.assign(k, {});

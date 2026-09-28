@@ -50,6 +50,11 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
   A.cols = n;
   A.colStart.reserve((size_t) n + 1);
   A.colStart.push_back_unchecked(0);
+  // Each recipe contributes its output row plus one row per input, before the
+  // per-column merge; the merge can only drop rows, so this bounds the total.
+  const size_t entryCap = (size_t) n + g.r2i.targets.size();
+  A.rowIndex.reserve(entryCap);
+  A.value.reserve(entryCap);
   aw::vector<ColumnEntry> column;
   // Note that our matrix is column-major, so we're processing column-by-column here.
   for (uint32_t r = 0; r < n; r++) {
@@ -84,8 +89,8 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
 
     // Push the column to A.
     for (size_t k = 0; k < kept; k++) {
-      A.rowIndex.push_back(column[k].row);
-      A.value.push_back(column[k].value);
+      A.rowIndex.push_back_unchecked(column[k].row);
+      A.value.push_back_unchecked(column[k].value);
     }
     A.colStart.push_back_unchecked((uint32_t) A.rowIndex.size());
   }

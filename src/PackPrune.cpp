@@ -179,6 +179,14 @@ struct PackSearch {
     minPositive.assign(nRecipe, 0);
     net.assign(nItem, 0);
     unconsumed.assign(nItem, 1);
+    // All four grow monotonically and are capped by the search budgets; rates
+    // are bounded by the total number of input slots.
+    support.reserve(opt.maxPackRecipes);
+    needList.reserve(nItem);
+    zeroStock.reserve(opt.maxZeroStockItems);
+    rateInput.reserve(graph.r2i.targets.size());
+    rateNum.reserve(graph.r2i.targets.size());
+    rateDen.reserve(graph.r2i.targets.size());
   }
 
   bool timedOut() const noexcept {
@@ -698,9 +706,11 @@ struct PackSearch {
 
     out.support.clear();
     out.count.clear();
+    out.support.reserve(positive.size());
+    out.count.reserve(positive.size());
     for (const auto &entry : positive) {
-      out.support.push_back(entry.first);
-      out.count.push_back(entry.second);
+      out.support.push_back_unchecked(entry.first);
+      out.count.push_back_unchecked(entry.second);
     }
     out.zeroStock = zeroStock;
     std::sort(out.zeroStock.begin(), out.zeroStock.end());

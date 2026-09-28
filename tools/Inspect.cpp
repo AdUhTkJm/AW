@@ -793,11 +793,12 @@ void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
   size_t multi = 0;
   size_t bulk = 0;
   aw::vector<aw::NodeId> leafItems;
+  leafItems.reserve(g.nItem);
   for (aw::NodeId i = 0; i < g.nItem; i++) {
     const size_t producers = g.i2r.targetsOf(i).size();
     if (producers == 0) {
       leaves++;
-      leafItems.push_back(i);
+      leafItems.push_back_unchecked(i);
     }
     if (producers > 1)
       multi++;
