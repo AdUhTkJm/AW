@@ -79,6 +79,17 @@ def plan_ms_of(row):
     return (row.get("reach_ms", 0.0) or 0.0) + (row.get("solve_ms", 0.0) or 0.0)
 
 
+def aggregate(values, mode):
+    """Central/worst statistic selected by --mean/--max (`median` by default)."""
+    if not values:
+        return None
+    if mode == "mean":
+        return statistics.fmean(values)
+    if mode == "max":
+        return max(values)
+    return statistics.median(values)
+
+
 def load_rows(results_dir):
     rows = []
     malformed = []
@@ -109,7 +120,19 @@ def main():
                         help="output prefix (default <results-dir>/summary)")
     parser.add_argument("--control", default="aw-optimal",
                         help="config used as ground truth (default aw-optimal)")
+    parser.add_argument("--mean", action="store_true",
+                        help="report the mean instead of the median for every aggregated "
+                             "column (plan_ms, plan_ms_feasible, gap, items, recipes, "
+                             "conflicts, branches, cost_ratio)")
+    parser.add_argument("--max", action="store_true",
+                        help="report the maximum instead of the median for every "
+                             "aggregated column")
     args = parser.parse_args()
+
+    if args.mean and args.max:
+        raise SystemExit("--mean and --max are mutually exclusive")
+    mode = "mean" if args.mean else ("max" if args.max else "median")
+    tag = mode  # suffix for every aggregated summary column
 
     prefix = args.out_prefix or os.path.join(args.results_dir, "summary")
     rows, malformed = load_rows(args.results_dir)
@@ -218,6 +241,10 @@ def main():
                 ratios.append(r["cost"] / reference["cost"])
         plan_times = [plan_ms_of(r) for r in items]
         feasible_times = [plan_ms_of(r) for r in feasible]
+        item_counts = [r.get("items", 0) for r in items]
+        recipe_counts = [r.get("recipes", 0) for r in items]
+        conflict_counts = [r.get("conflicts", 0) for r in items]
+        branch_counts = [r.get("branches", 0) for r in items]
         summary_rows.append({
             "dataset": dataset,
             "config": config,
@@ -233,8 +260,7 @@ def main():
             "unclaimed": claims.get("unclaimed", 0),
             "no_answer": sum(1 for r in items if no_answer_of(r)),
             "timeout": sum(1 for r in items if r.get("timeout")),
-            "gap_p50": statistics.median(gaps) if gaps else None,
-            "gap_max": max(gaps) if gaps else None,
+            "gap_%s" % tag: aggregate(gaps, mode),
             "no_answer": len(items) - len(answered),
             "false_positive": len(false_positives),
             "vs_truth_compared": len(conclusive),
@@ -242,20 +268,13 @@ def main():
             "vs_truth_false_positive": len(false_positive_vs_truth),
             "vs_truth_false_negative": len(false_negative),
             "preprocess_ms": preprocess.get((dataset, config)),
-            "plan_ms_median": statistics.median(plan_times) if plan_times else None,
-            "plan_ms_mean": statistics.fmean(plan_times) if plan_times else None,
-            "plan_ms_feasible_median": (statistics.median(feasible_times)
-                                        if feasible_times else None),
-            "items_median": (statistics.median([r.get("items", 0) for r in items])
-                             if items else None),
-            "recipes_median": (statistics.median([r.get("recipes", 0) for r in items])
-                               if items else None),
-            "conflicts_median": (statistics.median([r.get("conflicts", 0) for r in items])
-                                 if items else None),
-            "branches_median": (statistics.median([r.get("branches", 0) for r in items])
-                                if items else None),
-            "cost_ratio_median": statistics.median(ratios) if ratios else None,
-            "cost_ratio_worst": max(ratios) if ratios else None,
+            "plan_ms_%s" % tag: aggregate(plan_times, mode),
+            "plan_ms_feasible_%s" % tag: aggregate(feasible_times, mode),
+            "items_%s" % tag: aggregate(item_counts, mode),
+            "recipes_%s" % tag: aggregate(recipe_counts, mode),
+            "conflicts_%s" % tag: aggregate(conflict_counts, mode),
+            "branches_%s" % tag: aggregate(branch_counts, mode),
+            "cost_ratio_%s" % tag: aggregate(ratios, mode),
         })
 
     fields = list(summary_rows[0].keys())
@@ -266,9 +285,9 @@ def main():
             writer.writerow(row)
 
     with open(prefix + ".md", "w", encoding="utf-8") as handle:
-        write_markdown(handle, summary_rows)
+        write_markdown(handle, summary_rows, tag)
 
-    render(summary_rows)
+    render(summary_rows, tag)
     print()
     print("wrote %s.cells.csv, %s.csv, %s.md" % (prefix, prefix, prefix))
     for path, number, error in malformed:
@@ -283,7 +302,12 @@ def fmt(value, digits=1):
     return str(value)
 
 
-def render(summary_rows):
+def render(summary_rows, tag):
+    gap_key = "gap_%s" % tag
+    cost_key = "cost_ratio_%s" % tag
+    plan_key = "plan_ms_%s" % tag
+    items_key = "items_%s" % tag
+    recipes_key = "recipes_%s" % tag
     by_dataset = collections.defaultdict(list)
     for row in summary_rows:
         by_dataset[row["dataset"]].append(row)
@@ -294,9 +318,10 @@ def render(summary_rows):
               " budget cut),")
         print("              uncl=engine has no optimality notion, noans=no answer at all"
               " (not merely unproven)")
+        print("  aggregation: %s" % tag)
         print("%-11s %-12s %4s %5s %6s %6s %6s %5s %4s %7s %7s %8s %9s %7s %8s %7s %8s"
               % ("config", "stage", "n", "feas", "prov", "unprov", "uncl", "noans", "tout",
-                 "vs_ok", "fp_vs", "gapmax", "cost_rat", "pre_ms", "plan_ms", "items",
+                 "vs_ok", "fp_vs", "gap", "cost_rat", "pre_ms", "plan_ms", "items",
                  "recipes"))
         for row in sorted(by_dataset[dataset],
                           key=lambda r: (CONFIG_ORDER.index(r["config"])
@@ -309,12 +334,17 @@ def render(summary_rows):
                      row["timeout"],
                      "%d/%d" % (row["vs_truth_agree"], row["vs_truth_compared"]),
                      row["vs_truth_false_positive"],
-                     fmt(row["gap_max"], 4), fmt(row["cost_ratio_median"], 3),
-                     fmt(row["preprocess_ms"]), fmt(row["plan_ms_median"]),
-                     fmt(row["items_median"], 0), fmt(row["recipes_median"], 0)))
+                     fmt(row[gap_key], 4), fmt(row[cost_key], 3),
+                     fmt(row["preprocess_ms"]), fmt(row[plan_key]),
+                     fmt(row[items_key], 0), fmt(row[recipes_key], 0)))
 
 
-def write_markdown(handle, summary_rows):
+def write_markdown(handle, summary_rows, tag):
+    gap_key = "gap_%s" % tag
+    cost_key = "cost_ratio_%s" % tag
+    plan_key = "plan_ms_%s" % tag
+    items_key = "items_%s" % tag
+    recipes_key = "recipes_%s" % tag
     by_dataset = collections.defaultdict(list)
     for row in summary_rows:
         by_dataset[row["dataset"]].append(row)
@@ -323,8 +353,9 @@ def write_markdown(handle, summary_rows):
         handle.write("`prov` = proven optimal, `unprov` = real plan without a proof (AW gap, "
                      "TB budget cut), "
                      "`uncl` = engine has no optimality notion, `noans` = no answer at all.\n\n")
+        handle.write("Aggregation: `%s`.\n\n" % tag)
         handle.write("| config | stage | n | feasible | prov | unprov | uncl | noans | timeout | "
-                     "false-pos | vs truth | FP vs truth | FN vs truth | gap max | cost ratio | "
+                     "false-pos | vs truth | FP vs truth | FN vs truth | gap | cost ratio | "
                      "preprocess ms | plan ms | items | recipes |\n")
         handle.write("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
                      "---:|---:|---:|---:|\n")
@@ -339,9 +370,9 @@ def write_markdown(handle, summary_rows):
                             row["timeout"], row["false_positive"],
                             row["vs_truth_agree"], row["vs_truth_compared"],
                             row["vs_truth_false_positive"], row["vs_truth_false_negative"],
-                            fmt(row["gap_max"], 4), fmt(row["cost_ratio_median"], 3),
-                            fmt(row["preprocess_ms"]), fmt(row["plan_ms_median"]),
-                            fmt(row["items_median"], 0), fmt(row["recipes_median"], 0)))
+                            fmt(row[gap_key], 4), fmt(row[cost_key], 3),
+                            fmt(row["preprocess_ms"]), fmt(row[plan_key]),
+                            fmt(row[items_key], 0), fmt(row[recipes_key], 0)))
         handle.write("\n")
 
 

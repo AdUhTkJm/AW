@@ -3,7 +3,8 @@
 
 Configs
 -------
-  aw-nonopt   AW in nonoptimal mode, all eight cumulative ablation stages
+  aw-nonopt   AW in nonoptimal mode, the cumulative ablation stages (default all
+              eight; `--stages` runs a subset and merges it into the existing JSONL)
   aw-optimal  AW in optimal mode with every pruning on: the ground truth
   aw-flash    AW in nonoptimal mode with every pruning on; the solver stops at
               the FIRST feasible plan instead of optimizing it
@@ -24,6 +25,9 @@ Typical use
   # quick smoke test on the two small corpora
   python3 bench/run.py --datasets recipes-vanilla,recipes-small
 
+  # refresh one point of the aw-nonopt ablation without re-running the rest
+  python3 bench/run.py --datasets recipes-vanilla --configs aw-nonopt --stages satellite
+
   # overnight, the real thing
   nohup python3 bench/run.py --datasets recipes-nast,recipes-atm \\
         --time-limit 40 --warmup 1 --repeats 1 > bench/results/run.log 2>&1 &
@@ -32,6 +36,7 @@ Then `python3 bench/summarize.py`.
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -94,6 +99,51 @@ def run_logged(name, command, log_path, cwd, dry_run):
     return result.returncode
 
 
+def merge_stage_output(out_path, fresh_path, stages):
+    """Replace the rows of `stages` in `out_path` with the fresh ones.
+
+    `fresh_path` is a complete `aw_bench` output (config header + registration +
+    query rows for the selected stages). The config header and registration row
+    of the fresh run win; every query row of a re-run stage is dropped from the
+    old file and the fresh rows are appended. This is what lets `--stages tag`
+    refresh one ablation point without discarding the other seven.
+    """
+    with open(fresh_path, encoding="utf-8") as handle:
+        fresh = [json.loads(line) for line in handle if line.strip()]
+    header = next((row for row in fresh if row.get("type") == "config"), None)
+    registration = next((row for row in fresh if row.get("type") == "registration"), None)
+    fresh_queries = [row for row in fresh if row.get("type") == "query"]
+
+    old = []
+    if os.path.exists(out_path):
+        with open(out_path, encoding="utf-8") as handle:
+            old = [json.loads(line) for line in handle if line.strip()]
+    kept = [row for row in old
+            if row.get("type") not in ("config", "registration")
+            and not (row.get("type") == "query" and row.get("stage") in stages)]
+
+    # Rewrite the header's stage list so it names every stage now in the file,
+    # not just the subset this invocation refreshed.
+    present = set(row.get("stage") for row in kept + fresh_queries if row.get("stage"))
+    if header is not None:
+        header = dict(header)
+        header["stages"] = ",".join([stage for stage in AW_STAGES if stage in present]
+                                     + sorted(present - set(AW_STAGES)))
+
+    ordered = ([header] if header is not None else [])
+    if registration is not None:
+        ordered.append(registration)
+    ordered += kept
+    ordered += fresh_queries
+
+    tmp_path = out_path + ".merge.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        for row in ordered:
+            handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+    os.replace(tmp_path, out_path)
+    os.remove(fresh_path)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -101,6 +151,10 @@ def main():
                         help="comma separated dataset names (default: all four)")
     parser.add_argument("--configs", default=",".join(ALL_CONFIGS),
                         help="comma separated configs (default: all)")
+    parser.add_argument("--stages", default=",".join(AW_STAGES),
+                        help="comma separated aw-nonopt ablation stages to (re)run; the "
+                             "other stages' rows are kept (default: all). Use this to "
+                             "refresh a single point of the cumulative curve.")
     parser.add_argument("--plan-dir", default=os.path.join("bench", "plans"))
     parser.add_argument("--out-dir", default=os.path.join("bench", "results"))
     parser.add_argument("--seed", default="20260101")
@@ -133,6 +187,13 @@ def main():
     if unknown:
         raise SystemExit("unknown config(s): %s" % ", ".join(sorted(unknown)))
 
+    stages = [s for s in args.stages.split(",") if s]
+    unknown_stages = set(stages) - set(AW_STAGES)
+    if unknown_stages:
+        raise SystemExit("unknown stage(s): %s" % ", ".join(sorted(unknown_stages)))
+    if not stages:
+        raise SystemExit("--stages must list at least one stage")
+
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(args.plan_dir, exist_ok=True)
 
@@ -163,17 +224,23 @@ def main():
             log = os.path.join(ROOT, args.out_dir, "%s.%s.log" % (dataset, config))
 
             if config == "aw-nonopt":
+                # A subset of the cumulative stages is a legitimate re-run: only
+                # the selected `--stage` arguments are passed and the fresh rows
+                # are merged into the existing JSONL instead of clobbering it.
+                fresh = out + ".fresh"
                 command = [os.path.join(ROOT, "build", "aw_bench"),
                            "--dataset", dataset, "--awr", awr, "--plan", prefix,
-                           "--config", config, "--out", out, "--names", names,
+                           "--config", config, "--out", fresh, "--names", names,
                            "--nonoptimal", "1",
                            "--warmup", args.warmup, "--repeats", args.repeats,
                            "--time-limit", args.time_limit, "--gap", args.gap,
                            "--workers", args.workers, "--pack-seconds", args.pack_seconds,
                            "--satellite-seconds", args.satellite_seconds]
-                for stage in AW_STAGES:
+                for stage in stages:
                     command += ["--stage", stage]
                 code = run_logged(config, command, log, ROOT, args.dry_run)
+                if code == 0 and not args.dry_run:
+                    merge_stage_output(out, fresh, stages)
 
             elif config == "aw-optimal":
                 command = [os.path.join(ROOT, "build", "aw_bench"),

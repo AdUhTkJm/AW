@@ -152,7 +152,8 @@ as the `aw-nonopt` `satellite` row, but `solver::Options::flash` returns the fir
 plan instead of a cheap one. It is **not** ground truth and certifies optimality only when
 that first incumbent happens to be provably optimal, so `prov` collapses to whatever it
 finds. Its point is the shape of the trade: how much latency the proof costs and what the
-first feasible plan's cost is relative to `aw-optimal` (`cost_ratio_median`).
+first feasible plan's cost is relative to `aw-optimal` (`cost_ratio_median` by default;
+run `summarize.py --mean` or `--max` for the mean/worst ratio).
 
 ### 3.5 Ablation stages (cumulative, `nonoptimal=true`)
 
@@ -176,6 +177,10 @@ it before registering and only uses the flag as a query-time gate afterwards. On
 process. `solver::Options::flash` is read at query time, so `aw-flash` could ride the
 `aw-nonopt` registration, but `run.py` still gives it its own process so its JSONL is a
 self-contained single-row config. Net cost: **three registrations per dataset**, not ten.
+
+Because the gates are flipped per query, a stage is self-contained: `run.py --configs
+aw-nonopt --stages tag` re-measures only the `tag` point and merges it back into the
+existing `aw-nonopt` JSONL, leaving the other seven rows untouched.
 
 ### 3.6 Budgets
 
@@ -206,7 +211,8 @@ Expected shape of the output (vanilla, 5 s cutoff, 5 s Java watchdog):
 == recipes-vanilla ==
   optimality: prov=proven optimal, unprov=plan without a proof (AW gap / TB budget cut),
               uncl=engine has no optimality notion, noans=no answer at all (not merely unproven)
-config      stage           n  feas   prov unprov   uncl noans tout   vs_ok   fp_vs   gapmax  cost_rat  pre_ms  plan_ms   items  recipes
+  aggregation: median
+config      stage           n  feas   prov unprov   uncl noans tout   vs_ok   fp_vs      gap  cost_rat  pre_ms  plan_ms   items  recipes
 aw-optimal  optimal        48    20     19      1      0     1    0   47/47       0   0.0000     1.000     2.2      1.4       2        1
 aw-nonopt   none           48    20     18      2      0    16    0   32/32       0   0.0000     1.000     3.9      2.0      68       88
 aw-nonopt   dead_node      48    20     18      2      0    16    0   32/32       0   0.0000     1.000     3.9      2.0      68       88
@@ -233,7 +239,8 @@ instead of the sweep to expose it.
 
 `aw-flash` answers the same 47 conclusive instances as `aw-optimal` here, but certifies
 only 15 of them: it stops at the first feasible plan, so `prov` falls and `unprov` absorbs
-everything it declined to prove. `gapmax` is the worst incumbent it accepted. The counts
+everything it declined to prove. `gap` is the median gap of those incumbents (pass
+`summarize.py --max` for the worst one). The counts
 wobble between runs (16 workers), so read the columns, not the exact integers.
 
 For AW the `plan_ms` column is `query_ms` (`reach_ms` + `solve_ms`), the same whole-query
@@ -277,6 +284,13 @@ python3 bench/run.py --datasets recipes-small --configs ae2vm-cold
 # adversarial sample: targets from the biggest SCC
 python3 bench/run.py --datasets recipes-nast --big-scc
 
+# refresh one point of the aw-nonopt ablation (keeps the other seven stages)
+python3 bench/run.py --datasets recipes-nast --configs aw-nonopt --stages tag
+
+# report mean / worst-case instead of the default median
+python3 bench/summarize.py --mean
+python3 bench/summarize.py --max
+
 # a corpus you exported yourself
 python3 bench/make_plan.py --dataset my-pack --awr /path/recipes.awr --names /path/recipes.names.tsv
 python3 bench/run.py --datasets recipes-vanilla          # edit DATASETS in run.py for a new path
@@ -303,7 +317,8 @@ AW reports it as the solver objective. The baselines' `cost` is recomputed by th
 from the firing vector each engine returned, so a "cheap" plan and a "wrong" plan are
 distinguishable. **Only compare `cost` on rows where `feasible` is true and the ground
 truth is `proven_optimal`; otherwise the ratio is meaningless.** `summarize.py` already
-enforces this and leaves `cost_ratio_median` blank when no instance qualifies.
+enforces this and leaves `cost_ratio_median` (or `cost_ratio_mean` / `cost_ratio_max` under
+`--mean` / `--max`) blank when no instance qualifies.
 
 ### 5.2 Time
 
@@ -353,9 +368,11 @@ without the later prunings AW stops answering rather than answering slowly.
 * `bench/results/summary.cells.csv` — one row per (dataset, config, stage, target, amount,
   stock, repeat), joined with the ground-truth row for that instance.
 * `bench/results/summary.csv`, `summary.md` — one row per (dataset, config, stage):
-  counts, medians, agreement tallies, cost ratios.
-* `bench/results/summary.csv` also carries `preprocess_ms`, `items_median`,
-  `recipes_median`, `conflicts_median` and `branches_median`, so the CP-SAT effort counters
+  counts, aggregates, agreement tallies, cost ratios. Every aggregate is the median by
+  default; `python3 bench/summarize.py --mean` (or `--max`) switches them all to the mean
+  (or the worst case) and suffixes the columns `_mean` / `_max` accordingly.
+* `bench/results/summary.csv` also carries `preprocess_ms`, `items_<agg>`,
+  `recipes_<agg>`, `conflicts_<agg>` and `branches_<agg>`, so the CP-SAT effort counters
   you asked for are in the same table.
 
 ---

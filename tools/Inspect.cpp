@@ -767,9 +767,11 @@ void dumpGraph(const aw::CraftingGraph& graph) {
   }
 }
 
-// Prints every recipe of `sub` as "output xN <- input xN, ...", plus a few
-// stats. Pseudo-resources are shown as #handle. Item nodes are renumbered in
-// the subgraph, so they are mapped back through itemOrigin before labelling.
+// Prints every recipe of `sub` as "output xN <- input xN, ... @ ws1, ws2", plus
+// a few stats. Pseudo-resources are shown as #handle. Item nodes are renumbered
+// in the subgraph, so they are mapped back through itemOrigin before labelling.
+// The workstation set is looked up in the source graph through recipeOrigin;
+// tag recipes have none and simply omit the " @ ..." suffix.
 void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
                   const NameTable &names) {
   const aw::BaseCraftingGraph &g = sub.graph;
@@ -823,6 +825,17 @@ void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
         if (k != 0)
           std::cout << ", ";
         std::cout << item(targets[k]) << " x" << weights[k];
+      }
+    }
+    if (r < sub.recipeOrigin.size()) {
+      const auto stations = graph.workstations.targetsOf(sub.recipeOrigin[r]);
+      if (!stations.empty()) {
+        std::cout << " @ ";
+        for (size_t k = 0; k < stations.size(); k++) {
+          if (k != 0)
+            std::cout << ", ";
+          std::cout << itemLabel(graph, names, stations[k]);
+        }
       }
     }
     std::cout << '\n';
