@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -173,6 +175,101 @@ void testClear() {
   expect(aw::search::getTextIndex().empty(), "the index is empty after clearing");
 }
 
+#ifdef AW_SEARCH_TEST_DATA
+
+std::string slurp(const std::string &path) {
+  std::ifstream in(path, std::ios::binary);
+  std::ostringstream buffer;
+  buffer << in.rdbuf();
+  return buffer.str();
+}
+
+// Splits a line on tabs. Returns false when it does not have `count` fields.
+bool splitFields(const std::string &line, std::size_t count, std::vector<std::string> &out) {
+  out.clear();
+  std::size_t start = 0;
+  while (true) {
+    const std::size_t tab = line.find('\t', start);
+    if (tab == std::string::npos) {
+      out.push_back(line.substr(start));
+      break;
+    }
+    out.push_back(line.substr(start, tab - start));
+    start = tab + 1;
+  }
+  return out.size() == count;
+}
+
+uint32_t parseU32(const std::string &text) {
+  uint32_t value = 0;
+  for (char c : text)
+    if (c >= '0' && c <= '9')
+      value = value * 10 + (uint32_t) (c - '0');
+  return value;
+}
+
+std::string join(const std::vector<uint32_t> &handles) {
+  std::string out;
+  for (std::size_t i = 0; i < handles.size(); i++) {
+    if (i != 0)
+      out += ',';
+    out += std::to_string(handles[i]);
+  }
+  return out;
+}
+
+// Loads the committed corpus in the mod's name-table format, registers it
+// through the same chunked path the JNI bridge uses, and checks every golden
+// query in order. This is the one place the matching and ranking rules are
+// pinned down, so the fixture stays small enough to read.
+void testCorpusSearch() {
+  const std::string base(AW_SEARCH_TEST_DATA);
+  const std::string corpus = slurp(base + "/search-corpus.tsv");
+  const std::string queries = slurp(base + "/search-queries.tsv");
+  if (corpus.empty() || queries.empty()) {
+    std::cout << "  [FAIL] missing search fixture under " << base << '\n';
+    ++failures;
+    return;
+  }
+
+  std::vector<std::byte> arena;
+  std::vector<uint32_t> offsets;
+  std::vector<std::string> fields;
+  uint32_t expectedHandle = 1;
+  std::istringstream corpusStream(corpus);
+  std::string line;
+  while (std::getline(corpusStream, line)) {
+    if (line.empty() || line[0] == '#')
+      continue;
+    if (!splitFields(line, 4, fields)) {
+      expect(false, "a corpus line must have four fields");
+      continue;
+    }
+    expect(parseU32(fields[0]) == expectedHandle, "corpus handles must be consecutive from 1");
+    appendString(arena, offsets, fields[1]);
+    appendString(arena, offsets, fields[2]);
+    appendString(arena, offsets, fields[3]);
+    expectedHandle++;
+  }
+
+  std::string error;
+  expect(registerSplit(arena, offsets, 3, 7, error), "the golden corpus registers (chunked)");
+
+  std::istringstream queryStream(queries);
+  while (std::getline(queryStream, line)) {
+    if (line.empty() || line[0] == '#')
+      continue;
+    if (!splitFields(line, 2, fields)) {
+      expect(false, "a query line must have two fields");
+      continue;
+    }
+    const std::vector<uint32_t> hits = aw::search::search(fields[0], 50);
+    expectEq(join(hits), fields[1], fields[0].c_str());
+  }
+}
+
+#endif  // AW_SEARCH_TEST_DATA
+
 }  // namespace
 
 int main() {
@@ -182,6 +279,10 @@ int main() {
   testRejectsMalformed();
   testFailureKeepsPrevious();
   testClear();
+#ifdef AW_SEARCH_TEST_DATA
+  std::cout << "search queries\n";
+  testCorpusSearch();
+#endif
 
   if (failures == 0) {
     std::cout << "all tests passed\n";

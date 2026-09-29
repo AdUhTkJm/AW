@@ -23,6 +23,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "aw/utils/PodVector.h"
 
@@ -92,6 +93,15 @@ bool registerTextIndex(std::span<const std::byte *> chunks,
 
 // The process-wide index. Empty until the first successful registration.
 const TextIndex &getTextIndex() noexcept;
+
+// Runs a query against the corpus and returns up to `limit` resource handles,
+// best match first. Handles are the 1-based ids `registerTextIndex` numbered,
+// so a hit can be fed straight to a plan request.
+//
+// The query is matched against the resource location, the English name and the
+// Chinese name (directly and through pinyin). Matching is case-insensitive for
+// ASCII. An empty query, `limit == 0` or an empty corpus returns no handles.
+std::vector<uint32_t> search(std::string_view query, uint32_t limit);
 
 }  // namespace aw::search
 

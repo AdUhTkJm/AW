@@ -142,12 +142,12 @@ add_custom_command(
    COMMENT "Generating Pinyin.h from third_party/pinyin.txt"
    VERBATIM)
 
-add_library(aw_search STATIC src/search/TextIndex.cpp "${AW_PINYIN_HEADER}")
+add_library(aw_search STATIC src/search/TextIndex.cpp src/search/SearchIndex.cpp "${AW_PINYIN_HEADER}")
 target_include_directories(aw_search PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(aw_search PRIVATE "${AW_PINYIN_HEADER_DIR}")
 target_compile_features(aw_search PUBLIC cxx_std_20)
 if(AW_STRICT_FLAGS)
-   set_source_files_properties(src/search/TextIndex.cpp
+   set_source_files_properties(src/search/TextIndex.cpp src/search/SearchIndex.cpp
       PROPERTIES COMPILE_OPTIONS "${AW_STRICT_FLAGS}")
 endif()
 
@@ -208,6 +208,8 @@ if(AW_BUILD_TESTS)
    add_executable(aw_search_tests tests/TestSearch.cpp)
    target_link_libraries(aw_search_tests PRIVATE aw_search)
    target_compile_options(aw_search_tests PRIVATE ${AW_STRICT_FLAGS})
+   target_compile_definitions(aw_search_tests PRIVATE
+      AW_SEARCH_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
    add_test(NAME search_index COMMAND aw_search_tests)
 
    # The pinyin table generator, checked against a handful of known readings

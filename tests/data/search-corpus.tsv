@@ -1,0 +1,14 @@
+# handle	resource	name_en_us	name_zh_cn
+1	minecraft:stone	Stone	石头
+2	minecraft:redstone	Redstone	红石
+3	minecraft:stonecutter	Stonecutter	切石机
+4	minecraft:iron_ingot	Iron Ingot	铁锭
+5	mekanism:shadow_iron_ingot	Shadow Iron Ingot	暗影铁锭
+6	minecraft:gold_ingot	Gold Ingot	金锭
+7	minecraft:iron_ore	Iron Ore	铁矿石
+8	minecraft:mace	Mace	重锤
+9	test:girl	Girl	女孩
+10	test:girls_room	Girl's Room	女孩的房间
+11	extradisks:1024k_item_storage_block	1024K Item Storage Block	1024K物品存储方块
+12	test:mana_powder	Mana Powder	魔力粉
+13	test:bank	Bank	银行

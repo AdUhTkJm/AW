@@ -3,6 +3,7 @@
 //
 //   public static native void registerSearch(ByteBuffer[] chunks, int[] offsets,
 //                                            int fieldsPerHandle);
+//   public static native int[] search(String query, int limit);
 //
 // and nothing here depends on the package.
 //
@@ -90,9 +91,39 @@ void JNICALL nativeRegisterSearch(JNIEnv *env, jclass, jobjectArray chunks,
     throwJava(env, "java/lang/IllegalArgumentException", error);
 }
 
+jintArray JNICALL nativeSearch(JNIEnv *env, jclass, jstring query, jint limit) {
+  if (query == nullptr) {
+    throwJava(env, "java/lang/NullPointerException", "the search query must not be null");
+    return nullptr;
+  }
+  if (limit < 0) {
+    throwJava(env, "java/lang/IllegalArgumentException", "the search limit must not be negative");
+    return nullptr;
+  }
+
+  // GetStringUTFChars yields modified UTF-8. The two spellings only differ for
+  // supplementary characters, and the corpus holds BMP Chinese and ASCII, so
+  // these are the same bytes the mod sent through StringPool.
+  const char *utf = env->GetStringUTFChars(query, nullptr);
+  // A null result means an exception (out of memory) is already pending.
+  if (utf == nullptr)
+    return nullptr;
+  const std::string text(utf);
+  env->ReleaseStringUTFChars(query, utf);
+
+  const std::vector<uint32_t> hits = aw::search::search(text, (uint32_t) limit);
+  jintArray result = env->NewIntArray((jsize) hits.size());
+  if (result == nullptr)
+    return nullptr;
+  if (!hits.empty())
+    env->SetIntArrayRegion(result, 0, (jsize) hits.size(), (const jint *) hits.data());
+  return result;
+}
+
 const JNINativeMethod searchMethods[] = {
     {(char *) "registerSearch", (char *) "([Ljava/nio/ByteBuffer;[II)V",
      (void *) &nativeRegisterSearch},
+    {(char *) "search", (char *) "(Ljava/lang/String;I)[I", (void *) &nativeSearch},
 };
 
 }  // namespace

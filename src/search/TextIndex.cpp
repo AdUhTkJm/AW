@@ -1,6 +1,10 @@
 #include "aw/search/TextIndex.h"
 
 #include <cstring>
+#include <mutex>
+#include <shared_mutex>
+
+#include "SearchIndex.h"
 
 namespace aw::search {
 
@@ -39,7 +43,9 @@ bool registerTextIndex(std::span<const std::byte *> chunks,
 
   // An empty corpus clears the index. This is the only case with no offsets.
   if (offsets.empty()) {
+    const std::unique_lock<std::shared_mutex> lock(detail::indexMutex());
     gTextIndex = TextIndex{};
+    detail::buildSearchIndex(gTextIndex);
     return true;
   }
 
@@ -98,7 +104,13 @@ bool registerTextIndex(std::span<const std::byte *> chunks,
     previous = offset;
   }
 
+  // Publish the corpus and derive the query side under one lock, so a search on
+  // another thread never observes the raw text without its index. Building is
+  // the expensive part and happens inside the lock, which is why queries and
+  // registration must not both be frequent.
+  const std::unique_lock<std::shared_mutex> lock(detail::indexMutex());
   gTextIndex = index;
+  detail::buildSearchIndex(gTextIndex);
   return true;
 }
 
