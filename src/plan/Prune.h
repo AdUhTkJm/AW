@@ -1,7 +1,7 @@
 #ifndef AW_PRUNE_H
 #define AW_PRUNE_H
 
-#include "aw/CraftingGraph.h"
+#include "aw/plan/CraftingGraph.h"
 
 namespace aw {
 

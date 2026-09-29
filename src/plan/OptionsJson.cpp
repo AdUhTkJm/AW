@@ -1,13 +1,12 @@
-#include "aw/OptionsJson.h"
-
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
 #include <exception>
 #include <initializer_list>
 
-#include "aw/Options.h"
-#include "aw/Solver.h"
+#include "aw/plan/Options.h"
+#include "aw/plan/OptionsJson.h"
+#include "aw/plan/Solver.h"
 
 namespace aw {
 

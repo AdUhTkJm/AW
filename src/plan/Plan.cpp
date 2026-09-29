@@ -1,6 +1,6 @@
-#include "aw/Int128.h"
-#include "aw/Plan.h"
-#include "aw/Solver.h"
+#include "aw/utils/Int128.h"
+#include "aw/plan/Plan.h"
+#include "aw/plan/Solver.h"
 
 #include <algorithm>
 #include <cstdint>

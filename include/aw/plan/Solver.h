@@ -18,7 +18,7 @@
 #include <span>
 #include <vector>
 
-#include "aw/Status.h"
+#include "aw/plan/Status.h"
 #include "aw/utils/PodVector.h"
 
 namespace aw::solver {

@@ -48,10 +48,10 @@
 #include <span>
 #include <utility>
 
-#include "aw/CraftingGraph.h"
-#include "aw/Options.h"
+#include "aw/plan/CraftingGraph.h"
+#include "aw/plan/Options.h"
 #ifdef AW_PROFILE_PRUNING
-#  include "aw/Profiler.h"
+#  include "aw/plan/Profiler.h"
 #endif
 
 using namespace aw::detail;

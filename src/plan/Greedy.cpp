@@ -17,8 +17,8 @@
 // The caller uses the result as the whole answer in flash mode, or as the
 // CP-SAT objective cap plus solution hint in the other modes.
 
-#include "aw/Int128.h"
-#include "aw/Plan.h"
+#include "aw/plan/Plan.h"
+#include "aw/utils/Int128.h"
 
 #include <cstdint>
 #include <span>

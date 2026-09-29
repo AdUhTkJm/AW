@@ -26,9 +26,9 @@
 
 #include <chrono>
 
-#include "aw/CraftingGraph.h"
-#include "aw/Int128.h"
-#include "aw/Options.h"
+#include "aw/plan/CraftingGraph.h"
+#include "aw/plan/Options.h"
+#include "aw/utils/Int128.h"
 
 namespace aw::detail {
 namespace {

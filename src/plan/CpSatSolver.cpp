@@ -5,7 +5,7 @@
 #define OR_PROTO_DLL // Make sure clangd works properly.
 #endif
 
-#include "aw/Solver.h"
+#include "aw/plan/Solver.h"
 
 #include <chrono>
 #include <span>

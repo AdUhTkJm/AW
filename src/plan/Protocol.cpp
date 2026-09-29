@@ -1,10 +1,10 @@
-#include "aw/Protocol.h"
+#include "aw/plan/Protocol.h"
 
 #include <atomic>
 #include <cstring>
 
-#include "aw/Options.h"
-#include "aw/Plan.h"
+#include "aw/plan/Options.h"
+#include "aw/plan/Plan.h"
 
 namespace aw {
 

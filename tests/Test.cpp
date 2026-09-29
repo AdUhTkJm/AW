@@ -11,13 +11,12 @@
 #include <utility>
 #include <vector>
 
-#include "aw/CraftingGraph.h"
-#include "aw/Int128.h"
-#include "aw/Options.h"
-#include "aw/OptionsJson.h"
-#include "aw/Plan.h"
-#include "aw/Protocol.h"
-#include "aw/Solver.h"
+#include "aw/utils/Int128.h"
+#include "aw/plan/Options.h"
+#include "aw/plan/OptionsJson.h"
+#include "aw/plan/Plan.h"
+#include "aw/plan/Protocol.h"
+#include "aw/plan/Solver.h"
 
 namespace {
 

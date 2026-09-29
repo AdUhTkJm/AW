@@ -69,17 +69,17 @@ endif()
 message(STATUS "Using ankerl/unordered_dense from ${AW_DENSE_MAP_DIR}")
 
 add_library(aw_crafting STATIC
-   src/CraftingGraph.cpp
-   src/CpSatSolver.cpp
-   src/Greedy.cpp
-   src/Options.cpp
-   src/OptionsJson.cpp
-   src/PackPrune.cpp
-   src/Plan.cpp
-   src/Prune.cpp
-   src/Protocol.cpp
-   src/SatellitePrune.cpp
-   src/SubstitutionPrune.cpp
+   src/plan/CraftingGraph.cpp
+   src/plan/CpSatSolver.cpp
+   src/plan/Greedy.cpp
+   src/plan/Options.cpp
+   src/plan/OptionsJson.cpp
+   src/plan/PackPrune.cpp
+   src/plan/Plan.cpp
+   src/plan/Prune.cpp
+   src/plan/Protocol.cpp
+   src/plan/SatellitePrune.cpp
+   src/plan/SubstitutionPrune.cpp
 )
 target_include_directories(aw_crafting PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(aw_crafting PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -94,9 +94,15 @@ if(LINUX)
 endif()
 
 if(AW_STRICT_FLAGS)
-   # OptionsJson.cpp is deliberately absent: nlohmann/json uses exceptions, and
-   # it is the only translation unit in the library that needs them.
-   set_source_files_properties(src/CraftingGraph.cpp src/Greedy.cpp src/Options.cpp src/PackPrune.cpp src/Plan.cpp src/Prune.cpp src/Protocol.cpp
+   set_source_files_properties(
+      src/plan/CraftingGraph.cpp
+      src/plan/Greedy.cpp
+      src/plan/Options.cpp
+      src/plan/PackPrune.cpp
+      src/plan/Plan.cpp
+      src/plan/Prune.cpp
+      src/plan/Protocol.cpp
+      src/plan/SubstitutionPrune.cpp
       PROPERTIES COMPILE_OPTIONS "${AW_STRICT_FLAGS}")
 endif()
 

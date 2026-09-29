@@ -1,5 +1,5 @@
 #include "Prune.h"
-#include "aw/Options.h"
+#include "aw/plan/Options.h"
 #include <ankerl/unordered_dense.h>
 
 namespace aw::detail {

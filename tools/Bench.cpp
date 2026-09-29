@@ -23,26 +23,16 @@
 // which is what lets the preprocessing half of an existing file be refreshed
 // without re-running the queries. See bench/README.md.
 
-#include "aw/CraftingGraph.h"
-#include "aw/Int128.h"
-#include "aw/Options.h"
-#include "aw/Plan.h"
-#include "aw/Solver.h"
+#include "aw/utils/Int128.h"
+#include "aw/plan/Options.h"
+#include "aw/plan/Plan.h"
+#include "aw/plan/Solver.h"
 
-#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <fstream>
 #include <map>
-#include <string>
-#include <utility>
-#include <vector>
 
 namespace {
 

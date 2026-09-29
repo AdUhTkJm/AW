@@ -5,9 +5,9 @@
 #include <span>
 #include <vector>
 
-#include "aw/CraftingGraph.h"
-#include "aw/Solver.h"
-#include "aw/Status.h"
+#include "aw/plan/CraftingGraph.h"
+#include "aw/plan/Solver.h"
+#include "aw/plan/Status.h"
 
 namespace aw {
 

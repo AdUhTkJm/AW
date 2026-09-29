@@ -41,9 +41,9 @@
 #include <span>
 #include <string>
 
-#include "aw/CraftingGraph.h"
-#include "aw/OptionsJson.h"
-#include "aw/Protocol.h"
+#include "aw/plan/CraftingGraph.h"
+#include "aw/plan/OptionsJson.h"
+#include "aw/plan/Protocol.h"
 #include "search/SearchJni.h"
 
 #ifndef AW_JNI_CLASS_NAME

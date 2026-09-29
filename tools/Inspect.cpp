@@ -16,10 +16,9 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "aw/CraftingGraph.h"
-#include "aw/Options.h"
-#include "aw/Plan.h"
-#include "aw/Profiler.h"
+#include "aw/plan/Options.h"
+#include "aw/plan/Plan.h"
+#include "aw/plan/Profiler.h"
 
 namespace {
 

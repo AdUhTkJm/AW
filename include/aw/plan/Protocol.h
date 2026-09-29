@@ -24,8 +24,8 @@
 #include <span>
 #include <string>
 
-#include "aw/CraftingGraph.h"
-#include "aw/Status.h"
+#include "aw/plan/CraftingGraph.h"
+#include "aw/plan/Status.h"
 
 namespace aw {
 

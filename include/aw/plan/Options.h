@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "aw/Solver.h"
+#include "aw/plan/Solver.h"
 
 namespace aw {
 

@@ -54,9 +54,9 @@
 
 #include <ortools/linear_solver/linear_solver.h>
 
-#include "aw/CraftingGraph.h"
-#include "aw/Int128.h"
-#include "aw/Options.h"
+#include "aw/plan/CraftingGraph.h"
+#include "aw/utils/Int128.h"
+#include "aw/plan/Options.h"
 
 namespace aw {
 namespace {
