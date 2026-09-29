@@ -71,6 +71,7 @@ message(STATUS "Using ankerl/unordered_dense from ${AW_DENSE_MAP_DIR}")
 add_library(aw_crafting STATIC
    src/plan/CraftingGraph.cpp
    src/plan/CpSatSolver.cpp
+   src/plan/Fireability.cpp
    src/plan/Greedy.cpp
    src/plan/Options.cpp
    src/plan/OptionsJson.cpp
@@ -97,6 +98,7 @@ endif()
 if(AW_STRICT_FLAGS)
    set_source_files_properties(
       src/plan/CraftingGraph.cpp
+      src/plan/Fireability.cpp
       src/plan/Greedy.cpp
       src/plan/Options.cpp
       src/plan/PackPrune.cpp

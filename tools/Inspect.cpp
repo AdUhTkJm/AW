@@ -1260,6 +1260,7 @@ int main(int argc, char** argv) {
       case aw::PlanStatus::NUMERICAL_FAIL: statusName = "numerical failure"; break;
       case aw::PlanStatus::ITER_LIMIT: statusName = "iteration limit"; break;
       case aw::PlanStatus::INVALID_INPUT: statusName = "invalid input"; break;
+      case aw::PlanStatus::CYCLE_UNFULFILLED: statusName = "cycle unfulfilled"; break;
     }
     std::cout << "  status: " << statusName;
     if (plan.status == aw::PlanStatus::OK)

@@ -355,6 +355,42 @@ aw::vector<std::byte> buildPlanLeafSample() {
   return out;
 }
 
+// A two-item cycle whose entry recipe eats two units of the shared seed while
+// only one is in stock. The balance admits r0:2 / r1:1, but neither recipe is
+// enabled, so the plan is unrealizable. A check that only asks whether the SCC
+// touches stock would accept it; the quantities are what matter.
+//
+//   handle 1 (S) <- r0 (x3, ws [1], input C x1)
+//   handle 2 (C) <- r1 (x1, ws [1], input S x2)
+aw::vector<std::byte> buildSeedQuantitySample() {
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  emitVarInt(out, 2);  // realResourceCount
+  emitVarInt(out, 2);  // entries: handles 1 and 2
+
+  emitVarInt(out, 1);  // output delta -> handle 1 (S)
+  emitVarInt(out, 1);  // one recipe
+  {
+    emitVarInt(out, 3);  // output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 1);
+    emitVarInt(out, 2);  // -> handle 2 (C)
+  }
+
+  emitVarInt(out, 1);  // output delta -> handle 2 (C)
+  emitVarInt(out, 1);  // one recipe
+  {
+    emitVarInt(out, 1);  // output amount
+    emitVarInt(out, 1);  // one workstation
+    emitVarInt(out, 1);
+    emitVarInt(out, 1);  // one input
+    emitVarInt(out, 2);  // -> handle 1 (S), amount 2
+    emitVarInt(out, 1);
+  }
+  return out;
+}
+
 // Recipes that differ only in their workstation set are the same LP column,
 // so registration folds them together.
 //
@@ -2166,26 +2202,89 @@ void testPlan() {
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
 
   const aw::Handle all[] = {1, 2};
-  aw::Subgraph sub = aw::reachableSubgraph(1, all);
-  expect(sub.graph.nItem == 2 && sub.graph.nRecipe == 2, "plan subgraph shape");
 
-  const aw::NodeId target = sub.translate(0);
-  expect(target == 0, "target is found in the subgraph");
-  expect(sub.translate(99) == UINT32_MAX, "missing item reports no index");
+  // The two-item loop is net-positive, so the net balance accepts r0:8 / r1:4
+  // for four item 1, but nothing can fire from empty stock. With the seed
+  // filter off the solver still returns that plan; the fireability check
+  // rejects it as unrealizable rather than handing it back.
+  {
+    aw::options.seedPruning = false;
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+    aw::options.seedPruning = true;
+    expect(sub.graph.nItem == 2 && sub.graph.nRecipe == 2, "unseeded subgraph shape");
+    const aw::PlanResult rejected = aw::planCrafting(sub, sub.translate(0), 4, {});
+    expect(rejected.status == aw::PlanStatus::CYCLE_UNFULFILLED,
+           "an unseeded cycle is rejected");
+    expect(!rejected.provenOptimal, "a rejected cycle claims nothing");
+  }
 
-  const aw::PlanResult none = aw::planCrafting(sub, target, 4, {});
-  expect(none.status == aw::PlanStatus::OK, "plan without inventory is optimal");
-  expect(none.exec.size() == 2, "plan has one count per recipe");
-  expect(none.exec[0] == 8, "r0 count");
-  expect(none.exec[1] == 4, "r1 count");
+  // With the filter on, the unreachable loop never reaches the solver.
+  {
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+    expect(sub.graph.nItem == 1 && sub.graph.nRecipe == 0,
+           "the unseeded loop is pruned");
+    const aw::PlanResult none = aw::planCrafting(sub, sub.translate(0), 4, {});
+    expect(none.status == aw::PlanStatus::INFEASIBLE, "plan without a seed is infeasible");
+  }
+
+  // One unit of the target seeds the loop, so the same recycling plan is both
+  // optimal and executable.
+  {
+    aw::vector<aw::Amount> inventory(graph.nItem, 0);
+    inventory[0] = 1;  // item 1
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    const aw::NodeId target = sub.translate(0);
+    expect(target == 0, "target is found in the subgraph");
+    expect(sub.translate(99) == UINT32_MAX, "missing item reports no index");
+    const aw::PlanResult seeded = aw::planCrafting(sub, target, 4, inventory);
+    expect(seeded.status == aw::PlanStatus::OK, "a seeded cycle is feasible");
+    expect(seeded.exec.size() == 2, "plan has one count per recipe");
+    expect(seeded.exec[0] == 8, "r0 count");
+    expect(seeded.exec[1] == 4, "r1 count");
+  }
 
   // 100 spare item 2 units cover the cycle losses, so r0 alone suffices.
-  aw::vector<aw::Amount> inventory(graph.nItem, 0);
-  inventory[1] = 100;
-  const aw::PlanResult stocked = aw::planCrafting(sub, target, 4, inventory);
-  expect(stocked.status == aw::PlanStatus::OK, "plan with inventory is optimal");
-  expect(stocked.exec[0] == 4, "stocked r0 count");
-  expect(stocked.exec[1] == 0, "stocked r1 count");
+  {
+    aw::vector<aw::Amount> inventory(graph.nItem, 0);
+    inventory[1] = 100;
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    const aw::PlanResult stocked = aw::planCrafting(sub, sub.translate(0), 4, inventory);
+    expect(stocked.status == aw::PlanStatus::OK, "plan with inventory is optimal");
+    expect(stocked.exec[0] == 4, "stocked r0 count");
+    expect(stocked.exec[1] == 0, "stocked r1 count");
+  }
+}
+
+// The post-solve fireability check. A stock-adjacent SCC is not enough: the
+// entry recipe can need more of the seed than the stock holds.
+void testFireability() {
+  std::cout << "[Test] fireability check\n";
+  aw::registerCraftingGraph(buildSeedQuantitySample());
+  expect(aw::getCraftingError() == nullptr, "seed quantity sample parses");
+  const aw::Handle all[] = {1};
+
+  // One seed: the filter keeps the cycle (S is in stock) but r0 needs two and
+  // nothing else is enabled, so the net-balanced r0:2 / r1:1 plan is rejected.
+  {
+    aw::vector<aw::Amount> inventory(2, 0);
+    inventory[0] = 1;  // one S
+    const aw::Subgraph sub = aw::reachableSubgraph(2, all, inventory);
+    const aw::NodeId target = sub.translate(1);  // handle 2 (C)
+    expect(target != UINT32_MAX, "the target is in the subgraph");
+    const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
+    expect(r.status == aw::PlanStatus::CYCLE_UNFULFILLED,
+           "a cycle that needs two seeds but holds one is rejected");
+    expect(!r.provenOptimal, "a rejected plan claims nothing");
+  }
+
+  // Two seeds: r0 fires, r1 refills S, and the loop reaches any amount.
+  {
+    aw::vector<aw::Amount> inventory(2, 0);
+    inventory[0] = 2;
+    const aw::Subgraph sub = aw::reachableSubgraph(2, all, inventory);
+    const aw::PlanResult r = aw::planCrafting(sub, sub.translate(1), 5, inventory);
+    expect(r.status == aw::PlanStatus::OK, "two seeds make the cycle fireable");
+  }
 }
 
 void testPlanInfeasible() {
@@ -2820,10 +2919,15 @@ void testTagBatchingGuard() {
   const aw::Handle all[] = {1, 2, 3, 4};
   aw::vector<aw::Amount> inventory(graph.nItem, 0);
 
-  // Count only real recipes: the synthetic tag edges are free.
+  // Count only real recipes: the synthetic tag edges are free. The sample is an
+  // unseeded cycle, so keep the seed filter off to hand the solver the loop the
+  // tag guard is about; the net balance still cannot be turned into a firing
+  // sequence, which is what the check reports.
   auto realSteps = [&](bool prune) {
     aw::options.tagPruning = prune;
+    aw::options.seedPruning = false;
     const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
+    aw::options.seedPruning = true;
     const aw::NodeId target = sub.translate(3);
     const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
     int64_t real = 0;
@@ -2837,11 +2941,11 @@ void testTagBatchingGuard() {
   const auto full = realSteps(false);
   const auto pruned = realSteps(true);
   aw::options.tagPruning = true;
-  expect(full.first == aw::PlanStatus::OK && pruned.first == aw::PlanStatus::OK,
-         "both batch recycle variants are feasible");
-  expect(full.second == 4, "the unpruned batch recycle optimum is 4 real crafts");
-  expect(pruned.second == full.second,
-         "tag pruning does not change the batch recycle optimum");
+  // The batch surplus is a free sink on paper, but the loop has no seed, so the
+  // guard's effect on the optimum is asserted on the preprocessing flag above.
+  expect(full.first == aw::PlanStatus::CYCLE_UNFULFILLED &&
+             pruned.first == aw::PlanStatus::CYCLE_UNFULFILLED,
+         "the unseeded batch recycle cycle is rejected");
 }
 
 // Nonoptimal mode is on purpose: it may plan worse, but it must never break
@@ -2870,16 +2974,15 @@ void testNonoptimal() {
     expect(batchedEdgeDominated, "the relaxed pass drops the batched tag edge");
 
     aw::vector<aw::Amount> inventory(graph.nItem, 0);
+    aw::options.seedPruning = false;
     const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
+    aw::options.seedPruning = true;
     const aw::NodeId target = sub.translate(3);
     const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
-    int64_t real = 0;
-    if (r.status == aw::PlanStatus::OK)
-      for (uint32_t i = 0; i < sub.graph.nRecipe; i++)
-        if (sub.graph.output[i] < sub.graph.nReal)
-          real += r.exec[i];
-    expect(r.status == aw::PlanStatus::OK, "the relaxed batch plan stays feasible");
-    expect(real == 6, "dropping the batched edge costs two real crafts");
+    // The relaxed pass still drops the tag edge, but the sample is an unseeded
+    // cycle, so the net-balanced plan is rejected instead of reported feasible.
+    expect(r.status == aw::PlanStatus::CYCLE_UNFULFILLED,
+           "the relaxed batch cycle is rejected");
   }
 
   // The composite ceiling: R needs 3 Y but the only producer emits 2, so
@@ -3534,8 +3637,10 @@ void testPackPruning() {
 
   aw::options.pack.enabled = false;
   // Satellite elimination also drops this cycle once the pack is off, so it is
-  // switched off as well to isolate the pack A/B switch.
+  // switched off as well to isolate the pack A/B switch. The seed filter would
+  // drop the unseeded cycle on its own, so it is off too.
   aw::options.satellite.enabled = false;
+  aw::options.seedPruning = false;
   aw::registerCraftingGraph(buildPackSample());
   {
     const aw::CraftingGraph &graph = aw::getCraftingGraph();
@@ -3543,6 +3648,7 @@ void testPackPruning() {
     const aw::Subgraph sub = aw::reachableSubgraph(3, all);
     expect(subgraphHasRecipe(sub, 0), "the recipe survives when disabled");
   }
+  aw::options.seedPruning = true;
   aw::options.satellite.enabled = true;
   aw::options.pack.enabled = true;
 }
@@ -3757,12 +3863,14 @@ void testSatelliteLeakPruning() {
   }
 
   aw::options.satellite.enabled = false;
+  aw::options.seedPruning = false;
   aw::registerCraftingGraph(buildSatelliteLeakSample());
   {
     aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
     expect(keepsIsland(sub), "the generalized pass can be switched off");
   }
+  aw::options.seedPruning = true;
   aw::options.satellite.enabled = true;
   aw::options.tagPruning = true;
   aw::options.recipePruning = true;
@@ -4043,7 +4151,9 @@ void testPlanProtocol() {
   expect(aw::getCraftingError() == nullptr, "protocol sample parses");
 
   std::string error;
-  const auto request = encodePlanRequest(1, 4, {1, 2}, {});
+  // One unit of item 1 seeds the two-item loop, so the recycling plan is both
+  // optimal and executable. The target's stock does not change the balance.
+  const auto request = encodePlanRequest(1, 4, {1, 2}, {{1, 1}});
   const auto response = aw::planBlob(request, error);
   expect(error.empty(), "a well-formed request is accepted");
   expect(!response.empty(), "a response came back");
@@ -4179,6 +4289,7 @@ int main() {
   testFlash();
   testZeroCostColumns();
   testPlan();
+  testFireability();
   testPlanInfeasible();
   testGreedyDag();
   testDuplicateRecipes();

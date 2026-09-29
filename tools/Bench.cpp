@@ -752,6 +752,7 @@ int main(int argc, char **argv) {
               case aw::PlanStatus::NUMERICAL_FAIL: json.str("status", "numerical_fail"); break;
               case aw::PlanStatus::ITER_LIMIT: json.str("status", "iter_limit"); break;
               case aw::PlanStatus::INVALID_INPUT: json.str("status", "invalid_input"); break;
+              case aw::PlanStatus::CYCLE_UNFULFILLED: json.str("status", "cycle_unfulfilled"); break;
             }
             // `optimality` is the engine's own claim, made explicit and uniform
             // across engines: proven | unproven | unclaimed | no_plan. For AW,

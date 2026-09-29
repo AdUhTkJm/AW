@@ -109,7 +109,8 @@ target the player has.
 ```
 magic        'A' 'W' 'Q' 0x01
 varint       status              aw::PlanStatus: 0 ok, 1 infeasible, 2 numerical fail,
-                                 3 iteration limit, 4 invalid input
+                                 3 iteration limit, 4 invalid input,
+                                 5 cycle unfulfilled
 byte         provenOptimal       0 or 1
 8 bytes      gap                 IEEE-754 double, little-endian, raw bits
 8 bytes      bestBound           IEEE-754 double, little-endian, raw bits
@@ -129,7 +130,15 @@ Only recipes the plan actually executes appear: the solver returns one value per
 subgraph recipe and most are zero. Entries come in subgraph recipe order.
 `provenOptimal` is false when the solver stopped on its gap or time budget rather
 than proving optimality; the plan is still a real plan, just not certified
-cheapest.
+cheapest. It is also false for `cycle unfulfilled`.
+
+`cycle unfulfilled` (5) is the post-solve fireability check: the solver found a
+balance-feasible plan, but some cycle in it cannot be started from the stock
+plus the upstream output, so it is not a runnable plan. It is deliberately
+*unproven*: that plan is unrealizable, but a different plan may still exist. For
+this status `uses` still describes the rejected plan, so a caller can retry
+with a no-good, fall back to the acyclic plan or give up. See
+`docs/algorithm.typ`, "启动可达性".
 
 The doubles are raw bits rather than formatted text, so no precision is lost and
 no locale is involved. The Java side reads them with a little-endian
@@ -146,7 +155,8 @@ leaves the running configuration untouched.
 
 ```
 nonoptimal, tagPruning, recipePruning, directPruning, substitutionPruning,
-deadNodePruning            bool
+deadNodePruning, seedPruning
+                           bool
 outputPruningProfile       bool   (accepted on every platform; only meaningful
                                    in a build with AW_PROFILE_PRUNING)
 tagInlining                string "off" | "prePrune" | "queryTime" | "both",

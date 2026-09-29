@@ -116,6 +116,14 @@ struct Options {
   // Query-time passes, independent of the registration-time ones above.
   bool deadNodePruning = true;
 
+  // Seed-reachability pruning. Drops every recipe with an input that cannot be
+  // produced from the player's stock and the recipes that fire from nowhere.
+  // Such a recipe can never be executed, because the balance the solver sees
+  // is a net condition and does not know that a consumed item has to exist
+  // before the recipe runs. Sound (never removes a realizable recipe) and
+  // toggleable. See docs/algorithm.typ, "启动可达性".
+  bool seedPruning = true;
+
 #ifdef AW_PROFILE_PRUNING
   bool outputPruningProfile = false;
 #endif

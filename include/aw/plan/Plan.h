@@ -45,6 +45,22 @@ PlanResult planCrafting(const Subgraph& sub, NodeId target, Amount amount,
                         std::span<const Amount> invSrc,
                         const solver::Options& options = {});
 
+// Post-solve realizability check for the firing vector `exec`.
+//
+// `planCrafting`'s balance `produced(i) - consumed(i) >= b_i` is a net
+// condition: it can accept a plan that consumes an item before the plan
+// produces it. This pass condenses the executed recipes into SCCs and fires
+// them in dependency order, and returns false when some SCC can never start
+// from `invSrc` plus the already-produced upstream output.
+//
+// The contract is deliberately asymmetric. `true` is a witness: the generated
+// order is a real firing sequence. `false` proves this `exec` unrealizable, but
+// not that no other plan exists, so callers report it as unproven rather than
+// infeasible (see PlanStatus::CYCLE_UNFULFILLED). `invSrc` is indexed like
+// `planCrafting`'s stock: by source item node.
+bool planIsFireable(const Subgraph& sub, std::span<const Amount> invSrc,
+                    std::span<const int64_t> exec) noexcept;
+
 // Greedy DAG pre-pass used by `planCrafting`, and exposed for testing.
 //
 // Builds an acyclic view of the reachable recipe graph by cutting back-edges

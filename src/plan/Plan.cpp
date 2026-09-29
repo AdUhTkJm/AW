@@ -168,6 +168,11 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
       result.status = PlanStatus::OK;
       result.provenOptimal = false;
       result.exec = std::move(greedy);
+      // The greedy plan is acyclic, so this only ever confirms it; it is kept
+      // so every returned plan passes the same check.
+      if (!planIsFireable(sub, invSrc,
+                          std::span<const int64_t>(result.exec.data(), result.exec.size())))
+        result.status = PlanStatus::CYCLE_UNFULFILLED;
       return result;
     }
     if (greedyCost <= (aw::int128) trivialLowerBound(A, rhs) * GREEDY_QUALITY_FACTOR) {
@@ -184,8 +189,15 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
   result.numConflicts = solved.numConflicts;
   result.numBranches = solved.numBranches;
   result.fixedColumns = solved.fixedColumns;
-  if (solved.status == PlanStatus::OK)
+  if (solved.status == PlanStatus::OK) {
     result.exec = solved.x;
+    // The solver's balance is a net condition; refuse a plan that cannot be
+    // turned into a firing sequence. See planIsFireable and PlanStatus.
+    if (!planIsFireable(sub, invSrc, std::span<const int64_t>(result.exec.data(), result.exec.size()))) {
+      result.status = PlanStatus::CYCLE_UNFULFILLED;
+      result.provenOptimal = false;
+    }
+  }
 
   return result;
 }

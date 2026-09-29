@@ -225,7 +225,8 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
         !readBool(j, "recipePruning", next.recipePruning, error) ||
         !readBool(j, "directPruning", next.directPruning, error) ||
         !readBool(j, "substitutionPruning", next.substitutionPruning, error) ||
-        !readBool(j, "deadNodePruning", next.deadNodePruning, error))
+        !readBool(j, "deadNodePruning", next.deadNodePruning, error) ||
+        !readBool(j, "seedPruning", next.seedPruning, error))
       return false;
 
     {
@@ -277,7 +278,8 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
 
     if (!checkKnown(j,
                     {"nonoptimal", "tagPruning", "recipePruning", "directPruning",
-                     "substitutionPruning", "deadNodePruning", "outputPruningProfile",
+                     "substitutionPruning", "deadNodePruning", "seedPruning",
+                     "outputPruningProfile",
                      "tagInlining", "pack", "satellite", "maxTagMembers", "maxTagPairs",
                      "maxTagCoverWork", "maxWitnessPairs", "maxPrunePairs",
                      "maxSiblingRecipes", "maxWitnessProducers", "maxSubstitutionWork",
@@ -345,6 +347,7 @@ std::string plannerOptionsJson() noexcept {
     j["directPruning"] = options.directPruning;
     j["substitutionPruning"] = options.substitutionPruning;
     j["deadNodePruning"] = options.deadNodePruning;
+    j["seedPruning"] = options.seedPruning;
     switch (options.tagInlining) {
       case TagInlineMode::OFF: j["tagInlining"] = "off"; break;
       case TagInlineMode::PRE_PRUNE: j["tagInlining"] = "prePrune"; break;

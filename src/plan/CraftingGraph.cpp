@@ -1101,6 +1101,105 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
       walk();
   }
 
+  // Seed-reachability pruning. Reachability from the target and dead-node
+  // cleanup both keep recipes that need an item nothing can produce from the
+  // player's stock. The solver's balance is a net condition, so such a recipe
+  // can look useful -- a loop's net output can pay for its own seed on paper --
+  // even though it can never fire. An item is attainable when the player holds
+  // it, or a surviving recipe with every input attainable produces it (a
+  // recipe with no inputs fires from nowhere). A recipe with an unattainable
+  // input is dropped. This only ever removes recipes no firing sequence can
+  // use, so it is sound and never loses a realizable plan.
+  if (options.seedPruning) {
+    // Consumer CSR over the surviving recipes: one entry per input slot, so an
+    // item listed twice in one recipe's inputs is counted twice.
+    aw::vector<uint> consOffsets(nItem + 1, 0);
+    for (uint r = 0; r < nRecipe; r++) {
+      if (!recipeSeen[r])
+        continue;
+      for (NodeId input : graph.r2i.targetsOf(r))
+        consOffsets[input + 1]++;
+    }
+    for (NodeId item = 0; item < nItem; item++)
+      consOffsets[item + 1] += consOffsets[item];
+    aw::vector<uint32_t> consRecipes(consOffsets.back());
+    {
+      aw::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
+      for (uint r = 0; r < nRecipe; r++) {
+        if (!recipeSeen[r])
+          continue;
+        for (NodeId input : graph.r2i.targetsOf(r))
+          consRecipes[cursor[input]++] = r;
+      }
+    }
+
+    // missing[r] is the number of input slots not attained yet; UINT32_MAX
+    // marks a recipe that is already outside the walk.
+    aw::vector<uint32_t> missing(nRecipe, UINT32_MAX);
+    for (uint r = 0; r < nRecipe; r++)
+      if (recipeSeen[r])
+        missing[r] = (uint32_t) graph.r2i.targetsOf(r).size();
+
+    // An item no surviving recipe produces is a raw material the player is
+    // expected to gather, the same assumption deadNodePruning makes, so it
+    // seeds the closure. Recipes that need it are kept; the balance still
+    // refuses to spend an unstocked raw material, so this only avoids pruning
+    // the gatherable route rather than making it usable.
+    aw::vector<uint8_t> producible(nItem, 0);
+    for (uint r = 0; r < nRecipe; r++)
+      if (recipeSeen[r])
+        producible[graph.output[r]] = 1;
+
+    aw::vector<uint8_t> attainable(nItem, 0);
+    aw::vector<NodeId> itemStack;
+    aw::vector<uint32_t> recipeStack;
+    itemStack.reserve(nItem);
+    recipeStack.reserve(nRecipe);
+    for (NodeId item = 0; item < nItem; item++) {
+      const Amount held = item < inventory.size() ? inventory[item] : 0;
+      if (held > 0 || !producible[item]) {
+        attainable[item] = 1;
+        itemStack.push_back_unchecked(item);
+      }
+    }
+    // A recipe with no inputs fires from nowhere.
+    for (uint r = 0; r < nRecipe; r++)
+      if (recipeSeen[r] && missing[r] == 0)
+        recipeStack.push_back_unchecked(r);
+
+    while (!itemStack.empty() || !recipeStack.empty()) {
+      while (!itemStack.empty()) {
+        const NodeId item = itemStack.back();
+        itemStack.pop_back();
+        for (uint slot = consOffsets[item]; slot < consOffsets[item + 1]; slot++) {
+          const uint32_t r = consRecipes[slot];
+          if (missing[r] != UINT32_MAX && --missing[r] == 0)
+            recipeStack.push_back_unchecked(r);
+        }
+      }
+      while (!recipeStack.empty()) {
+        const uint32_t r = recipeStack.back();
+        recipeStack.pop_back();
+        const NodeId out = graph.output[r];
+        if (!attainable[out]) {
+          attainable[out] = 1;
+          itemStack.push_back_unchecked(out);
+        }
+      }
+    }
+
+    bool changed = false;
+    for (uint r = 0; r < nRecipe; r++) {
+      if (!recipeSeen[r] || missing[r] == 0)
+        continue;
+      disabled[r] = 1;
+      recipeSeen[r] = 0;
+      changed = true;
+    }
+    if (changed)
+      walk();
+  }
+
   // Collect the surviving recipes as an explicit, rewritable list. Everything
   // below is built from it, which is what lets the query-time inliner add
   // recipes that have no single source counterpart.
