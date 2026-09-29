@@ -155,13 +155,21 @@ struct TagPruner {
   aw::vector<PairKey> tagPairs;
 
   // The final universe grouped by witness: pairs with witness w occupy
-  // [byWOffsets[w], byWOffsets[w + 1]) of byWTargets (first components) and
-  // pairW (w again), so idOf can binary search a row.
+  // [byWOffsets[w], byWOffsets[w + 1]) of byWTargets (first components, in
+  // ascending order). A pair's global id is its byWTargets index. Fixpoint
+  // propagation never changes the witness, so the pass runs one witness row at
+  // a time; rowIdOf answers (x, w) with a row-local hash of x, while idOf keeps
+  // the binary search for the cross-witness SCC stage.
   aw::vector<uint> byWOffsets;             // nItem + 1 after prefixSum
   aw::vector<NodeId> byWTargets;           // universe entries
-  aw::vector<NodeId> pairW;                // universe entries
   uint32_t universe = 0;
   aw::vector<uint8_t> alive;               // universe entries
+
+  // Scratch for the witness row currently being fixed: an open-addressed
+  // x -> global id + 1 map (0 is empty), sized to at least twice the row.
+  aw::vector<uint32_t> rowSlots;
+  uint rowMask = 0;
+  uint rowShift = 0;
 
   // Batching guard, see computeUnitOutputs(). Empty in nonoptimal mode.
   aw::vector<uint8_t> unitOutput;          // nItem
@@ -182,6 +190,11 @@ struct TagPruner {
   bool indexUniverse() noexcept;
   // The pair id of (x, w) in the universe, or UINT32_MAX when absent.
   uint32_t idOf(NodeId x, NodeId w) const noexcept;
+  // Prepares the row-local lookup for witness w.
+  void beginRow(uint w) noexcept;
+  // The global id of (x, w) for the row prepared by beginRow(w), or
+  // UINT32_MAX. Only valid until the next beginRow().
+  uint32_t rowIdOf(NodeId x) const noexcept;
   void computeUnitOutputs() noexcept;
   // True when one execution of recipe s can replace one of r, see the
   // column-cover comment above covers().
@@ -540,7 +553,6 @@ bool TagPruner::indexUniverse() noexcept {
     byWOffsets[pairSecond(key)]++;
   prefixSum(byWOffsets);
   byWTargets.resize(universe);
-  pairW.resize(universe);
   {
     aw::vector<uint> cursor(byWOffsets.begin(), byWOffsets.end() - 1);
     for (PairKey key : pairs) {
@@ -548,7 +560,6 @@ bool TagPruner::indexUniverse() noexcept {
       const NodeId x = pairFirst(key);
       const uint slot = cursor[w]++;
       byWTargets[slot] = x;
-      pairW[slot] = w;
     }
   }
   pairs.clear();
@@ -566,6 +577,37 @@ uint32_t TagPruner::idOf(NodeId x, NodeId w) const noexcept {
   if (it == end || *it != x)
     return UINT32_MAX;
   return (uint32_t) (it - byWTargets.begin());
+}
+
+// Construct a hash table to query for id `w`.
+void TagPruner::beginRow(uint w) noexcept {
+  const uint lo = byWOffsets[w], hi = byWOffsets[w + 1];
+  uint cap = 1, bits = 0;
+  while (cap < 2 * (hi - lo)) {
+    cap <<= 1;
+    bits++;
+  }
+  rowSlots.assign(cap, 0);
+  rowMask = cap - 1;
+  rowShift = 32 - bits;
+  for (uint id = lo; id < hi; id++) {
+    uint s = (byWTargets[id] * 2654435761u) >> rowShift;
+    while (rowSlots[s] != 0)
+      s = (s + 1) & rowMask;
+    rowSlots[s] = id + 1;
+  }
+}
+
+uint32_t TagPruner::rowIdOf(NodeId x) const noexcept {
+  uint s = (x * 2654435761u) >> rowShift;
+  for (;;) {
+    const uint v = rowSlots[s];
+    if (v == 0)
+      return UINT32_MAX;
+    if (byWTargets[v - 1] == x)
+      return v - 1;
+    s = (s + 1) & rowMask;
+  }
 }
 
 // ---- Batching guard ----------------------------------------------------
@@ -684,7 +726,7 @@ bool TagPruner::validTag(NodeId t, NodeId w) noexcept {
   for (NodeId z : members[t]) {
     if (z == w)
       continue;
-    const uint32_t q = idOf(z, w);
+    const uint32_t q = rowIdOf(z);
     if (q == UINT32_MAX || !alive[q])
       return false;
   }
@@ -719,7 +761,7 @@ bool TagPruner::validItem(NodeId m, NodeId w) noexcept {
       } else if (j >= nItem || !simpleTag[j]) {
         continue;
       }
-      const uint32_t q = idOf(j, w);
+      const uint32_t q = rowIdOf(j);
       if (q != UINT32_MAX && alive[q]) {
         ok = true;
         break;
@@ -736,56 +778,69 @@ bool TagPruner::validItem(NodeId m, NodeId w) noexcept {
 // Killing an item pair can invalidate the tag pairs that contain it as a
 // member, and killing a tag pair invalidates the recipes that gated through
 // it; both are re-queued, which yields the greatest fixpoint.
+//
+// Every one of those steps keeps the witness fixed, so the rows of byWOffsets
+// are independent and the pass fixes one row at a time. That lets rowIdOf use a
+// row-local lookup and keeps the row in cache for the whole of its fixpoint.
 void TagPruner::greatestFixpoint() noexcept {
-  aw::vector<uint32_t> queue(universe);
-  aw::vector<uint8_t> queued(universe, 0);
-  size_t head = 0, tail = 0, pending = 0;
-  auto push = [&](uint32_t id) noexcept {
-    if (queued[id])
-      return;
-    queued[id] = 1;
-    queue[tail] = id;
-    tail++;
-    if (tail == universe)
-      tail = 0;
-    pending++;
-  };
-  for (uint32_t id = 0; id < universe; id++)
-    push(id);
-
-  while (pending != 0) {
-    const uint32_t id = queue[head];
-    head++;
-    if (head == universe)
-      head = 0;
-    pending--;
-    queued[id] = 0;
-    if (!alive[id])
+  aw::vector<uint32_t> queue;
+  aw::vector<uint8_t> queued;
+  for (uint w = 0; w < nReal; w++) {
+    const uint lo = byWOffsets[w], hi = byWOffsets[w + 1];
+    const uint k = hi - lo;
+    if (k == 0)
       continue;
+    beginRow(w);
+    queue.resize(k);
+    queued.assign(k, 0);
+    size_t head = 0, tail = 0, pending = 0;
+    auto push = [&](uint local) noexcept {
+      if (queued[local])
+        return;
+      queued[local] = 1;
+      queue[tail] = local;
+      tail++;
+      if (tail == k)
+        tail = 0;
+      pending++;
+    };
+    for (uint local = 0; local < k; local++)
+      push(local);
 
-    const NodeId x = byWTargets[id];
-    const NodeId w = pairW[id];
-    // A first component at or above nReal is a simple tag: its pair is the AND
-    // over its members, not a recipe scan.
-    const bool tagPair = x >= nReal;
-    if (tagPair ? validTag(x, w) : validItem(x, w))
-      continue;
+    while (pending != 0) {
+      const uint local = queue[head];
+      head++;
+      if (head == k)
+        head = 0;
+      pending--;
+      queued[local] = 0;
+      const uint32_t id = lo + local;
+      if (!alive[id])
+        continue;
 
-    alive[id] = 0;
-    if (tagPair) {
-      // The tag lost a member, so every real recipe that consumed it may no
-      // longer gate through it.
-      for (uint e = tagConsumerOffsets[x]; e < tagConsumerOffsets[x + 1]; e++) {
-        const uint32_t q = idOf(tagConsumerTargets[e], w);
-        if (q != UINT32_MAX)
-          push(q);
-      }
-    } else {
-      // The item lost, so every tag that contains it lost a supporting member.
-      for (uint e = itemTagOffsets[x]; e < itemTagOffsets[x + 1]; e++) {
-        const uint32_t q = idOf(itemTagTargets[e], w);
-        if (q != UINT32_MAX)
-          push(q);
+      const NodeId x = byWTargets[id];
+      // A first component at or above nReal is a simple tag: its pair is the
+      // AND over its members, not a recipe scan.
+      const bool tagPair = x >= nReal;
+      if (tagPair ? validTag(x, w) : validItem(x, w))
+        continue;
+
+      alive[id] = 0;
+      if (tagPair) {
+        // The tag lost a member, so every real recipe that consumed it may no
+        // longer gate through it.
+        for (uint e = tagConsumerOffsets[x]; e < tagConsumerOffsets[x + 1]; e++) {
+          const uint32_t q = rowIdOf(tagConsumerTargets[e]);
+          if (q != UINT32_MAX)
+            push(q - lo);
+        }
+      } else {
+        // The item lost, so every tag that contains it lost a supporting member.
+        for (uint e = itemTagOffsets[x]; e < itemTagOffsets[x + 1]; e++) {
+          const uint32_t q = rowIdOf(itemTagTargets[e]);
+          if (q != UINT32_MAX)
+            push(q - lo);
+        }
       }
     }
   }
