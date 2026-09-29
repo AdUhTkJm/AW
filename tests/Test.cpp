@@ -18,6 +18,8 @@
 #include "aw/plan/Protocol.h"
 #include "aw/plan/Solver.h"
 
+#include "AwrWriter.h"
+
 namespace {
 
 int failures = 0;
@@ -31,53 +33,6 @@ void expect(bool condition, const char* what) {
 
 bool subgraphHasRecipe(const aw::Subgraph &sub, uint32_t source);
 
-void emitVarInt(aw::vector<std::byte> &out, std::uint64_t value) {
-  while ((value & ~0x7FULL) != 0) {
-    out.push_back(static_cast<std::byte>((value & 0x7F) | 0x80));
-    value >>= 7;
-  }
-  out.push_back(static_cast<std::byte>(value));
-}
-
-// Compact writer for the tag-pruning samples below. Handles must be emitted in
-// ascending order, exactly as the Java writer does. `ws` and `inputs` are in
-// ascending handle order; the writer stores deltas. A real recipe with no
-// workstation is dropped by registerCraftingGraph, so every real recipe here
-// names one.
-struct AwrWriter {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  std::uint32_t previousHandle = 0;
-
-  void header(std::uint32_t nReal, std::uint32_t entries) {
-    emitVarInt(out, nReal);
-    emitVarInt(out, entries);
-  }
-
-  void item(std::uint32_t handle, std::uint32_t recipes) {
-    emitVarInt(out, handle - previousHandle);
-    previousHandle = handle;
-    emitVarInt(out, recipes);
-  }
-
-  void recipe(std::int64_t amount, std::initializer_list<std::uint32_t> ws,
-              std::initializer_list<std::pair<std::uint32_t, std::int64_t>> inputs) {
-    emitVarInt(out, (std::uint64_t) amount);
-    emitVarInt(out, ws.size());
-    std::uint32_t previous = 0;
-    for (std::uint32_t w : ws) {
-      emitVarInt(out, w - previous);
-      previous = w;
-    }
-    emitVarInt(out, inputs.size());
-    previous = 0;
-    for (const auto& [handle, inputAmount] : inputs) {
-      emitVarInt(out, (std::uint64_t) inputAmount);
-      emitVarInt(out, handle - previous);
-      previous = handle;
-    }
-  }
-};
-
 // A dump that exercises: an item with several recipes, an item with none, a
 // pseudo-resource, an empty-input recipe and the workstation encoding the
 // current Java writer produces.
@@ -86,43 +41,14 @@ struct AwrWriter {
 //        workstations [1, 2])
 //   item 3 <- r2 (x1, needs item1 x1 + item3 x1)
 aw::vector<std::byte> buildSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 2);  // realResourceCount
-  emitVarInt(out, 2);  // entryCount
-
-  emitVarInt(out, 1);  // output delta -> handle 1
-  emitVarInt(out, 2);  // two recipes
-  {
-    emitVarInt(out, 4);  // r0 output amount
-    emitVarInt(out, 0);  // no workstations
-    emitVarInt(out, 2);  // two inputs
-    emitVarInt(out, 2);
-    emitVarInt(out, 2);  // -> item 2
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> item 3
-  }
-  {
-    emitVarInt(out, 1);  // r1 output amount
-    emitVarInt(out, 2);  // two workstations
-    emitVarInt(out, 1);  // absolute first id -> handle 1
-    emitVarInt(out, 1);  // +1 -> handle 2
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 5);
-    emitVarInt(out, 2);  // -> item 2
-  }
-
-  emitVarInt(out, 2);  // output delta -> handle 3 (pseudo)
-  emitVarInt(out, 1);  // one recipe
-  {
-    emitVarInt(out, 1);  // r2 output amount
-    emitVarInt(out, 0);  // no workstations
-    emitVarInt(out, 2);  // two inputs
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> item 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> item 3
-  }
-  return out;
+  AwrWriter w;
+  w.header(2, 2);
+  w.item(1, 2);
+  w.recipe(4, {}, {{2, 2}, {3, 1}});
+  w.recipe(1, {1, 2}, {{2, 5}});
+  w.item(3, 1);
+  w.recipe(1, {}, {{1, 1}, {3, 1}});
+  return w.out;
 }
 
 // A dump with three real recipes for handle 1, all with a workstation:
@@ -133,36 +59,13 @@ aw::vector<std::byte> buildSample() {
 //
 // Registration must drop r0 and r1 and keep r2, with no query involved.
 aw::vector<std::byte> buildLossySample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 1);  // realResourceCount
-  emitVarInt(out, 1);  // entryCount
-  emitVarInt(out, 1);  // output delta -> handle 1
-  emitVarInt(out, 3);  // three recipes
-  {
-    emitVarInt(out, 1);  // r0 output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);  // handle 1
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // input amount
-    emitVarInt(out, 1);  // -> item 1
-  }
-  {
-    emitVarInt(out, 1);  // r1 output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);  // handle 1
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 2);  // input amount
-    emitVarInt(out, 1);  // -> item 1
-  }
-  {
-    emitVarInt(out, 3);  // r2 output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);  // handle 1
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // input amount
-    emitVarInt(out, 1);  // -> item 1
-  }
-  return out;
+  AwrWriter w;
+  w.header(1, 1);
+  w.item(1, 3);
+  w.recipe(1, {1}, {{1, 1}});
+  w.recipe(1, {1}, {{1, 2}});
+  w.recipe(3, {1}, {{1, 1}});
+  return w.out;
 }
 
 // A dump with degenerate input amounts. Every recipe is real and has a
@@ -214,46 +117,15 @@ aw::vector<std::byte> buildDegenerateOnlyInputSample() {
 //
 // Recipe ids in file order: rA=0, rB=1, rC=2, rD=3.
 aw::vector<std::byte> buildReachSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 4);  // realResourceCount
-  emitVarInt(out, 2);  // entries: outputs 1 and 5
-
-  emitVarInt(out, 1);  // output delta -> handle 1
-  emitVarInt(out, 2);  // two recipes
-  {
-    emitVarInt(out, 1);  // rA output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 3);  // handle 3
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // amount
-    emitVarInt(out, 5);  // -> pseudo handle 5
-  }
-  {
-    emitVarInt(out, 1);  // rB output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 4);  // handle 4
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> item handle 3
-  }
-
-  emitVarInt(out, 4);  // output delta -> handle 5
-  emitVarInt(out, 2);  // two synthetic recipes
-  {
-    emitVarInt(out, 1);  // rC output amount
-    emitVarInt(out, 0);  // no workstations
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> item handle 1
-  }
-  {
-    emitVarInt(out, 1);  // rD output amount
-    emitVarInt(out, 0);  // no workstations
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> item handle 2
-  }
-  return out;
+  AwrWriter w;
+  w.header(4, 2);
+  w.item(1, 2);
+  w.recipe(1, {3}, {{5, 1}});
+  w.recipe(1, {4}, {{3, 1}});
+  w.item(5, 2);
+  w.recipe(1, {}, {{1, 1}});
+  w.recipe(1, {}, {{2, 1}});
+  return w.out;
 }
 
 // A dump for the dead-node cleanup. Handles 1..3 are real.
@@ -266,40 +138,14 @@ aw::vector<std::byte> buildReachSample() {
 // only workstation 1 is allowed, item 2 keeps a producer in the source graph
 // but has none in the subgraph, so the cleanup must drop rT.
 aw::vector<std::byte> buildDeadNodeSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 3);  // realResourceCount
-  emitVarInt(out, 2);  // entries: outputs 1 and 2
-
-  emitVarInt(out, 1);  // output delta -> handle 1
-  emitVarInt(out, 2);  // two recipes
-  {
-    emitVarInt(out, 1);  // rT output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);  // handle 1
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // amount
-    emitVarInt(out, 2);  // -> item handle 2
-  }
-  {
-    emitVarInt(out, 1);  // rT2 output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);  // handle 1
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // amount
-    emitVarInt(out, 3);  // -> item handle 3
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2
-  emitVarInt(out, 1);  // one recipe
-  {
-    emitVarInt(out, 1);  // rA output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 2);  // handle 2
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // amount
-    emitVarInt(out, 3);  // -> item handle 3
-  }
-  return out;
+  AwrWriter w;
+  w.header(3, 2);
+  w.item(1, 2);
+  w.recipe(1, {1}, {{2, 1}});
+  w.recipe(1, {1}, {{3, 1}});
+  w.item(2, 1);
+  w.recipe(1, {2}, {{3, 1}});
+  return w.out;
 }
 
 // A two item cycle that only balances when the second recipe produces twice
@@ -309,50 +155,22 @@ aw::vector<std::byte> buildDeadNodeSample() {
 //   item 1 <- r0 (x1, workstation [1], input item 2 x1)
 //   item 2 <- r1 (x2, workstation [2], input item 1 x1)
 aw::vector<std::byte> buildPlanSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 2);  // realResourceCount
-  emitVarInt(out, 2);  // entries: handles 1 and 2
-
-  emitVarInt(out, 1);  // output delta -> handle 1
-  emitVarInt(out, 1);  // one recipe
-  {
-    emitVarInt(out, 1);  // output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);  // handle 1
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> item 2
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2
-  emitVarInt(out, 1);  // one recipe
-  {
-    emitVarInt(out, 2);  // output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 2);  // handle 2
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> item 1
-  }
-  return out;
+  AwrWriter w;
+  w.header(2, 2);
+  w.item(1, 1);
+  w.recipe(1, {1}, {{2, 1}});
+  w.item(2, 1);
+  w.recipe(2, {2}, {{1, 1}});
+  return w.out;
 }
 
 // item 1 <- r0 consumes item 2, which has no recipe at all.
 aw::vector<std::byte> buildPlanLeafSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 2);  // realResourceCount
-  emitVarInt(out, 1);  // entries: handle 1
-  emitVarInt(out, 1);  // output delta -> handle 1
-  emitVarInt(out, 1);  // one recipe
-  {
-    emitVarInt(out, 1);  // output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);  // handle 1
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> item 2, a leaf
-  }
-  return out;
+  AwrWriter w;
+  w.header(2, 1);
+  w.item(1, 1);
+  w.recipe(1, {1}, {{2, 1}});
+  return w.out;
 }
 
 // A two-item cycle whose entry recipe eats two units of the shared seed while
@@ -363,32 +181,13 @@ aw::vector<std::byte> buildPlanLeafSample() {
 //   handle 1 (S) <- r0 (x3, ws [1], input C x1)
 //   handle 2 (C) <- r1 (x1, ws [1], input S x2)
 aw::vector<std::byte> buildSeedQuantitySample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 2);  // realResourceCount
-  emitVarInt(out, 2);  // entries: handles 1 and 2
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (S)
-  emitVarInt(out, 1);  // one recipe
-  {
-    emitVarInt(out, 3);  // output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (C)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (C)
-  emitVarInt(out, 1);  // one recipe
-  {
-    emitVarInt(out, 1);  // output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 2);  // -> handle 1 (S), amount 2
-    emitVarInt(out, 1);
-  }
-  return out;
+  AwrWriter w;
+  w.header(2, 2);
+  w.item(1, 1);
+  w.recipe(3, {1}, {{2, 1}});
+  w.item(2, 1);
+  w.recipe(1, {1}, {{1, 2}});
+  return w.out;
 }
 
 // Recipes that differ only in their workstation set are the same LP column,
@@ -401,46 +200,14 @@ aw::vector<std::byte> buildSeedQuantitySample() {
 //
 // item 2 is a leaf, item 3 is an unused real resource.
 aw::vector<std::byte> buildDuplicateSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 3);  // realResourceCount; workstations 1..3 are real
-  emitVarInt(out, 1);  // one entry: output handle 1
-
-  emitVarInt(out, 1);  // output delta -> handle 1
-  emitVarInt(out, 4);  // four recipes
-  {
-    emitVarInt(out, 1);  // rA output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);  // handle 1
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // amount
-    emitVarInt(out, 2);  // -> item handle 2
-  }
-  {
-    emitVarInt(out, 1);  // rB output amount
-    emitVarInt(out, 2);  // two workstations
-    emitVarInt(out, 2);  // handle 2
-    emitVarInt(out, 1);  // +1 -> handle 3
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // amount
-    emitVarInt(out, 2);  // -> item handle 2
-  }
-  {
-    emitVarInt(out, 2);  // rC output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);  // handle 1
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // amount
-    emitVarInt(out, 2);  // -> item handle 2
-  }
-  {
-    emitVarInt(out, 1);  // rD output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);  // handle 1
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 2);  // amount 2
-    emitVarInt(out, 2);  // -> item handle 2
-  }
-  return out;
+  AwrWriter w;
+  w.header(3, 1);
+  w.item(1, 4);
+  w.recipe(1, {1}, {{2, 1}});
+  w.recipe(1, {2, 3}, {{2, 1}});
+  w.recipe(2, {1}, {{2, 1}});
+  w.recipe(1, {1}, {{2, 2}});
+  return w.out;
 }
 
 // T = {glass, stained}. Stained glass is gated by glass (stained x1 <- glass
@@ -455,62 +222,18 @@ aw::vector<std::byte> buildDuplicateSample() {
 //   handle 6 T       <- r3 (x1, no ws, stained x1)   (synthetic)
 //                    <- r4 (x1, no ws, glass x1)     (synthetic)
 aw::vector<std::byte> buildGlassSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 5);  // realResourceCount
-  emitVarInt(out, 4);  // entries: handles 1, 2, 5, 6
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (glass)
-  emitVarInt(out, 1);  // one recipe
-  {
-    emitVarInt(out, 1);  // output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 3);
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // amount
-    emitVarInt(out, 4);  // -> handle 4 (sand)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (stained glass)
-  emitVarInt(out, 1);  // one recipe
-  {
-    emitVarInt(out, 1);  // output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 3);
-    emitVarInt(out, 2);  // two inputs
-    emitVarInt(out, 1);  // glass amount
-    emitVarInt(out, 1);  // -> handle 1
-    emitVarInt(out, 1);  // dye amount
-    emitVarInt(out, 2);  // -> handle 3
-  }
-
-  emitVarInt(out, 3);  // output delta -> handle 5 (P)
-  emitVarInt(out, 1);  // one recipe
-  {
-    emitVarInt(out, 1);  // output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 4);
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // amount
-    emitVarInt(out, 6);  // -> pseudo handle 6 (T)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 6 (T)
-  emitVarInt(out, 2);  // two synthetic recipes
-  {
-    emitVarInt(out, 1);  // T <- stained
-    emitVarInt(out, 0);  // no workstations
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2
-  }
-  {
-    emitVarInt(out, 1);  // T <- glass
-    emitVarInt(out, 0);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> handle 1
-  }
-  return out;
+  AwrWriter w;
+  w.header(5, 4);
+  w.item(1, 1);
+  w.recipe(1, {3}, {{4, 1}});
+  w.item(2, 1);
+  w.recipe(1, {3}, {{1, 1}, {3, 1}});
+  w.item(5, 1);
+  w.recipe(1, {4}, {{6, 1}});
+  w.item(6, 2);
+  w.recipe(1, {}, {{2, 1}});
+  w.recipe(1, {}, {{1, 1}});
+  return w.out;
 }
 
 // The counterexample from docs/pruning.typ: plain reachability would call m
@@ -528,175 +251,43 @@ aw::vector<std::byte> buildGlassSample() {
 // With every edge costing 1, route A wins (4 < 6). With tag edges free, route
 // B wins (1 < 4).
 aw::vector<std::byte> buildFreeTagSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 6);  // realResourceCount
-  emitVarInt(out, 5);  // entries: handles 3, 4, 5, 6, 7
-
-  emitVarInt(out, 3);  // output delta -> handle 3 (a)
-  emitVarInt(out, 1);  // one recipe
-  {
-    emitVarInt(out, 1);  // output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 1);  // -> handle 1
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // amount
-    emitVarInt(out, 1);  // -> handle 1 (m1)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 4 (b)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (a)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 5 (c)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // -> handle 4 (b)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 6 (P)
-  emitVarInt(out, 2);  // two recipes
-  {
-    emitVarInt(out, 1);  // P <- T x5
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 5);
-    emitVarInt(out, 7);  // -> handle 7 (T)
-  }
-  {
-    emitVarInt(out, 1);  // P <- c x1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 5);  // -> handle 5 (c)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 7 (T)
-  emitVarInt(out, 2);  // two synthetic recipes
-  {
-    emitVarInt(out, 1);  // T <- m1
-    emitVarInt(out, 0);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> handle 1
-  }
-  {
-    emitVarInt(out, 1);  // T <- m2
-    emitVarInt(out, 0);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2
-  }
-  return out;
+  AwrWriter w;
+  w.header(6, 5);
+  w.item(3, 1);
+  w.recipe(1, {1}, {{1, 1}});
+  w.item(4, 1);
+  w.recipe(1, {1}, {{3, 1}});
+  w.item(5, 1);
+  w.recipe(1, {1}, {{4, 1}});
+  w.item(6, 2);
+  w.recipe(1, {1}, {{7, 5}});
+  w.recipe(1, {1}, {{5, 1}});
+  w.item(7, 2);
+  w.recipe(1, {}, {{1, 1}});
+  w.recipe(1, {}, {{2, 1}});
+  return w.out;
 }
 
 aw::vector<std::byte> buildCounterSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 7);  // realResourceCount
-  emitVarInt(out, 7);  // entries: handles 3, 4, 5, 6, 7, 8, 9
-
-  emitVarInt(out, 3);  // output delta -> handle 3 (w)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // -> handle 4 (a)
-  }
-
-  emitVarInt(out, 1);  // -> handle 4 (a)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 5);  // -> handle 5 (b)
-  }
-
-  emitVarInt(out, 1);  // -> handle 5 (b)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> handle 1 (base)
-  }
-
-  emitVarInt(out, 1);  // -> handle 6 (m)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 9);  // -> pseudo handle 9 (J)
-  }
-
-  emitVarInt(out, 1);  // -> handle 7 (P)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 8);  // -> pseudo handle 8 (T)
-  }
-
-  emitVarInt(out, 1);  // -> handle 8 (T)
-  emitVarInt(out, 2);  // T <- m, T <- w
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 0);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 6);  // -> handle 6 (m)
-  }
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 0);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (w)
-  }
-
-  emitVarInt(out, 1);  // -> handle 9 (J)
-  emitVarInt(out, 2);  // J <- w, J <- z
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 0);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (w)
-  }
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 0);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (z), a leaf
-  }
-  return out;
+  AwrWriter w;
+  w.header(7, 7);
+  w.item(3, 1);
+  w.recipe(1, {1}, {{4, 1}});
+  w.item(4, 1);
+  w.recipe(1, {1}, {{5, 1}});
+  w.item(5, 1);
+  w.recipe(1, {1}, {{1, 1}});
+  w.item(6, 1);
+  w.recipe(1, {1}, {{9, 1}});
+  w.item(7, 1);
+  w.recipe(1, {1}, {{8, 1}});
+  w.item(8, 2);
+  w.recipe(1, {}, {{6, 1}});
+  w.recipe(1, {}, {{3, 1}});
+  w.item(9, 2);
+  w.recipe(1, {}, {{3, 1}});
+  w.recipe(1, {}, {{2, 1}});
+  return w.out;
 }
 
 // T = {m, w} with `m x8 <- w x1`. The amount condition forbids pruning.
@@ -705,38 +296,14 @@ aw::vector<std::byte> buildCounterSample() {
 //   handle 3 T <- r1 (x1, no ws, m x1)
 //              <- r2 (x1, no ws, w x1)
 aw::vector<std::byte> buildBulkSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 2);  // realResourceCount
-  emitVarInt(out, 2);  // entries: handles 1, 3
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (m)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 8);  // output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // workstation handle 2
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (w)
-  }
-
-  emitVarInt(out, 2);  // output delta -> handle 3 (T)
-  emitVarInt(out, 2);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 0);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> handle 1 (m)
-  }
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 0);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (w)
-  }
-  return out;
+  AwrWriter w;
+  w.header(2, 2);
+  w.item(1, 1);
+  w.recipe(8, {2}, {{2, 1}});
+  w.item(3, 2);
+  w.recipe(1, {}, {{1, 1}});
+  w.recipe(1, {}, {{2, 1}});
+  return w.out;
 }
 
 // The EnderIO fused-quartz shape: two variants that require each other and a
@@ -895,81 +462,22 @@ aw::vector<std::byte> buildSubstitutionRealSample() {
 // second r0/r1 pair, so the same target costs 6 real crafts and dropping the
 // edge raises the optimum.
 aw::vector<std::byte> buildBatchRecycleSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 4);  // realResourceCount: base, w, m, goal
-  emitVarInt(out, 6);  // entries: handles 1..6
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (base)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 4);  // output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 5);  // -> handle 5 (T)
-  }
-
-  emitVarInt(out, 1);  // -> handle 2 (w)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 6);  // output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);
-    emitVarInt(out, 1);  // -> handle 1 (base)
-  }
-
-  emitVarInt(out, 1);  // -> handle 3 (m)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 4);  // output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 6);
-    emitVarInt(out, 2);  // -> handle 2 (w)
-  }
-
-  emitVarInt(out, 1);  // -> handle 4 (goal)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 9);  // output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 6);  // -> handle 6 (G)
-  }
-
-  emitVarInt(out, 1);  // -> handle 5 (T)
-  emitVarInt(out, 2);  // T <- w, T <- m
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 0);  // no workstation
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (w)
-  }
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 0);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (m)
-  }
-
-  emitVarInt(out, 1);  // -> handle 6 (G)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 0);  // no workstation
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (m)
-  }
-  return out;
+  AwrWriter w;
+  w.header(4, 6);
+  w.item(1, 1);
+  w.recipe(4, {1}, {{5, 1}});
+  w.item(2, 1);
+  w.recipe(6, {1}, {{1, 4}});
+  w.item(3, 1);
+  w.recipe(4, {1}, {{2, 6}});
+  w.item(4, 1);
+  w.recipe(9, {1}, {{6, 1}});
+  w.item(5, 2);
+  w.recipe(1, {}, {{2, 1}});
+  w.recipe(1, {}, {{3, 1}});
+  w.item(6, 1);
+  w.recipe(1, {}, {{3, 1}});
+  return w.out;
 }
 
 // A pack with one "catch-all" tag: T has many members, every member is made
@@ -988,33 +496,20 @@ aw::vector<std::byte> buildWideTagSample() {
   const uint32_t n = k_wideTagMembers;
   const uint32_t witness = 1;
 
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, n + 1);  // realResourceCount: w + m_i
-  emitVarInt(out, n + 1);  // entries: handles 2..n+1 and the tag
+  AwrWriter w;
+  w.header(n + 1, n + 1);  // real: w + m_i; entries: handles 2..n+1 and the tag
 
   // m_i <- w x1, on workstation w.
   for (uint32_t i = 0; i < n; i++) {
-    emitVarInt(out, i == 0 ? 2 : 1);  // output delta -> handle 2 + i
-    emitVarInt(out, 1);               // one recipe
-    emitVarInt(out, 1);               // output amount
-    emitVarInt(out, 1);               // one workstation
-    emitVarInt(out, witness);
-    emitVarInt(out, 1);               // one input
-    emitVarInt(out, 1);               // amount
-    emitVarInt(out, witness);         // -> handle 1
+    w.item(2 + i, 1);
+    w.recipe(1, {witness}, {{witness, 1}});
   }
 
   // T <- w, then T <- m_i for every member.
-  emitVarInt(out, 1);      // output delta -> handle n + 2 (tag)
-  emitVarInt(out, n + 1);  // n + 1 synthetic member edges
-  for (uint32_t i = 0; i <= n; i++) {
-    emitVarInt(out, 1);  // output amount
-    emitVarInt(out, 0);  // no workstations
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);  // amount
-    emitVarInt(out, i == 0 ? witness : 1 + i);  // -> w, else -> m_i
-  }
-  return out;
+  w.item(n + 2, n + 1);
+  for (uint32_t i = 0; i <= n; i++)
+    w.recipe(1, {}, {{i == 0 ? witness : 1 + i, 1}});
+  return w.out;
 }
 
 // The composite-dominance motivating example from docs/algorithm.typ. Black
@@ -1030,74 +525,19 @@ aw::vector<std::byte> buildWideTagSample() {
 //                         <- r5 (x224, ws [1], black_candle x1)
 //   handles 5, 6 are leaves.
 aw::vector<std::byte> buildBlackCandleSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 6);  // realResourceCount
-  emitVarInt(out, 4);  // entries: handles 1, 2, 3, 4
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (black_candle)
-  emitVarInt(out, 2);  // two recipes
-  {
-    emitVarInt(out, 1);  // r0 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 2);  // two inputs
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (black_dye)
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> handle 3 (candle)
-  }
-  {
-    emitVarInt(out, 1);  // r1 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 2);  // two inputs, ascending handles
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (candle)
-    emitVarInt(out, 256);
-    emitVarInt(out, 1);  // -> handle 4 (black)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (black_dye)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r2 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 5);  // -> handle 5 (dye_base)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 3 (candle)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r3 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 6);  // -> handle 6 (candle_base)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 4 (black)
-  emitVarInt(out, 2);  // two recipes
-  {
-    emitVarInt(out, 256);  // r4 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);   // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);   // -> handle 2 (black_dye)
-  }
-  {
-    emitVarInt(out, 224);  // r5 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);    // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);    // -> handle 1 (black_candle)
-  }
-  return out;
+  AwrWriter w;
+  w.header(6, 4);
+  w.item(1, 2);
+  w.recipe(1, {1}, {{2, 1}, {3, 1}});
+  w.recipe(1, {1}, {{3, 1}, {4, 256}});
+  w.item(2, 1);
+  w.recipe(1, {1}, {{5, 1}});
+  w.item(3, 1);
+  w.recipe(1, {1}, {{6, 1}});
+  w.item(4, 2);
+  w.recipe(256, {1}, {{2, 1}});
+  w.recipe(224, {1}, {{1, 1}});
+  return w.out;
 }
 
 // The right-only-negative regression from plan section 6. S consumes
@@ -1110,70 +550,19 @@ aw::vector<std::byte> buildBlackCandleSample() {
 //   handle 3 coal_block <- r3 (x1, ws [1], coal x9)
 //   handle 6 J = {stick, leaf}, handles 4 and 5 are leaves.
 aw::vector<std::byte> buildCoalRegressionSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 5);  // realResourceCount
-  emitVarInt(out, 4);  // entries: handles 1, 2, 3, 6
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (coal)
-  emitVarInt(out, 2);  // two recipes
-  {
-    emitVarInt(out, 1);  // r0 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // torch x4
-    emitVarInt(out, 2);  // -> handle 2 (torch)
-  }
-  {
-    emitVarInt(out, 9);  // r1 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (coal_block)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (torch)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 4);  // r2 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 2);  // two inputs
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // -> handle 4 (stick)
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 6 (J)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 3 (coal_block)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r3 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 9);
-    emitVarInt(out, 1);  // -> handle 1 (coal)
-  }
-
-  emitVarInt(out, 3);  // output delta -> handle 6 (J)
-  emitVarInt(out, 2);  // two synthetic recipes
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 0);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // J <- stick (handle 4)
-  }
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 0);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 5);  // J <- leaf (handle 5)
-  }
-  return out;
+  AwrWriter w;
+  w.header(5, 4);
+  w.item(1, 2);
+  w.recipe(1, {1}, {{2, 4}});
+  w.recipe(9, {1}, {{3, 1}});
+  w.item(2, 1);
+  w.recipe(4, {1}, {{4, 1}, {6, 1}});
+  w.item(3, 1);
+  w.recipe(1, {1}, {{1, 9}});
+  w.item(6, 2);
+  w.recipe(1, {}, {{4, 1}});
+  w.recipe(1, {}, {{5, 1}});
+  return w.out;
 }
 
 // R is more efficient in Z than S: 5 X from one Z versus 4 X from one Z.
@@ -1184,40 +573,14 @@ aw::vector<std::byte> buildCoalRegressionSample() {
 //   handle 2 Y <- r (x1, ws [1], Z x1)
 //   handle 3 Z is a leaf.
 aw::vector<std::byte> buildAmountRatioSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 3);
-  emitVarInt(out, 2);
-
-  emitVarInt(out, 1);  // -> handle 1 (X)
-  emitVarInt(out, 2);
-  {
-    emitVarInt(out, 5);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // Y x1
-  }
-  {
-    emitVarInt(out, 4);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // Z x1
-  }
-
-  emitVarInt(out, 1);  // -> handle 2 (Y)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // Z x1
-  }
-  return out;
+  AwrWriter w;
+  w.header(3, 2);
+  w.item(1, 2);
+  w.recipe(5, {1}, {{2, 1}});
+  w.recipe(4, {1}, {{3, 1}});
+  w.item(2, 1);
+  w.recipe(1, {1}, {{3, 1}});
+  return w.out;
 }
 
 // Y has an independent route to a leaf, so `X <- Y` is not dominated by
@@ -1228,40 +591,14 @@ aw::vector<std::byte> buildAmountRatioSample() {
 //   handle 2 Y <- r (x1, ws [1], K x1)
 //   handles 3 Z and 4 K are leaves.
 aw::vector<std::byte> buildIndependentRouteSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 4);
-  emitVarInt(out, 2);
-
-  emitVarInt(out, 1);
-  emitVarInt(out, 2);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // Y x1
-  }
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // Z x1
-  }
-
-  emitVarInt(out, 1);  // -> handle 2 (Y)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // K x1
-  }
-  return out;
+  AwrWriter w;
+  w.header(4, 2);
+  w.item(1, 2);
+  w.recipe(1, {1}, {{2, 1}});
+  w.recipe(1, {1}, {{3, 1}});
+  w.item(2, 1);
+  w.recipe(1, {1}, {{4, 1}});
+  return w.out;
 }
 
 // R needs 3 Y, but the only Y recipe makes 2. The ceiling forces alpha = 2, so
@@ -1273,40 +610,14 @@ aw::vector<std::byte> buildIndependentRouteSample() {
 //   handle 2 Y <- r (x2, ws [1], Z x1)
 //   handle 3 Z is a leaf.
 aw::vector<std::byte> buildIntegerScalingSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 3);
-  emitVarInt(out, 2);
-
-  emitVarInt(out, 1);
-  emitVarInt(out, 2);
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);
-    emitVarInt(out, 2);  // Y x3
-  }
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // Z x1
-  }
-
-  emitVarInt(out, 1);  // -> handle 2 (Y)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 2);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // Z x1
-  }
-  return out;
+  AwrWriter w;
+  w.header(3, 2);
+  w.item(1, 2);
+  w.recipe(1, {1}, {{2, 3}});
+  w.recipe(1, {1}, {{3, 1}});
+  w.item(2, 1);
+  w.recipe(2, {1}, {{3, 1}});
+  return w.out;
 }
 
 // The same shape as buildIntegerScalingSample, but Z can be crafted from a leaf
@@ -1323,51 +634,16 @@ aw::vector<std::byte> buildIntegerScalingSample() {
 // nonoptimal relaxation floors to 1, which wrongly bounds R by S. Recipe ids:
 // R=0, S=1, r=2, z=3.
 aw::vector<std::byte> buildRelaxedCompositeSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 4);  // realResourceCount
-  emitVarInt(out, 3);  // entries: handles 1, 2, 3
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (X)
-  emitVarInt(out, 2);  // R and S
-  {
-    emitVarInt(out, 1);  // R output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);
-    emitVarInt(out, 2);  // Y x3
-  }
-  {
-    emitVarInt(out, 1);  // S output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // Z x1
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (Y)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 2);  // output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // Z x1
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 3 (Z)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // W x1
-  }
-  return out;
+  AwrWriter w;
+  w.header(4, 3);
+  w.item(1, 2);
+  w.recipe(1, {1}, {{2, 3}});
+  w.recipe(1, {1}, {{3, 1}});
+  w.item(2, 1);
+  w.recipe(2, {1}, {{3, 1}});
+  w.item(3, 1);
+  w.recipe(1, {1}, {{4, 1}});
+  return w.out;
 }
 
 // The workstation counterexample for composite dominance. R and S both produce
@@ -1383,57 +659,19 @@ aw::vector<std::byte> buildRelaxedCompositeSample() {
 //   handle 6 BASE is a leaf.
 // Recipe ids in file order: R=0, S=1, r=2, Z's recipe=3.
 aw::vector<std::byte> buildWorkstationGuardSample(bool sSuperset) {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 6);  // realResourceCount
-  emitVarInt(out, 3);  // entries: handles 1, 2, 3
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (X)
-  emitVarInt(out, 2);  // R and S
-  {
-    emitVarInt(out, 1);  // R output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // WS_A
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (Y)
-  }
-  {
-    emitVarInt(out, 1);  // S output amount
-    if (sSuperset) {
-      emitVarInt(out, 2);
-      emitVarInt(out, 4);  // absolute WS_A
-      emitVarInt(out, 1);  // +1 -> WS_B
-    } else {
-      emitVarInt(out, 1);
-      emitVarInt(out, 5);  // WS_B only
-    }
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (Z)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (Y)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // WS_A
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (Z)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 3 (Z)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // WS_A
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 6);  // -> handle 6 (BASE)
-  }
-  return out;
+  AwrWriter w;
+  w.header(6, 3);  // entries: handles 1, 2, 3
+  w.item(1, 2);    // X: R and S
+  w.recipe(1, {4}, {{2, 1}});  // R, WS_A
+  // S: WS_B only, or both stations when sSuperset.
+  w.recipe(1, sSuperset ? std::initializer_list<std::uint32_t>{4, 5}
+                        : std::initializer_list<std::uint32_t>{5},
+           {{3, 1}});
+  w.item(2, 1);            // Y
+  w.recipe(1, {4}, {{3, 1}});
+  w.item(3, 1);            // Z
+  w.recipe(1, {4}, {{6, 1}});
+  return w.out;
 }
 
 // Two incomparable dominators for the same recipe. R's route to X goes through
@@ -1451,72 +689,19 @@ aw::vector<std::byte> buildWorkstationGuardSample(bool sSuperset) {
 //   handles 5..9 ORE, Q, WS_A, WS_B, WS_C are leaves.
 // Recipe ids in file order: R=0, S1=1, S2=2, r1=3, r2=4, p=5.
 aw::vector<std::byte> buildMultiDominatorSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 9);  // realResourceCount
-  emitVarInt(out, 4);  // entries: handles 1, 2, 3, 4
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (X)
-  emitVarInt(out, 3);  // R, S1, S2
-  {
-    emitVarInt(out, 1);  // R output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 7);  // WS_A
-    emitVarInt(out, 2);  // two inputs
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (Y1) x1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> handle 3 (Y2) x1
-  }
-  {
-    emitVarInt(out, 1);  // S1 output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 8);  // WS_B
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // -> handle 4 (P) x1
-  }
-  {
-    emitVarInt(out, 1);  // S2 output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 9);  // WS_C
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (Y2) x1
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (Y1)
-  emitVarInt(out, 1);  // r1
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 7);  // WS_A
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // -> handle 4 (P)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 3 (Y2)
-  emitVarInt(out, 1);  // r2
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 7);  // WS_A
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 6);  // -> handle 6 (Q)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 4 (P)
-  emitVarInt(out, 1);  // p
-  {
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 7);  // WS_A
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 5);  // -> handle 5 (ORE)
-  }
-  return out;
+  AwrWriter w;
+  w.header(9, 4);
+  w.item(1, 3);
+  w.recipe(1, {7}, {{2, 1}, {3, 1}});
+  w.recipe(1, {8}, {{4, 1}});
+  w.recipe(1, {9}, {{3, 1}});
+  w.item(2, 1);
+  w.recipe(1, {7}, {{4, 1}});
+  w.item(3, 1);
+  w.recipe(1, {7}, {{6, 1}});
+  w.item(4, 1);
+  w.recipe(1, {7}, {{5, 1}});
+  return w.out;
 }
 
 // Direct (column) dominance: r1 yields the same X as r0 with less of the same
@@ -1529,40 +714,14 @@ aw::vector<std::byte> buildMultiDominatorSample() {
 //   handle 3 B    (leaf)
 //   handles 4, 5 are WS_A and WS_B.
 aw::vector<std::byte> buildDirectDominanceSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 5);  // realResourceCount
-  emitVarInt(out, 2);  // entries: handles 1, 2
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (X)
-  emitVarInt(out, 2);  // r0, r1
-  {
-    emitVarInt(out, 2);  // r0 output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 4);  // WS_A
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 2);
-    emitVarInt(out, 2);  // -> handle 2 (A) x2
-  }
-  {
-    emitVarInt(out, 2);  // r1 output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 5);  // WS_B
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (A) x1
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (A)
-  emitVarInt(out, 1);  // r2
-  {
-    emitVarInt(out, 1);  // r2 output amount
-    emitVarInt(out, 1);  // one workstation
-    emitVarInt(out, 4);  // WS_A
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (B) x1
-  }
-  return out;
+  AwrWriter w;
+  w.header(5, 2);
+  w.item(1, 2);
+  w.recipe(2, {4}, {{2, 2}});
+  w.recipe(2, {5}, {{2, 1}});
+  w.item(2, 1);
+  w.recipe(1, {4}, {{3, 1}});
+  return w.out;
 }
 
 // Output-amount normalization for the relaxed direct pass. The free X recipe is
@@ -1578,38 +737,14 @@ aw::vector<std::byte> buildDirectDominanceSample() {
 // essence has a producer on purpose, so the composite pass leaves r1 alone and
 // the direct flag below is the only thing under test.
 aw::vector<std::byte> buildNormalizedDominanceSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 4);  // realResourceCount: X, essence, Z, WS
-  emitVarInt(out, 2);  // entries: handles 1, 2
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (X)
-  emitVarInt(out, 2);  // r0, r1
-  {
-    emitVarInt(out, 1);  // r0 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // WS
-    emitVarInt(out, 0);  // no inputs
-  }
-  {
-    emitVarInt(out, 6);  // r1 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // WS
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);
-    emitVarInt(out, 2);  // -> handle 2 (essence) x3
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (essence)
-  emitVarInt(out, 1);  // r2
-  {
-    emitVarInt(out, 1);  // r2 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // WS
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (Z) x1
-  }
-  return out;
+  AwrWriter w;
+  w.header(4, 2);
+  w.item(1, 2);
+  w.recipe(1, {4}, {});
+  w.recipe(6, {4}, {{2, 3}});
+  w.item(2, 1);
+  w.recipe(1, {4}, {{3, 1}});
+  return w.out;
 }
 
 // Two recipes with the same per-unit column but different batch sizes. The
@@ -1622,40 +757,14 @@ aw::vector<std::byte> buildNormalizedDominanceSample() {
 //   handle 2 A <- r2 (x1, ws [4], Z x1)
 //   handle 3 Z is a leaf, handle 4 is WS.
 aw::vector<std::byte> buildEqualRatioSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 4);  // realResourceCount: X, A, Z, WS
-  emitVarInt(out, 2);  // entries: handles 1, 2
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (X)
-  emitVarInt(out, 2);  // r0, r1
-  {
-    emitVarInt(out, 1);  // r0 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // WS
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (A) x1
-  }
-  {
-    emitVarInt(out, 6);  // r1 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // WS
-    emitVarInt(out, 1);
-    emitVarInt(out, 6);
-    emitVarInt(out, 2);  // -> handle 2 (A) x6
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (A)
-  emitVarInt(out, 1);  // r2
-  {
-    emitVarInt(out, 1);  // r2 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // WS
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (Z) x1
-  }
-  return out;
+  AwrWriter w;
+  w.header(4, 2);
+  w.item(1, 2);
+  w.recipe(1, {4}, {{2, 1}});
+  w.recipe(6, {4}, {{2, 6}});
+  w.item(2, 1);
+  w.recipe(1, {4}, {{3, 1}});
+  return w.out;
 }
 
 // The copper-pickaxe example from docs/algorithm.typ. The pack
@@ -1672,45 +781,15 @@ aw::vector<std::byte> buildEqualRatioSample() {
 //   handle 3 pickaxe <- r1 (x1, ws [1], ingot x3 + stick x2)
 //   handle 4 nugget  <- r2 (x1, ws [1], pickaxe x1)
 aw::vector<std::byte> buildPackSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 4);  // realResourceCount
-  emitVarInt(out, 3);  // entries: handles 1, 3, 4
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (ingot)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r0 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 9);
-    emitVarInt(out, 4);  // -> handle 4 (nugget)
-  }
-
-  emitVarInt(out, 2);  // output delta -> handle 3 (pickaxe)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r1 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 2);  // two inputs
-    emitVarInt(out, 3);
-    emitVarInt(out, 1);  // -> handle 1 (ingot)
-    emitVarInt(out, 2);
-    emitVarInt(out, 1);  // -> handle 2 (stick)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 4 (nugget)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r2 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (pickaxe)
-  }
-  return out;
+  AwrWriter w;
+  w.header(4, 3);
+  w.item(1, 1);
+  w.recipe(1, {1}, {{4, 9}});
+  w.item(3, 1);
+  w.recipe(1, {1}, {{1, 3}, {2, 2}});
+  w.item(4, 1);
+  w.recipe(1, {1}, {{3, 1}});
+  return w.out;
 }
 
 // A split-production graph that exercises R3. A has two producers that each
@@ -1723,51 +802,16 @@ aw::vector<std::byte> buildPackSample() {
 //   handle 3 B <- r3 (x1, ws [1], X x1)
 //   handle 4 C   (leaf)
 aw::vector<std::byte> buildPackBranchSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 4);  // realResourceCount
-  emitVarInt(out, 3);  // entries: handles 1, 2, 3
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (X)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r0 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);
-    emitVarInt(out, 2);  // -> handle 2 (A)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (A)
-  emitVarInt(out, 2);  // two recipes
-  {
-    emitVarInt(out, 2);  // r1 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (B)
-  }
-  {
-    emitVarInt(out, 2);  // r2 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // -> handle 4 (C)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 3 (B)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r3 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // workstation handle 1
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> handle 1 (X)
-  }
-  return out;
+  AwrWriter w;
+  w.header(4, 3);
+  w.item(1, 1);
+  w.recipe(1, {1}, {{2, 3}});
+  w.item(2, 2);
+  w.recipe(2, {1}, {{3, 1}});
+  w.recipe(2, {1}, {{4, 1}});
+  w.item(3, 1);
+  w.recipe(1, {1}, {{1, 1}});
+  return w.out;
 }
 
 // A hub with a variant branch hanging off it, which is the shape satellite
@@ -1783,51 +827,16 @@ aw::vector<std::byte> buildPackBranchSample() {
 // 1 plate) and can never repay the plate, so it is dead. With variantOut == 2
 // it is gainful and must be kept.
 aw::vector<std::byte> buildSatelliteSample(uint64_t variantOut) {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 5);  // realResourceCount
-  emitVarInt(out, 3);  // entries: handles 1, 2, 3
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (gear)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r0 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 5);  // workstation handle 5
-    emitVarInt(out, 1);  // one input
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (plate)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (plate)
-  emitVarInt(out, 2);  // two recipes
-  {
-    emitVarInt(out, 1);  // r1 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 5);  // workstation handle 5
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // -> handle 4 (ore)
-  }
-  {
-    emitVarInt(out, 1);  // r3 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 5);  // workstation handle 5
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 3 (variant)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 3 (variant)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, variantOut);  // r2 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 5);  // workstation handle 5
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (plate)
-  }
-  return out;
+  AwrWriter w;
+  w.header(5, 3);
+  w.item(1, 1);
+  w.recipe(1, {5}, {{2, 1}});
+  w.item(2, 2);
+  w.recipe(1, {5}, {{4, 1}});
+  w.recipe(1, {5}, {{3, 1}});
+  w.item(3, 1);
+  w.recipe(variantOut, {5}, {{2, 1}});
+  return w.out;
 }
 
 // A generalized satellite: the island shares an input with the rest of the
@@ -1849,111 +858,25 @@ aw::vector<std::byte> buildSatelliteSample(uint64_t variantOut) {
 // by the Y -> T chain, so removing CB leaves E/W/O connected to the target in
 // the undirected graph. The escape enumeration still finds it.
 aw::vector<std::byte> buildSatelliteLeakSample() {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(out, 9);  // realResourceCount (handle 9 is the workbench)
-  emitVarInt(out, 7);  // entries: handles 1, 2, 3, 5, 6, 7, 8
-
-  emitVarInt(out, 1);  // output delta -> handle 1 (T)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r0 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 9);  // workstation handle 9
-    emitVarInt(out, 2);  // two inputs
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 2 (S)
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> handle 3 (Y)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 2 (S)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r1 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 9);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 5);  // -> handle 5 (CB)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 3 (Y)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r2 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 9);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // -> handle 4 (X)
-  }
-
-  emitVarInt(out, 2);  // output delta -> handle 5 (CB)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r3 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 9);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 6);  // -> handle 6 (E)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 6 (E)
-  emitVarInt(out, 2);
-  {
-    emitVarInt(out, 1);  // r4 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 9);
-    emitVarInt(out, 2);
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // -> handle 4 (X)
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);  // -> handle 5 (CB)
-  }
-  {
-    emitVarInt(out, 1);  // r5 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 9);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 7);  // -> handle 7 (W)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 7 (W)
-  emitVarInt(out, 2);
-  {
-    emitVarInt(out, 1);  // r6 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 9);
-    emitVarInt(out, 2);
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // -> handle 4 (X)
-    emitVarInt(out, 1);
-    emitVarInt(out, 2);  // -> handle 6 (E)
-  }
-  {
-    emitVarInt(out, 1);  // r7 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 9);
-    emitVarInt(out, 1);
-    emitVarInt(out, 1);
-    emitVarInt(out, 8);  // -> handle 8 (O)
-  }
-
-  emitVarInt(out, 1);  // output delta -> handle 8 (O)
-  emitVarInt(out, 1);
-  {
-    emitVarInt(out, 1);  // r8 output amount
-    emitVarInt(out, 1);
-    emitVarInt(out, 9);
-    emitVarInt(out, 2);
-    emitVarInt(out, 1);
-    emitVarInt(out, 4);  // -> handle 4 (X)
-    emitVarInt(out, 1);
-    emitVarInt(out, 3);  // -> handle 7 (W)
-  }
-  return out;
+  AwrWriter w;
+  w.header(9, 7);
+  w.item(1, 1);
+  w.recipe(1, {9}, {{2, 1}, {3, 1}});
+  w.item(2, 1);
+  w.recipe(1, {9}, {{5, 1}});
+  w.item(3, 1);
+  w.recipe(1, {9}, {{4, 1}});
+  w.item(5, 1);
+  w.recipe(1, {9}, {{6, 1}});
+  w.item(6, 2);
+  w.recipe(1, {9}, {{4, 1}, {5, 1}});
+  w.recipe(1, {9}, {{7, 1}});
+  w.item(7, 2);
+  w.recipe(1, {9}, {{4, 1}, {6, 1}});
+  w.recipe(1, {9}, {{8, 1}});
+  w.item(8, 1);
+  w.recipe(1, {9}, {{4, 1}, {7, 1}});
+  return w.out;
 }
 
 aw::solver::Matrix makeMatrix(
@@ -2463,6 +1386,7 @@ void testNonPositiveInputs() {
   aw::options.deadNodePruning = false;
   const aw::Handle all[] = {1, 2};
   const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+  std::cerr << sub.graph.nRecipe << "\n";
   expect(sub.graph.nRecipe == 3, "the input-less recipe reaches the subgraph");
   const aw::PlanResult plan = aw::planCrafting(sub, sub.translate(0), 1, {});
   aw::options.deadNodePruning = true;
@@ -2695,16 +1619,11 @@ void testRejectsBadInput() {
   expect(rejects(zeroDelta), "handle 0 output");
 
   // A workstation must name a real resource (handle <= realResourceCount).
-  aw::vector<std::byte> badStation = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
-  emitVarInt(badStation, 1);  // one real resource
-  emitVarInt(badStation, 1);  // one output
-  emitVarInt(badStation, 1);  // output handle 1
-  emitVarInt(badStation, 1);  // one recipe
-  emitVarInt(badStation, 1);  // output amount
-  emitVarInt(badStation, 1);  // one workstation
-  emitVarInt(badStation, 2);  // handle 2 > realResourceCount
-  emitVarInt(badStation, 0);  // no inputs
-  expect(rejects(badStation), "workstation handle out of range");
+  AwrWriter badStation;
+  badStation.header(1, 1);     // one real resource, one entry
+  badStation.item(1, 1);
+  badStation.recipe(1, {2}, {});  // handle 2 > realResourceCount
+  expect(rejects(badStation.out), "workstation handle out of range");
 
   // A rejected blob must leave the last good graph in place: testSample()
   // installed the sample dump and every call above bailed out early.
