@@ -5,21 +5,8 @@
 
 // A signed 128-bit integer.
 //
-// The planner multiplies two int64_t balances and adds the products up. Those
-// products overflow 64 bits but fit 128 comfortably (|a * b| <= 2^126), so the
-// overflow checks and the exact balance comparison need a wider type than any
-// built-in one. That work used to fall back to `long double`, which is not a
-// portable choice: x86-64 Linux gives it a 64-bit mantissa, MSVC gives it the
-// same 64-bit mantissa as `double`, and 64 bits cannot hold an int64_t product
-// exactly. Keeping the arithmetic integral makes it exact on every platform.
-//
-// GCC and Clang have a native type, so aw::int128 is an alias there and the
-// Linux codegen is unchanged. MSVC has none, so it gets a small two's
-// complement wrapper over the _umul128 intrinsic.
-//
-// Only what the callers use is provided: 64x64 -> 128 multiplication, additions
-// of such products, negation, comparison and a truncating conversion back to
-// int64_t. There is deliberately no division, shifting or increment.
+// GCC and Clang have a native type, so aw::int128 is an alias there.
+// MSVC has none, so we must write one.
 
 #if !defined(_MSC_VER) || defined(__clang__)
 

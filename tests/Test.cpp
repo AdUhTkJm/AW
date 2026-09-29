@@ -1924,16 +1924,15 @@ aw::vector<std::byte> buildSatelliteLeakSample() {
 aw::solver::Matrix makeMatrix(
     uint32_t rows, uint32_t cols,
     const aw::vector<aw::vector<std::pair<uint32_t, int64_t>>> &columns) {
-  aw::solver::Matrix A;
-  A.rows = rows;
-  A.cols = cols;
-  A.colStart.push_back(0);
+  aw::solver::Matrix A(rows, cols);
+  A.colStart.reserve(cols);
+  A.colStart.push_back_unchecked(0);
   for (uint32_t j = 0; j < cols; j++) {
     for (const auto &entry : columns[j]) {
       A.rowIndex.push_back(entry.first);
       A.value.push_back(entry.second);
     }
-    A.colStart.push_back((uint32_t) A.rowIndex.size());
+    A.colStart.push_back_unchecked((uint32_t) A.rowIndex.size());
   }
   return A;
 }

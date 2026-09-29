@@ -16,35 +16,19 @@ option(AW_BUILD_TESTS "Build the unit tests" ON)
 option(AW_USE_SYSTEM_ORTOOLS "Use OR-Tools from the system/CMAKE_PREFIX_PATH instead of the vendored copy" OFF)
 
 if(MSVC)
-   # /utf-8: the sources are UTF-8, including the Chinese section titles quoted
-   # in comments. Without it cl.exe reads them in the active code page (936 on
-   # this machine), warns C4819 for every header that has one, and would
-   # re-encode the escaped literals in tests/Test.cpp, so the Windows build
-   # would disagree with the Linux one byte for byte.
    add_compile_options(/W4 /Zi /utf-8)
 else()
    add_compile_options(-Wall -g)
 endif()
 
-# The hand-written code is exception- and RTTI-free. OR-Tools, Abseil and
-# protobuf need both, so the flags are applied per source file rather than
-# globally; src/CpSatSolver.cpp (the CP-SAT model) and src/SatellitePrune.cpp
-# (the small GLOP LP behind satellite elimination) are the only files that
-# include OR-Tools.
+# Most of our C++ files do not enable exceptions or RTTI.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
    set(AW_STRICT_FLAGS -fno-exceptions -fno-rtti)
 else()
    set(AW_STRICT_FLAGS "")
 endif()
 
-# OR-Tools is a hard dependency: the LP fallback it replaced is gone.
-#
-# Either install OR-Tools somewhere CMake can see (set CMAKE_PREFIX_PATH or
-# AW_ORTOOLS_ROOT), or extract a release archive into third_party/ortools and
-# let scripts/fetch-ortools.sh lay it out. The archive ships a CMake package,
-# which is the only supported way to consume the prebuilt libraries: it is what
-# injects OR_PROTO_DLL=, without which the generated protobuf headers do not
-# compile.
+# Configure OR-Tools.
 set(AW_ORTOOLS_ROOT "" CACHE PATH "Extracted OR-Tools release (directory containing lib/cmake/ortools)")
 set(AW_ORTOOLS_RESOLVED "")
 
@@ -69,25 +53,38 @@ endif()
 
 find_package(ortools CONFIG REQUIRED)
 
-# nlohmann/json (single header) is used only by the JNI option loader. The
-# recipe payload stays a binary blob; the options are a few dozen scalars that a
-# human edits, so JSON is the natural shape. Vendored rather than fetched at
-# configure time so the Windows build stays offline.
+# Find header-only libraries.
 find_path(AW_JSON_INCLUDE_DIR nlohmann/json.hpp
    HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann")
 if(NOT AW_JSON_INCLUDE_DIR)
-   message(FATAL_ERROR
-      "nlohmann/json.hpp not found. Run scripts/fetch-nlohmann.sh, or install "
-      "the header where CMake can see it (set CMAKE_PREFIX_PATH).")
+   message(FATAL_ERROR "nlohmann/json.hpp not found.")
 endif()
 message(STATUS "Using nlohmann/json from ${AW_JSON_INCLUDE_DIR}")
 
-add_library(aw_crafting STATIC src/CraftingGraph.cpp src/CpSatSolver.cpp src/Greedy.cpp src/Options.cpp src/OptionsJson.cpp src/PackPrune.cpp src/Plan.cpp src/Prune.cpp src/Protocol.cpp src/SatellitePrune.cpp)
+find_path(AW_DENSE_MAP_DIR ankerl/unordered_dense.h
+   HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ankerl")
+if(NOT AW_DENSE_MAP_DIR)
+   message(FATAL_ERROR "ankerl/unordered_dense.h not found.")
+endif()
+message(STATUS "Using ankerl/unordered_dense from ${AW_DENSE_MAP_DIR}")
+
+add_library(aw_crafting STATIC
+   src/CraftingGraph.cpp
+   src/CpSatSolver.cpp
+   src/Greedy.cpp
+   src/Options.cpp
+   src/OptionsJson.cpp
+   src/PackPrune.cpp
+   src/Plan.cpp
+   src/Prune.cpp
+   src/Protocol.cpp
+   src/SatellitePrune.cpp
+   src/SubstitutionPrune.cpp
+)
 target_include_directories(aw_crafting PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(aw_crafting PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-# PRIVATE: the header is an implementation detail of the option loader, and it
-# needs exceptions, which the rest of the library does not.
-target_include_directories(aw_crafting PRIVATE "${AW_JSON_INCLUDE_DIR}")
+target_include_directories(aw_crafting PRIVATE "${AW_DENSE_MAP_DIR}") # For substitution prune.
+target_include_directories(aw_crafting PRIVATE "${AW_JSON_INCLUDE_DIR}") # For option loader.
 target_compile_features(aw_crafting PUBLIC cxx_std_20)
 target_link_libraries(aw_crafting PUBLIC ortools::ortools)
 

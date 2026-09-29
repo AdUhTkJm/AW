@@ -24,28 +24,19 @@
 // and that plan satisfies neither full-production branch. Dividing the demand
 // by the branch count is what makes the disjunction complete.
 
-#include "Prune.h"
-
 #include <chrono>
 
 #include "aw/CraftingGraph.h"
 #include "aw/Int128.h"
 #include "aw/Options.h"
 
-namespace aw {
+namespace aw::detail {
 namespace {
 
 using uint = uint32_t;
 
-// The largest `need` we are willing to track. Values are only used to force
-// producers and to branch, so a clamp keeps a pathological R2' cycle from
-// running away while staying a valid lower bound.
-
 // GCC and Clang have the overflow builtins and define __has_builtin; MSVC has
-// neither. The test has to be nested rather than written as one expression
-// (`defined(__has_builtin) && __has_builtin(...)`), because MSVC tokenizes the
-// whole directive: __has_builtin becomes 0 and the right hand side is left as
-// `0(__builtin_add_overflow)`, which it reports as C4067.
+// neither.
 #if defined(__has_builtin)
 #  if __has_builtin(__builtin_add_overflow) && __has_builtin(__builtin_mul_overflow)
 #    define AW_HAVE_OVERFLOW_BUILTINS 1

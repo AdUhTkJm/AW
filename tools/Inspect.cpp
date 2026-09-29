@@ -787,7 +787,7 @@ void dumpGraph(const aw::CraftingGraph& graph) {
 // The workstation set is looked up in the source graph through recipeOrigin;
 // tag recipes have none and simply omit the " @ ..." suffix.
 void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
-                  const NameTable &names) {
+                  const NameTable &names, bool dumpWorkstation) {
   const aw::BaseCraftingGraph &g = sub.graph;
 
   auto item = [&](aw::NodeId node) {
@@ -841,7 +841,7 @@ void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
         std::cout << item(targets[k]) << " x" << weights[k];
       }
     }
-    if (r < sub.recipeOrigin.size()) {
+    if (r < sub.recipeOrigin.size() && dumpWorkstation) {
       const auto stations = graph.workstations.targetsOf(sub.recipeOrigin[r]);
       if (!stations.empty()) {
         std::cout << " @ ";
@@ -892,6 +892,7 @@ int main(int argc, char** argv) {
   bool doReach = false;
   bool doTree = false;
   bool doPlan = false;
+  bool dumpWorkstation = false;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -917,10 +918,8 @@ int main(int argc, char** argv) {
       noDeadNodePrune = true;
     } else if (arg == "--optimal") {
       optimalPruning = true;
-    } else if (arg == "--sound") {
-      // Deprecated spelling of --optimal, from when the flag only meant the
-      // integrality relaxation.
-      optimalPruning = true;
+    } else if (arg == "--dump-ws") {
+      dumpWorkstation = true;
     } else if (arg == "--flash") {
       // Return the first feasible plan instead of a cheap one. Solver-side, so
       // it is orthogonal to the pruning flags above.
@@ -1047,7 +1046,7 @@ int main(int argc, char** argv) {
                  "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                  "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
-                 "                   [--names <table.tsv>] [--subgraph <name|handle>]\n"
+                 "                   [--names <table.tsv>] [--subgraph <name|handle>] [--dump-ws]\n"
                  "                   [--profile <out.prof>] <recipes.awr>\n";
     return EXIT_FAILURE;
   }
@@ -1168,7 +1167,7 @@ int main(int argc, char** argv) {
     }
     std::cout << "subgraph from " << itemLabel(graph, names, target - 1)
               << " (all workstations):\n";
-    dumpSubgraph(sub, graph, names);
+    dumpSubgraph(sub, graph, names, dumpWorkstation);
   }
   if (doReach) {
     aw::Subgraph sub = aw::reachableSubgraph(reach, workstations);

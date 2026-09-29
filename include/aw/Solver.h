@@ -30,6 +30,9 @@ struct Matrix {
   aw::vector<uint32_t> colStart;  // cols + 1
   aw::vector<uint32_t> rowIndex;  // nnz
   aw::vector<int64_t> value;      // nnz
+
+  Matrix() = default;
+  Matrix(uint32_t rows, uint32_t cols): rows(rows), cols(cols) {}
 };
 
 struct Options {
