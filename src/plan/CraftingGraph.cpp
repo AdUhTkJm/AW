@@ -693,6 +693,508 @@ void inlineSingleUseTags(CraftingGraph& graph) noexcept {
     return;
   rebuildFromRecipes(graph, recipes);
 }
+
+// ---------------------------------------------------------------------------
+// Query-time reachability
+// ---------------------------------------------------------------------------
+
+// State and pruning logic for one reachableSubgraph query. `itemSeen` /
+// `recipeSeen` are what the current walk keeps; `disabled` forces a recipe
+// out of the walk without touching the flags, so a post-pass can rebuild the
+// subgraph.
+struct ReachQuery {
+  const Handle output;
+  const std::span<const Amount> inventory;
+
+  // Option switches read once, because prunedOut runs once per walked edge.
+  const bool pruneTag = options.tagPruning;
+  const bool pruneRecipe = options.recipePruning;
+  const bool pruneDirect = options.directPruning;
+  const bool pruneSubstitution = options.substitutionPruning;
+
+  // Workstation availability as a bitset (in fact a byteset).
+  aw::vector<uint8_t> allowed;
+  aw::vector<uint8_t> itemSeen;
+  aw::vector<uint8_t> recipeSeen;
+  aw::vector<uint8_t> disabled;
+  aw::vector<NodeId> queue;
+
+  ReachQuery(Handle output, std::span<const Handle> workstations,
+             std::span<const Amount> inventory) noexcept
+      : output(output), inventory(inventory), allowed(graph.nItem, 0),
+        itemSeen(graph.nItem, 0), recipeSeen(graph.nRecipe, 0),
+        disabled(graph.nRecipe, 0) {
+    for (Handle handle : workstations) {
+      if (handle >= 1 && handle <= graph.nItem)
+        allowed[handle - 1] = 1;
+    }
+    // Enqueued once per item at most, so nItem is a hard bound; the capacity
+    // survives the clear() at the top of every walk.
+    queue.reserve(graph.nItem);
+  }
+
+  // Stock of a source item, 0 when the inventory does not cover it.
+  Amount held(NodeId item) const noexcept {
+    return item < inventory.size() ? inventory[item] : 0;
+  }
+
+  // True when one of `stations` is available in this query.
+  bool anyStationAvailable(std::span<const NodeId> stations) const noexcept {
+    for (NodeId station : stations)
+      if (station < allowed.size() && allowed[station])
+        return true;
+    return false;
+  }
+
+  // True when a query-time pruning rule drops `recipe` from the walk.
+  bool prunedOut(uint recipe) const noexcept {
+    // A dominated tag edge is dropped unless the player actually holds the
+    // member, in which case the free stock can still be spent on the tag.
+    if (pruneTag && recipe < graph.tagEdgeDominated.size() &&
+        graph.tagEdgeDominated[recipe]) {
+      const auto inputs = graph.r2i.targetsOf(recipe);
+      if (inputs.empty() || held(inputs[0]) == 0)
+        return true;
+    }
+
+    // A composite-dominated real recipe is likewise only dropped when the
+    // witness input has no stock, so held stock can still be spent through
+    // it. The replacement may need a workstation this query does not have,
+    // so it is only dropped when one of the dominator's workstations is
+    // available. Otherwise the player would lose the only route.
+    if (pruneRecipe && recipe < graph.recipeDominated.size() &&
+        graph.recipeDominated[recipe] && held(graph.recipeGuardInput[recipe]) == 0 &&
+        recipe < graph.recipeDominatorWorkstations.size() &&
+        anyStationAvailable(graph.recipeDominatorWorkstations[recipe]))
+      return true;
+
+    // A direct-dominated real recipe has a sibling with a componentwise
+    // larger column, so one execution of the sibling replaces it with no
+    // worse balance. Nothing is inlined, so stock never makes it
+    // preferable, but the replacement may need a workstation this query
+    // does not have.
+    if (pruneDirect && recipe < graph.recipeDirectDominated.size() &&
+        graph.recipeDirectDominated[recipe] &&
+        anyStationAvailable(graph.recipeDirectDominatorWorkstations[recipe]))
+      return true;
+
+    // A substituted real recipe pays for one of its inputs with a
+    // cost-dominating resource, so it is only dropped when none of the
+    // collapsed inputs can be spent from stock and one of the replacements
+    // can run. The collapsed tag members make the guard a set.
+    if (pruneSubstitution && recipe < graph.recipeSubstituted.size() &&
+        graph.recipeSubstituted[recipe] &&
+        recipe < graph.recipeSubstitutedGuards.size()) {
+      bool stocked = false;
+      for (NodeId guard : graph.recipeSubstitutedGuards[recipe]) {
+        if (held(guard) != 0) {
+          stocked = true;
+          break;
+        }
+      }
+      if (!stocked && recipe < graph.recipeSubstitutedDominatorWorkstations.size() &&
+          anyStationAvailable(graph.recipeSubstitutedDominatorWorkstations[recipe]))
+        return true;
+    }
+    return false;
+  }
+
+  // Ordinary BFS from the target.
+  void walk() noexcept {
+    std::fill(itemSeen.begin(), itemSeen.end(), 0);
+    std::fill(recipeSeen.begin(), recipeSeen.end(), 0);
+    queue.clear();
+
+    const NodeId start = CraftingGraph::itemNode(output);
+    itemSeen[start] = 1;
+    queue.push_back_unchecked(start);
+
+    for (size_t q = 0; q < queue.size(); q++) {
+      const NodeId item = queue[q];
+      const bool real = graph.isRealItem(item);
+
+      for (NodeId recipeNode : graph.i2r.targetsOf(item)) {
+        const uint recipe = recipeNode - graph.nItem;
+        if (recipeSeen[recipe] || disabled[recipe] || prunedOut(recipe))
+          continue;
+
+        // A pseudo-resource's synthetic recipes don't need workstation.
+        // They exist only to unfold the pseudo-resource into one of its real
+        // members.
+        if (real && !anyStationAvailable(graph.workstations.targetsOf(recipe)))
+          continue;
+
+        recipeSeen[recipe] = 1;
+        for (NodeId input : graph.r2i.targetsOf(recipe)) {
+          if (!itemSeen[input]) {
+            itemSeen[input] = 1;
+            queue.push_back_unchecked(input);
+          }
+        }
+      }
+    }
+  }
+
+  // Pack certificates. A certified recipe is dropped when every recipe of its
+  // pack is present in this subgraph and the pack's zero-stock items really
+  // are out of stock. Removing every such recipe at once is sound: each one
+  // is certified against the walk above, and an optimal plan of that subgraph
+  // avoids all of them, so the optimum is unchanged.
+  void prunePackCertificates() noexcept {
+    if (!options.pack.enabled || graph.packDominated.size() != graph.nRecipe)
+      return;
+    const uint nRecipe = graph.nRecipe;
+    bool any = false;
+    aw::vector<uint8_t> drop(nRecipe, 0);
+    for (uint recipe = 0; recipe < nRecipe; recipe++) {
+      if (!recipeSeen[recipe] || !graph.packDominated[recipe])
+        continue;
+      const PackCertificate &cert = graph.packCertificates[recipe];
+      bool ok = true;
+      for (uint32_t support : cert.support) {
+        if (support >= nRecipe || !recipeSeen[support]) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok)
+        continue;
+      for (NodeId item : cert.zeroStock) {
+        if (held(item) > 0) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok)
+        continue;
+      drop[recipe] = 1;
+      any = true;
+    }
+    if (any) {
+      for (uint recipe = 0; recipe < nRecipe; recipe++)
+        disabled[recipe] |= drop[recipe];
+      walk();
+    }
+  }
+
+  // Satellite elimination. We have to do it per-query, so not always a net
+  // gain.
+  void pruneSatellites() noexcept {
+    if (!options.satellite.enabled)
+      return;
+    constexpr uint MAX_SATELLITE_ROUNDS = 4;
+    const uint nRecipe = graph.nRecipe;
+    const NodeId target = CraftingGraph::itemNode(output);
+    aw::vector<uint8_t> drop(nRecipe, 0);
+    for (uint round = 0; round < MAX_SATELLITE_ROUNDS; round++) {
+      std::fill(drop.begin(), drop.end(), 0);
+      if (!computeSatellitePruning(graph, target, itemSeen, recipeSeen, inventory, drop))
+        break;
+      for (uint recipe = 0; recipe < nRecipe; recipe++)
+        disabled[recipe] |= drop[recipe];
+      walk();
+    }
+  }
+
+  // Remove dead (un-produce-able) nodes.
+  void pruneDeadNodes() noexcept {
+    if (!options.deadNodePruning)
+      return;
+    const uint nItem = graph.nItem;
+    const uint nRecipe = graph.nRecipe;
+    const NodeId target = CraftingGraph::itemNode(output);
+
+    // How many surviving recipes produce each item.
+    aw::vector<uint> produced(nItem, 0);
+    for (uint r = 0; r < nRecipe; r++)
+      if (recipeSeen[r])
+        produced[graph.output[r]]++;
+
+    // Item -> surviving recipes that consume it, as a CSR.
+    aw::vector<uint> consOffsets(nItem + 1, 0);
+    for (uint r = 0; r < nRecipe; r++) {
+      if (!recipeSeen[r])
+        continue;
+      for (NodeId input : graph.r2i.targetsOf(r))
+        consOffsets[input + 1]++;
+    }
+    for (NodeId item = 0; item < nItem; item++)
+      consOffsets[item + 1] += consOffsets[item];
+    aw::vector<uint> consTargets(consOffsets.back());
+    aw::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
+    for (uint r = 0; r < nRecipe; r++) {
+      if (!recipeSeen[r])
+        continue;
+      for (NodeId input : graph.r2i.targetsOf(r))
+        consTargets[cursor[input]++] = r;
+    }
+    
+
+    auto usable = [&](NodeId item) {
+      return item == target || produced[item] != 0 || held(item) != 0;
+    };
+
+    aw::vector<NodeId> dead;
+    dead.reserve(nItem);
+    aw::vector<uint8_t> queued(nItem, 0);
+    for (NodeId item = 0; item < nItem; item++) {
+      if (itemSeen[item] && !usable(item)) {
+        queued[item] = 1;
+        dead.push_back_unchecked(item);
+      }
+    }
+
+    bool changed = false;
+    for (size_t q = 0; q < dead.size(); q++) {
+      const NodeId item = dead[q];
+      for (uint slot = consOffsets[item]; slot < consOffsets[item + 1]; slot++) {
+        const uint r = consTargets[slot];
+        if (disabled[r])
+          continue;
+        disabled[r] = 1;
+        recipeSeen[r] = 0;
+        changed = true;
+        const NodeId out = graph.output[r];
+        if (produced[out] > 0)
+          produced[out]--;
+        if (produced[out] == 0 && itemSeen[out] && !queued[out] && !usable(out)) {
+          queued[out] = 1;
+          dead.push_back_unchecked(out);
+        }
+      }
+    }
+    // Rebuild the walk so items only needed by the dropped recipes disappear
+    // too; the closure above guarantees no new producer-less item appears.
+    if (changed)
+      walk();
+  }
+
+  // Seed-reachability pruning. Reachability from the target and dead-node
+  // cleanup both keep recipes that need an item nothing can produce from the
+  // player's stock. The solver's balance is a net condition, so such a recipe
+  // can look useful -- a loop's net output can pay for its own seed on
+  // paper -- even though it can never fire. An item is attainable when the
+  // player holds it, or a surviving recipe with every input attainable
+  // produces it (a recipe with no inputs fires from nowhere). A recipe with
+  // an unattainable input is dropped. This only ever removes recipes no
+  // firing sequence can use, so it is sound and never loses a realizable
+  // plan.
+  void pruneSeedUnreachable() noexcept {
+    if (!options.seedPruning)
+      return;
+    const uint nItem = graph.nItem;
+    const uint nRecipe = graph.nRecipe;
+
+    // Consumer CSR over the surviving recipes: one entry per input slot, so
+    // an item listed twice in one recipe's inputs is counted twice.
+    aw::vector<uint> consOffsets(nItem + 1, 0);
+    for (uint r = 0; r < nRecipe; r++) {
+      if (!recipeSeen[r])
+        continue;
+      for (NodeId input : graph.r2i.targetsOf(r))
+        consOffsets[input + 1]++;
+    }
+    for (NodeId item = 0; item < nItem; item++)
+      consOffsets[item + 1] += consOffsets[item];
+    aw::vector<uint32_t> consRecipes(consOffsets.back());
+    {
+      aw::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
+      for (uint r = 0; r < nRecipe; r++) {
+        if (!recipeSeen[r])
+          continue;
+        for (NodeId input : graph.r2i.targetsOf(r))
+          consRecipes[cursor[input]++] = r;
+      }
+    }
+
+    // missing[r] is the number of input slots not attained yet; UINT32_MAX
+    // marks a recipe that is already outside the walk.
+    aw::vector<uint32_t> missing(nRecipe, UINT32_MAX);
+    for (uint r = 0; r < nRecipe; r++)
+      if (recipeSeen[r])
+        missing[r] = (uint32_t) graph.r2i.targetsOf(r).size();
+
+    // An item no surviving recipe produces is a raw material the player is
+    // expected to gather, the same assumption deadNodePruning makes, so it
+    // seeds the closure. Recipes that need it are kept; the balance still
+    // refuses to spend an unstocked raw material, so this only avoids pruning
+    // the gatherable route rather than making it usable.
+    aw::vector<uint8_t> producible(nItem, 0);
+    for (uint r = 0; r < nRecipe; r++)
+      if (recipeSeen[r])
+        producible[graph.output[r]] = 1;
+
+    aw::vector<uint8_t> attainable(nItem, 0);
+    aw::vector<NodeId> itemStack;
+    aw::vector<uint32_t> recipeStack;
+    itemStack.reserve(nItem);
+    recipeStack.reserve(nRecipe);
+    for (NodeId item = 0; item < nItem; item++) {
+      if (held(item) > 0 || !producible[item]) {
+        attainable[item] = 1;
+        itemStack.push_back_unchecked(item);
+      }
+    }
+    // A recipe with no inputs fires from nowhere.
+    for (uint r = 0; r < nRecipe; r++)
+      if (recipeSeen[r] && missing[r] == 0)
+        recipeStack.push_back_unchecked(r);
+
+    while (!itemStack.empty() || !recipeStack.empty()) {
+      while (!itemStack.empty()) {
+        const NodeId item = itemStack.back();
+        itemStack.pop_back();
+        for (uint slot = consOffsets[item]; slot < consOffsets[item + 1]; slot++) {
+          const uint32_t r = consRecipes[slot];
+          if (missing[r] != UINT32_MAX && --missing[r] == 0)
+            recipeStack.push_back_unchecked(r);
+        }
+      }
+      while (!recipeStack.empty()) {
+        const uint32_t r = recipeStack.back();
+        recipeStack.pop_back();
+        const NodeId out = graph.output[r];
+        if (!attainable[out]) {
+          attainable[out] = 1;
+          itemStack.push_back_unchecked(out);
+        }
+      }
+    }
+
+    bool changed = false;
+    for (uint r = 0; r < nRecipe; r++) {
+      if (!recipeSeen[r] || missing[r] == 0)
+        continue;
+      disabled[r] = 1;
+      recipeSeen[r] = 0;
+      changed = true;
+    }
+    if (changed)
+      walk();
+  }
+};
+
+// Collect the surviving recipes as an explicit, rewritable list. Everything
+// below is built from it, which is what lets the query-time inliner add
+// recipes that have no single source counterpart.
+aw::vector<MutableRecipe> collectSurvivingRecipes(const aw::vector<uint8_t> &recipeSeen) {
+  const uint nRecipe = graph.nRecipe;
+  aw::vector<MutableRecipe> built;
+  built.reserve(nRecipe);
+  for (uint r = 0; r < nRecipe; r++) {
+    if (!recipeSeen[r])
+      continue;
+    MutableRecipe rec;
+    rec.origin = r;
+    rec.out = graph.output[r];
+    rec.outAmt = graph.outputAmt[r];
+    // Workstations are not kept in a Subgraph: reachability already filtered
+    // by the caller's station set, and every synthesized variant inherits
+    // them. They are still copied here so the inliner can tell a synthetic
+    // tag edge from a real recipe.
+    const auto ws = graph.workstations.targetsOf(r);
+    rec.ws.assign(ws.begin(), ws.end());
+    const auto inputs = graph.r2i.targetsOf(r);
+    const auto amounts = graph.r2i.weightsOf(r);
+    rec.inputs.assign(inputs.begin(), inputs.end());
+    rec.amounts.assign(amounts.begin(), amounts.end());
+    built.push_back(std::move(rec));
+  }
+  return built;
+}
+
+// A flattened tag has neither producers nor consumers left. Drop it so it
+// does not become an empty balance row in the plan matrix.
+void dropUnusedItems(aw::vector<uint8_t> &itemSeen, Handle output,
+                     const aw::vector<MutableRecipe> &built) {
+  aw::vector<uint8_t> used(graph.nItem, 0);
+  used[CraftingGraph::itemNode(output)] = 1;
+  for (const MutableRecipe &rec : built) {
+    used[rec.out] = 1;
+    for (NodeId input : rec.inputs)
+      used[input] = 1;
+  }
+  for (NodeId item = 0; item < graph.nItem; item++)
+    if (!used[item])
+      itemSeen[item] = 0;
+}
+
+// Fill the subgraph from the surviving items and the recipe list: remap
+// source item ids to dense subgraph ids and build every CSR array.
+Subgraph assembleSubgraph(const aw::vector<uint8_t> &itemSeen,
+                          const aw::vector<MutableRecipe> &built) {
+  Subgraph result;
+  const uint nItem = graph.nItem;
+
+  // Fill the remapping between source graph and subgraph.
+  // Use UINT32_MAX for empty entries.
+  aw::vector<NodeId> itemMap(nItem, UINT32_MAX);
+  // At most one entry per source item.
+  result.itemOrigin.reserve(nItem);
+  // Note that we can compute the amount of real items in subgraph alongside
+  // the way.
+  uint subreal = 0;
+  for (NodeId item = 0; item < nItem; item++) {
+    if (itemSeen[item]) {
+      itemMap[item] = result.itemOrigin.size();
+      result.itemOrigin.push_back_unchecked(item);
+      if (item < graph.nReal)
+        subreal++;
+    }
+  }
+
+  const uint subItems = result.itemOrigin.size();
+  const uint subRecipes = built.size();
+  result.recipeOrigin.resize(subRecipes);
+  for (uint i = 0; i < subRecipes; i++)
+    result.recipeOrigin[i] = built[i].origin;
+
+  BaseCraftingGraph &sub = result.graph;
+  sub.nReal = subreal;
+  sub.nItem = subItems;
+  sub.nRecipe = subRecipes;
+
+  // Fill item -> recipe. One edge per recipe, grouped by output item.
+  sub.i2r.offsets.assign(subItems + 1, 0);
+  for (const MutableRecipe &rec : built)
+    sub.i2r.offsets[itemMap[rec.out] + 1]++;
+  for (uint i = 0; i + 1 < sub.i2r.offsets.size(); i++)
+    sub.i2r.offsets[i + 1] += sub.i2r.offsets[i];
+  sub.i2r.targets.resize(subRecipes);
+  sub.i2r.weights.resize(subRecipes);
+  {
+    aw::vector<uint> cursor(sub.i2r.offsets.begin(), sub.i2r.offsets.end() - 1);
+    for (uint i = 0; i < subRecipes; i++) {
+      const uint slot = cursor[itemMap[built[i].out]]++;
+      sub.i2r.targets[slot] = sub.nItem + i;
+      sub.i2r.weights[slot] = built[i].outAmt;
+    }
+  }
+
+  sub.output.resize(subRecipes);
+  sub.outputAmt.resize(subRecipes);
+  for (uint i = 0; i < subRecipes; i++) {
+    sub.output[i] = itemMap[built[i].out];
+    sub.outputAmt[i] = built[i].outAmt;
+  }
+
+  // Fill recipe -> item.
+  sub.r2i.offsets.assign(subRecipes + 1, 0);
+  for (uint i = 0; i < subRecipes; i++)
+    sub.r2i.offsets[i + 1] = sub.r2i.offsets[i] + (uint) built[i].inputs.size();
+  sub.r2i.targets.resize(sub.r2i.offsets.back());
+  sub.r2i.weights.resize(sub.r2i.offsets.back());
+  for (uint i = 0; i < subRecipes; i++) {
+    uint cursor = sub.r2i.offsets[i];
+    for (size_t j = 0; j < built[i].inputs.size(); j++) {
+      sub.r2i.targets[cursor] = itemMap[built[i].inputs[j]];
+      sub.r2i.weights[cursor++] = built[i].amounts[j];
+    }
+  }
+
+  return result;
+}
+
 }  // namespace
 
 void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
@@ -810,511 +1312,33 @@ const CraftingGraph &getCraftingGraph() noexcept {
 
 Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
                            std::span<const Amount> inventory) noexcept {
-  Subgraph result;
   if (output == 0 || output > graph.nItem)
-    return result;
+    return {};
 
-  const uint nItem = graph.nItem;
-  const uint nRecipe = graph.nRecipe;
+  ReachQuery query(output, workstations, inventory);
+  query.walk();
+  query.prunePackCertificates();
+  query.pruneSatellites();
+  query.pruneDeadNodes();
+  query.pruneSeedUnreachable();
 
-  // Turn workstation availability into a bitset (in fact a byteset).
-  aw::vector<uint8_t> allowed(nItem, 0);
-  for (Handle handle : workstations) {
-    if (handle >= 1 && handle <= nItem)
-      allowed[handle - 1] = 1;
+  aw::vector<MutableRecipe> built = collectSurvivingRecipes(query.recipeSeen);
+
+  // Query-time single-use inlining. At this point `recipeSeen` already
+  // reflects tag pruning and the inventory guard, so a tag's surviving member
+  // edges are exactly the members the player can still spend -- including a
+  // dominated member that is in stock. Folding them into the consumer removes
+  // the tag node without dropping any option, and without the subgraph growth
+  // the registration-time flattening has.
+  if (options.tagInlining == TagInlineMode::QUERY_TIME ||
+      options.tagInlining == TagInlineMode::BOTH) {
+    inlineSingleUseTagsCore(built, graph.nReal, graph.nItem, [](uint) { return true; });
+    dropUnusedItems(query.itemSeen, output, built);
   }
 
-  const bool pruneTag = options.tagPruning;
-  const bool pruneRecipe = options.recipePruning;
-  const bool pruneDirect = options.directPruning;
-  const bool pruneSubstitution = options.substitutionPruning;
-  const bool prunePack = options.pack.enabled;
-
-  aw::vector<uint8_t> itemSeen(nItem, 0);
-  aw::vector<uint8_t> recipeSeen(nRecipe, 0);
-  aw::vector<uint8_t> disabled(nRecipe, 0);
-  aw::vector<NodeId> queue;
-  // Enqueued once per item at most, so nItem is a hard bound; the capacity
-  // survives the clear() at the top of every walk.
-  queue.reserve(nItem);
-
-  // Ordinary BFS. `disabled` forces a recipe out of the walk without touching
-  // the flags, so the pack-certificate post-pass can rebuild the subgraph.
-  auto walk = [&]() {
-    std::fill(itemSeen.begin(), itemSeen.end(), 0);
-    std::fill(recipeSeen.begin(), recipeSeen.end(), 0);
-    queue.clear();
-
-    const NodeId start = CraftingGraph::itemNode(output);
-    itemSeen[start] = 1;
-    queue.push_back_unchecked(start);
-
-    for (size_t q = 0; q < queue.size(); q++) {
-      const NodeId item = queue[q];
-      const bool real = graph.isRealItem(item);
-
-      for (NodeId recipeNode : graph.i2r.targetsOf(item)) {
-        const uint recipe = recipeNode - nItem;
-        if (recipeSeen[recipe] || disabled[recipe])
-          continue;
-
-        // A dominated tag edge is dropped unless the player actually holds the
-        // member, in which case the free stock can still be spent on the tag.
-        if (pruneTag && recipe < graph.tagEdgeDominated.size() &&
-            graph.tagEdgeDominated[recipe]) {
-          const auto inputs = graph.r2i.targetsOf(recipe);
-          const Amount held = !inputs.empty() && inputs[0] < inventory.size()
-                                  ? inventory[inputs[0]]
-                                  : 0;
-          if (held == 0)
-            continue;
-        }
-
-        // A composite-dominated real recipe is likewise only dropped when the
-        // witness input has no stock, so held stock can still be spent through
-        // it. The replacement may need a workstation this query does not have,
-        // so it is only dropped when one of the dominator's workstations is
-        // available. Otherwise the player would lose the only route.
-        if (pruneRecipe && recipe < graph.recipeDominated.size() &&
-            graph.recipeDominated[recipe]) {
-          const NodeId guard = graph.recipeGuardInput[recipe];
-          const Amount held = guard < inventory.size() ? inventory[guard] : 0;
-          if (held == 0 && recipe < graph.recipeDominatorWorkstations.size()) {
-            bool runnable = false;
-            for (NodeId station : graph.recipeDominatorWorkstations[recipe]) {
-              if (station < allowed.size() && allowed[station]) {
-                runnable = true;
-                break;
-              }
-            }
-            if (runnable)
-              continue;
-          }
-        }
-
-        // A direct-dominated real recipe has a sibling with a componentwise
-        // larger column, so one execution of the sibling replaces it with no
-        // worse balance. Nothing is inlined, so stock never makes it
-        // preferable, but the replacement may need a workstation this query
-        // does not have.
-        if (pruneDirect && recipe < graph.recipeDirectDominated.size() &&
-            graph.recipeDirectDominated[recipe]) {
-          bool runnable = false;
-          for (NodeId station : graph.recipeDirectDominatorWorkstations[recipe]) {
-            if (station < allowed.size() && allowed[station]) {
-              runnable = true;
-              break;
-            }
-          }
-          if (runnable)
-            continue;
-        }
-
-        // A substituted real recipe pays for one of its inputs with a
-        // cost-dominating resource, so it is only dropped when none of the
-        // collapsed inputs can be spent from stock and one of the replacements
-        // can run. The collapsed tag members make the guard a set.
-        if (pruneSubstitution && recipe < graph.recipeSubstituted.size() &&
-            graph.recipeSubstituted[recipe] &&
-            recipe < graph.recipeSubstitutedGuards.size()) {
-          bool stocked = false;
-          for (NodeId guard : graph.recipeSubstitutedGuards[recipe]) {
-            if (guard < inventory.size() && inventory[guard] != 0) {
-              stocked = true;
-              break;
-            }
-          }
-          if (!stocked && recipe < graph.recipeSubstitutedDominatorWorkstations.size()) {
-            bool runnable = false;
-            for (NodeId station : graph.recipeSubstitutedDominatorWorkstations[recipe]) {
-              if (station < allowed.size() && allowed[station]) {
-                runnable = true;
-                break;
-              }
-            }
-            if (runnable)
-              continue;
-          }
-        }
-
-        // A pseudo-resource's synthetic recipes don't need workstation.
-        // They exist only to unfold the pseudo-resource into one of its real members.
-        if (real) {
-          bool usable = false;
-          for (NodeId station : graph.workstations.targetsOf(recipe)) {
-            if (allowed[station]) {
-              usable = true;
-              break;
-            }
-          }
-          if (!usable)
-            continue;
-        }
-
-        recipeSeen[recipe] = 1;
-        for (NodeId input : graph.r2i.targetsOf(recipe)) {
-          if (!itemSeen[input]) {
-            itemSeen[input] = 1;
-            queue.push_back_unchecked(input);
-          }
-        }
-      }
-    }
-  };
-
-  walk();
-
-  // Pack certificates. A certified recipe is dropped when every recipe of its
-  // pack is present in this subgraph and the pack's zero-stock items really
-  // are out of stock. Removing every such recipe at once is sound: each one is
-  // certified against the walk above, and an optimal plan of that subgraph
-  // avoids all of them, so the optimum is unchanged.
-  if (prunePack && graph.packDominated.size() == nRecipe) {
-    bool any = false;
-    aw::vector<uint8_t> drop(nRecipe, 0);
-    for (uint recipe = 0; recipe < nRecipe; recipe++) {
-      if (!recipeSeen[recipe] || !graph.packDominated[recipe])
-        continue;
-      const PackCertificate &cert = graph.packCertificates[recipe];
-      bool ok = true;
-      for (uint32_t support : cert.support) {
-        if (support >= nRecipe || !recipeSeen[support]) {
-          ok = false;
-          break;
-        }
-      }
-      if (!ok)
-        continue;
-      for (NodeId item : cert.zeroStock) {
-        const Amount held = item < inventory.size() ? inventory[item] : 0;
-        if (held > 0) {
-          ok = false;
-          break;
-        }
-      }
-      if (!ok)
-        continue;
-      drop[recipe] = 1;
-      any = true;
-    }
-    if (any) {
-      for (uint recipe = 0; recipe < nRecipe; recipe++)
-        disabled[recipe] |= drop[recipe];
-      walk();
-    }
-  }
-
-  // Satellite elimination. We have to do it per-query, so not always a net gain.
-  if (options.satellite.enabled) {
-    constexpr uint MAX_SATELLITE_ROUNDS = 4;
-    const NodeId target = CraftingGraph::itemNode(output);
-    aw::vector<uint8_t> drop(nRecipe, 0);
-    for (uint round = 0; round < MAX_SATELLITE_ROUNDS; round++) {
-      std::fill(drop.begin(), drop.end(), 0);
-      if (!computeSatellitePruning(graph, target, itemSeen, recipeSeen, inventory, drop))
-        break;
-      for (uint recipe = 0; recipe < nRecipe; recipe++)
-        disabled[recipe] |= drop[recipe];
-      walk();
-    }
-  }
-
-  // Dead-node cleanup. Reachability keeps an item when a surviving recipe
-  // consumes it, even if no surviving recipe can produce it. When the player
-  // holds none of it and the source graph has a producer, the item is usable by
-  // nothing: every recipe that consumes it is dead, and dropping those can
-  // expose further such items. Items with no producer in the source graph are
-  // raw materials the player is expected to gather, so they are kept.
-  if (options.deadNodePruning) {
-    const NodeId target = CraftingGraph::itemNode(output);
-
-    // How many surviving recipes produce each item.
-    aw::vector<uint> produced(nItem, 0);
-    for (uint r = 0; r < nRecipe; r++)
-      if (recipeSeen[r])
-        produced[graph.output[r]]++;
-
-    // Item -> surviving recipes that consume it, as a CSR.
-    aw::vector<uint> consOffsets(nItem + 1, 0);
-    for (uint r = 0; r < nRecipe; r++) {
-      if (!recipeSeen[r])
-        continue;
-      for (NodeId input : graph.r2i.targetsOf(r))
-        consOffsets[input + 1]++;
-    }
-    for (NodeId item = 0; item < nItem; item++)
-      consOffsets[item + 1] += consOffsets[item];
-    aw::vector<uint> consTargets(consOffsets.back());
-    {
-      aw::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
-      for (uint r = 0; r < nRecipe; r++) {
-        if (!recipeSeen[r])
-          continue;
-        for (NodeId input : graph.r2i.targetsOf(r))
-          consTargets[cursor[input]++] = r;
-      }
-    }
-
-    auto usable = [&](NodeId item) {
-      if (item == target || produced[item] != 0)
-        return true;
-      const Amount held = item < inventory.size() ? inventory[item] : 0;
-      if (held != 0)
-        return true;
-      // No producer anywhere in the source graph: a raw material.
-      return graph.i2r.targetsOf(item).empty();
-    };
-
-    aw::vector<NodeId> dead;
-    // The `queued` guard admits each item at most once, so nItem bounds it.
-    dead.reserve(nItem);
-    aw::vector<uint8_t> queued(nItem, 0);
-    for (NodeId item = 0; item < nItem; item++) {
-      if (itemSeen[item] && !usable(item)) {
-        queued[item] = 1;
-        dead.push_back_unchecked(item);
-      }
-    }
-
-    bool changed = false;
-    for (size_t q = 0; q < dead.size(); q++) {
-      const NodeId item = dead[q];
-      for (uint slot = consOffsets[item]; slot < consOffsets[item + 1]; slot++) {
-        const uint r = consTargets[slot];
-        if (disabled[r])
-          continue;
-        disabled[r] = 1;
-        recipeSeen[r] = 0;
-        changed = true;
-        const NodeId out = graph.output[r];
-        if (produced[out] > 0)
-          produced[out]--;
-        if (produced[out] == 0 && itemSeen[out] && !queued[out] && !usable(out)) {
-          queued[out] = 1;
-          dead.push_back_unchecked(out);
-        }
-      }
-    }
-    // Rebuild the walk so items only needed by the dropped recipes disappear
-    // too; the closure above guarantees no new producer-less item appears.
-    if (changed)
-      walk();
-  }
-
-  // Seed-reachability pruning. Reachability from the target and dead-node
-  // cleanup both keep recipes that need an item nothing can produce from the
-  // player's stock. The solver's balance is a net condition, so such a recipe
-  // can look useful -- a loop's net output can pay for its own seed on paper --
-  // even though it can never fire. An item is attainable when the player holds
-  // it, or a surviving recipe with every input attainable produces it (a
-  // recipe with no inputs fires from nowhere). A recipe with an unattainable
-  // input is dropped. This only ever removes recipes no firing sequence can
-  // use, so it is sound and never loses a realizable plan.
-  if (options.seedPruning) {
-    // Consumer CSR over the surviving recipes: one entry per input slot, so an
-    // item listed twice in one recipe's inputs is counted twice.
-    aw::vector<uint> consOffsets(nItem + 1, 0);
-    for (uint r = 0; r < nRecipe; r++) {
-      if (!recipeSeen[r])
-        continue;
-      for (NodeId input : graph.r2i.targetsOf(r))
-        consOffsets[input + 1]++;
-    }
-    for (NodeId item = 0; item < nItem; item++)
-      consOffsets[item + 1] += consOffsets[item];
-    aw::vector<uint32_t> consRecipes(consOffsets.back());
-    {
-      aw::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
-      for (uint r = 0; r < nRecipe; r++) {
-        if (!recipeSeen[r])
-          continue;
-        for (NodeId input : graph.r2i.targetsOf(r))
-          consRecipes[cursor[input]++] = r;
-      }
-    }
-
-    // missing[r] is the number of input slots not attained yet; UINT32_MAX
-    // marks a recipe that is already outside the walk.
-    aw::vector<uint32_t> missing(nRecipe, UINT32_MAX);
-    for (uint r = 0; r < nRecipe; r++)
-      if (recipeSeen[r])
-        missing[r] = (uint32_t) graph.r2i.targetsOf(r).size();
-
-    // An item no surviving recipe produces is a raw material the player is
-    // expected to gather, the same assumption deadNodePruning makes, so it
-    // seeds the closure. Recipes that need it are kept; the balance still
-    // refuses to spend an unstocked raw material, so this only avoids pruning
-    // the gatherable route rather than making it usable.
-    aw::vector<uint8_t> producible(nItem, 0);
-    for (uint r = 0; r < nRecipe; r++)
-      if (recipeSeen[r])
-        producible[graph.output[r]] = 1;
-
-    aw::vector<uint8_t> attainable(nItem, 0);
-    aw::vector<NodeId> itemStack;
-    aw::vector<uint32_t> recipeStack;
-    itemStack.reserve(nItem);
-    recipeStack.reserve(nRecipe);
-    for (NodeId item = 0; item < nItem; item++) {
-      const Amount held = item < inventory.size() ? inventory[item] : 0;
-      if (held > 0 || !producible[item]) {
-        attainable[item] = 1;
-        itemStack.push_back_unchecked(item);
-      }
-    }
-    // A recipe with no inputs fires from nowhere.
-    for (uint r = 0; r < nRecipe; r++)
-      if (recipeSeen[r] && missing[r] == 0)
-        recipeStack.push_back_unchecked(r);
-
-    while (!itemStack.empty() || !recipeStack.empty()) {
-      while (!itemStack.empty()) {
-        const NodeId item = itemStack.back();
-        itemStack.pop_back();
-        for (uint slot = consOffsets[item]; slot < consOffsets[item + 1]; slot++) {
-          const uint32_t r = consRecipes[slot];
-          if (missing[r] != UINT32_MAX && --missing[r] == 0)
-            recipeStack.push_back_unchecked(r);
-        }
-      }
-      while (!recipeStack.empty()) {
-        const uint32_t r = recipeStack.back();
-        recipeStack.pop_back();
-        const NodeId out = graph.output[r];
-        if (!attainable[out]) {
-          attainable[out] = 1;
-          itemStack.push_back_unchecked(out);
-        }
-      }
-    }
-
-    bool changed = false;
-    for (uint r = 0; r < nRecipe; r++) {
-      if (!recipeSeen[r] || missing[r] == 0)
-        continue;
-      disabled[r] = 1;
-      recipeSeen[r] = 0;
-      changed = true;
-    }
-    if (changed)
-      walk();
-  }
-
-  // Collect the surviving recipes as an explicit, rewritable list. Everything
-  // below is built from it, which is what lets the query-time inliner add
-  // recipes that have no single source counterpart.
-  aw::vector<MutableRecipe> built;
-  built.reserve(nRecipe);
-  for (uint r = 0; r < nRecipe; r++) {
-    if (!recipeSeen[r])
-      continue;
-    MutableRecipe rec;
-    rec.origin = r;
-    rec.out = graph.output[r];
-    rec.outAmt = graph.outputAmt[r];
-    // Workstations are not kept in a Subgraph: reachability already filtered by
-    // the caller's station set, and every synthesized variant inherits them.
-    // They are still copied here so the inliner can tell a synthetic tag edge
-    // from a real recipe.
-    const auto ws = graph.workstations.targetsOf(r);
-    rec.ws.assign(ws.begin(), ws.end());
-    const auto inputs = graph.r2i.targetsOf(r);
-    const auto amounts = graph.r2i.weightsOf(r);
-    rec.inputs.assign(inputs.begin(), inputs.end());
-    rec.amounts.assign(amounts.begin(), amounts.end());
-    built.push_back(std::move(rec));
-  }
-
-  // Query-time single-use inlining. At this point `recipeSeen` already reflects
-  // tag pruning and the inventory guard, so a tag's surviving member edges are
-  // exactly the members the player can still spend -- including a dominated
-  // member that is in stock. Folding them into the consumer removes the tag
-  // node without dropping any option, and without the subgraph growth the
-  // registration-time flattening has.
-  if (options.tagInlining == TagInlineMode::QUERY_TIME || options.tagInlining == TagInlineMode::BOTH) {
-    inlineSingleUseTagsCore(built, graph.nReal, nItem, [](uint) { return true; });
-
-    // A flattened tag has neither producers nor consumers left. Drop it so it
-    // does not become an empty balance row in the plan matrix.
-    aw::vector<uint8_t> used(nItem, 0);
-    used[CraftingGraph::itemNode(output)] = 1;
-    for (const MutableRecipe& rec : built) {
-      used[rec.out] = 1;
-      for (NodeId input : rec.inputs)
-        used[input] = 1;
-    }
-    for (NodeId item = 0; item < nItem; item++)
-      if (!used[item])
-        itemSeen[item] = 0;
-  }
-
-  // Start filling the remapping between source graph and subgraph.
-  // Use UINT32_MAX for empty entries.
-  aw::vector<NodeId> itemMap(nItem, UINT32_MAX);
-  // At most one entry per source item.
-  result.itemOrigin.reserve(nItem);
-  // Note that we can compute the amount of real items in subgraph alongside the way.
-  uint subreal = 0;
-  for (NodeId item = 0; item < nItem; item++) {
-    if (itemSeen[item]) {
-      itemMap[item] = result.itemOrigin.size();
-      result.itemOrigin.push_back_unchecked(item);
-      if (item < graph.nReal)
-        subreal++;
-    }
-  }
-
-  const uint subItems = result.itemOrigin.size();
-  const uint subRecipes = built.size();
-  result.recipeOrigin.resize(subRecipes);
-  for (uint i = 0; i < subRecipes; i++)
-    result.recipeOrigin[i] = built[i].origin;
-
-  BaseCraftingGraph &sub = result.graph;
-  sub.nReal = subreal;
-  sub.nItem = subItems;
-  sub.nRecipe = subRecipes;
-
-  // Fill item -> recipe. One edge per recipe, grouped by output item.
-  sub.i2r.offsets.assign(subItems + 1, 0);
-  for (const MutableRecipe &rec : built)
-    sub.i2r.offsets[itemMap[rec.out] + 1]++;
-  for (uint i = 0; i + 1 < sub.i2r.offsets.size(); i++)
-    sub.i2r.offsets[i + 1] += sub.i2r.offsets[i];
-  sub.i2r.targets.resize(subRecipes);
-  sub.i2r.weights.resize(subRecipes);
-  {
-    aw::vector<uint> cursor(sub.i2r.offsets.begin(), sub.i2r.offsets.end() - 1);
-    for (uint i = 0; i < subRecipes; i++) {
-      const uint slot = cursor[itemMap[built[i].out]]++;
-      sub.i2r.targets[slot] = sub.nItem + i;
-      sub.i2r.weights[slot] = built[i].outAmt;
-    }
-  }
-
-  sub.output.resize(subRecipes);
-  sub.outputAmt.resize(subRecipes);
-  for (uint i = 0; i < subRecipes; i++) {
-    sub.output[i] = itemMap[built[i].out];
-    sub.outputAmt[i] = built[i].outAmt;
-  }
-
-  // Fill recipe -> item.
-  sub.r2i.offsets.assign(subRecipes + 1, 0);
-  for (uint i = 0; i < subRecipes; ++i)
-    sub.r2i.offsets[i + 1] = sub.r2i.offsets[i] + (uint) built[i].inputs.size();
-  sub.r2i.targets.resize(sub.r2i.offsets.back());
-  sub.r2i.weights.resize(sub.r2i.offsets.back());
-  for (uint i = 0; i < subRecipes; ++i) {
-    uint cursor = sub.r2i.offsets[i];
-    for (size_t j = 0; j < built[i].inputs.size(); j++) {
-      sub.r2i.targets[cursor] = itemMap[built[i].inputs[j]];
-      sub.r2i.weights[cursor++] = built[i].amounts[j];
-    }
-  }
-
-  return result;
+  return assembleSubgraph(query.itemSeen, built);
 }
+
 
 NodeId Subgraph::translate(NodeId sourceNode) const noexcept {
   const auto begin = itemOrigin.begin();

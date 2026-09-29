@@ -54,6 +54,20 @@ struct DeltaEntry {
   Amount delta;
 };
 
+// Per-recipe item deltas as a CSR: recipe r owns
+// entries[offsets[r] .. offsets[r + 1]).
+struct RecipeDeltas {
+  aw::vector<uint> offsets;      // nRecipe + 1
+  aw::vector<DeltaEntry> entries;
+};
+
+// The "r consumes an item p produces" graph over the executed recipes, as a
+// CSR: consumer r owns producers targets[offsets[r] .. offsets[r + 1]).
+struct ProducerGraph {
+  aw::vector<uint> offsets;      // nRecipe + 1
+  aw::vector<uint32_t> targets;
+};
+
 // `avail += change`, saturating at the int64 range. Everything the batch
 // arithmetic needs fits in int64 except this accumulation, which a huge count
 // times a huge amount can push past it; a saturated value is still "enough".
@@ -67,88 +81,85 @@ void applyDelta(Amount &avail, aw::int128 change) noexcept {
     avail = (Amount) next;
 }
 
-}  // namespace
+// Aggregate recipe `r`'s output and inputs into per-item net changes in `acc`,
+// appending the touched items to `touched`. A recipe may list an item more
+// than once, so the entries are merged with the per-recipe `stamp` before the
+// SCC test reads them.
+void aggregateRecipe(const BaseCraftingGraph &g, uint32_t r, aw::vector<Amount> &acc,
+                     aw::vector<int32_t> &stamp, aw::vector<NodeId> &touched) noexcept {
+  touched.clear();
+  const NodeId out = g.output[r];
+  stamp[out] = (int32_t) r;
+  acc[out] = g.outputAmt[r];
+  touched.push_back(out);
+  const auto inputs = g.r2i.targetsOf(r);
+  const auto amounts = g.r2i.weightsOf(r);
+  for (size_t k = 0; k < inputs.size(); k++) {
+    const NodeId item = inputs[k];
+    if (stamp[item] != (int32_t) r) {
+      stamp[item] = (int32_t) r;
+      acc[item] = 0;
+      touched.push_back(item);
+    }
+    acc[item] -= amounts[k];
+  }
+}
 
-bool planIsFireable(const Subgraph &sub, std::span<const Amount> invSrc,
-                    std::span<const int64_t> exec) noexcept {
-  const BaseCraftingGraph &g = sub.graph;
+// Aggregate every executed recipe's inputs into per-item deltas. A recipe may
+// list an item more than once, so the entries are merged before the SCC test
+// reads them.
+RecipeDeltas buildRecipeDeltas(const BaseCraftingGraph &g,
+                               std::span<const int64_t> exec) noexcept {
   const uint32_t n = g.nRecipe;
   const uint32_t m = g.nItem;
-  if (exec.size() != n)
-    return true;
-  if (n == 0)
-    return true;
+  RecipeDeltas deltas;
+  deltas.offsets.assign(n + 1, 0);
 
-  // ---- 1. Aggregate each recipe's inputs into per-item deltas. ----
-  //
-  // A recipe may list an item more than once, so the entries are merged before
-  // the SCC test reads them.
+  // Scratch space for the per-recipe aggregation, reused across both passes.
   aw::vector<Amount> acc(m, 0);
   aw::vector<int32_t> stamp(m, -1);
   aw::vector<NodeId> touched;
   touched.reserve(m < 64 ? m : 64);
 
-  aw::vector<uint> deltaOffsets(n + 1, 0);
+  // Size pass.
   for (uint32_t r = 0; r < n; r++) {
     if (exec[r] <= 0) {
-      deltaOffsets[r + 1] = deltaOffsets[r];
+      deltas.offsets[r + 1] = deltas.offsets[r];
       continue;
     }
-    touched.clear();
-    const NodeId out = g.output[r];
-    stamp[out] = (int32_t) r;
-    acc[out] = g.outputAmt[r];
-    touched.push_back(out);
-    const auto inputs = g.r2i.targetsOf(r);
-    const auto amounts = g.r2i.weightsOf(r);
-    for (size_t k = 0; k < inputs.size(); k++) {
-      const NodeId item = inputs[k];
-      if (stamp[item] != (int32_t) r) {
-        stamp[item] = (int32_t) r;
-        acc[item] = 0;
-        touched.push_back(item);
-      }
-      acc[item] -= amounts[k];
-    }
-    deltaOffsets[r + 1] = deltaOffsets[r] + (uint) touched.size();
+    aggregateRecipe(g, r, acc, stamp, touched);
+    deltas.offsets[r + 1] = deltas.offsets[r] + (uint) touched.size();
   }
 
-  aw::vector<DeltaEntry> deltas(deltaOffsets[n]);
+  // Fill pass.
+  deltas.entries.resize(deltas.offsets[n]);
   for (uint32_t r = 0; r < n; r++) {
     if (exec[r] <= 0)
       continue;
-    touched.clear();
-    const NodeId out = g.output[r];
-    stamp[out] = (int32_t) r;
-    acc[out] = g.outputAmt[r];
-    touched.push_back(out);
-    const auto inputs = g.r2i.targetsOf(r);
-    const auto amounts = g.r2i.weightsOf(r);
-    for (size_t k = 0; k < inputs.size(); k++) {
-      const NodeId item = inputs[k];
-      if (stamp[item] != (int32_t) r) {
-        stamp[item] = (int32_t) r;
-        acc[item] = 0;
-        touched.push_back(item);
-      }
-      acc[item] -= amounts[k];
-    }
-    uint cursor = deltaOffsets[r];
+    aggregateRecipe(g, r, acc, stamp, touched);
+    uint cursor = deltas.offsets[r];
     for (NodeId item : touched) {
-      const Amount produced = item == out ? g.outputAmt[r] : 0;
-      deltas[cursor].item = item;
-      deltas[cursor].delta = acc[item];
-      deltas[cursor].consume = produced - acc[item];
+      const Amount produced = item == g.output[r] ? g.outputAmt[r] : 0;
+      deltas.entries[cursor].item = item;
+      deltas.entries[cursor].delta = acc[item];
+      deltas.entries[cursor].consume = produced - acc[item];
       cursor++;
     }
   }
+  return deltas;
+}
 
-  // ---- 2. Build the "r consumes an item p produces" graph. ----
-  //
-  // Deduplicated with a per-recipe stamp: an item with many producers would
-  // otherwise add one edge per (recipe, producer) pair.
+// Build the "r consumes an item p produces" graph, deduplicated with a
+// per-recipe stamp: an item with many producers would otherwise add one edge
+// per (recipe, producer) pair.
+ProducerGraph buildProducerGraph(const BaseCraftingGraph &g,
+                                 std::span<const int64_t> exec) noexcept {
+  const uint32_t n = g.nRecipe;
+  ProducerGraph adj;
+  adj.offsets.assign(n + 1, 0);
+
+  // Size pass.
   aw::vector<int32_t> edgeStamp(n, -1);
-  aw::vector<uint> adjOffsets(n + 1, 0);
   for (uint32_t r = 0; r < n; r++) {
     uint count = 0;
     if (exec[r] > 0) {
@@ -162,11 +173,12 @@ bool planIsFireable(const Subgraph &sub, std::span<const Amount> invSrc,
         }
       }
     }
-    adjOffsets[r + 1] = adjOffsets[r] + count;
+    adj.offsets[r + 1] = adj.offsets[r] + count;
   }
 
-  aw::vector<uint32_t> adjTargets(adjOffsets[n]);
-  aw::vector<uint> cursor(adjOffsets.begin(), adjOffsets.end() - 1);
+  // Fill pass.
+  adj.targets.resize(adj.offsets[n]);
+  aw::vector<uint> cursor(adj.offsets.begin(), adj.offsets.end() - 1);
   std::fill(edgeStamp.begin(), edgeStamp.end(), -1);
   for (uint32_t r = 0; r < n; r++) {
     if (exec[r] <= 0)
@@ -177,28 +189,68 @@ bool planIsFireable(const Subgraph &sub, std::span<const Amount> invSrc,
         if (exec[p] <= 0 || edgeStamp[p] == (int32_t) r)
           continue;
         edgeStamp[p] = (int32_t) r;
-        adjTargets[cursor[r]++] = p;
+        adj.targets[cursor[r]++] = p;
       }
     }
   }
+  return adj;
+}
 
-  // Tarjan numbers the components in reverse topological order: a cross edge
-  // a -> b has comp[b] < comp[a]. Our edges point from a consumer to its
-  // producers, so ascending component order processes producers first.
-  aw::vector<int32_t> comp;
-  aw::vector<uint32_t> repOfComp;
-  aw::vector<uint8_t> keep;
-  const uint32_t nComp = detail::markSinkRepresentatives(
-      n, adjOffsets, adjTargets, comp, repOfComp, keep);
-  if (nComp == 0)
-    return true;
+// The first recipe of `recipes` that still has executions left and can afford
+// one firing, or UINT32_MAX. Sets `anyLeft` when any recipe remains.
+uint32_t firstEnabled(const aw::vector<uint32_t> &recipes,
+                      const aw::vector<int64_t> &remaining, const RecipeDeltas &deltas,
+                      const aw::vector<Amount> &avail, bool &anyLeft) noexcept {
+  anyLeft = false;
+  for (uint32_t r : recipes) {
+    if (remaining[r] <= 0)
+      continue;
+    anyLeft = true;
+    bool enabled = true;
+    for (uint e = deltas.offsets[r]; e < deltas.offsets[r + 1]; e++) {
+      if (deltas.entries[e].consume > 0 && avail[deltas.entries[e].item] < deltas.entries[e].consume) {
+        enabled = false;
+        break;
+      }
+    }
+    if (enabled)
+      return r;
+  }
+  return UINT32_MAX;
+}
+
+// The most firings of `chosen` that can happen back to back. A net-consuming
+// input sets the batch; a net-producing one cannot run out inside the batch.
+int64_t maxBatch(uint32_t chosen, int64_t remaining, const RecipeDeltas &deltas,
+                 const aw::vector<Amount> &avail) noexcept {
+  int64_t batch = remaining;
+  for (uint e = deltas.offsets[chosen]; e < deltas.offsets[chosen + 1]; e++) {
+    const Amount consume = deltas.entries[e].consume;
+    const Amount delta = deltas.entries[e].delta;
+    if (consume <= 0 || delta >= 0)
+      continue;
+    const Amount extra = (avail[deltas.entries[e].item] - consume) / (-delta);
+    const int64_t bound = extra >= batch - 1 ? batch : extra + 1;
+    if (bound < batch)
+      batch = bound;
+  }
+  return batch < 1 ? 1 : batch;
+}
+
+// Fire every SCC in dependency order with the batched greedy from the file
+// header. False means a group deadlocked or the batch budget ran out.
+bool fireComponents(const Subgraph &sub, std::span<const Amount> invSrc,
+                    std::span<const int64_t> exec, const RecipeDeltas &deltas,
+                    const aw::vector<int32_t> &comp, uint32_t nComp) noexcept {
+  const BaseCraftingGraph &g = sub.graph;
+  const uint32_t n = g.nRecipe;
+  const uint32_t m = g.nItem;
 
   aw::vector<aw::vector<uint32_t>> compRecipes(nComp);
   for (uint32_t r = 0; r < n; r++)
     if (exec[r] > 0)
       compRecipes[comp[r]].push_back(r);
 
-  // ---- 3. Fire every SCC in dependency order. ----
   aw::vector<Amount> avail(m, 0);
   for (uint32_t item = 0; item < m; item++) {
     const NodeId source = sub.itemOrigin[item];
@@ -215,24 +267,8 @@ bool planIsFireable(const Subgraph &sub, std::span<const Amount> invSrc,
       remaining[r] = exec[r];
 
     while (true) {
-      uint32_t chosen = UINT32_MAX;
-      bool anyLeft = false;
-      for (uint32_t r : recipes) {
-        if (remaining[r] <= 0)
-          continue;
-        anyLeft = true;
-        bool enabled = true;
-        for (uint e = deltaOffsets[r]; e < deltaOffsets[r + 1]; e++) {
-          if (deltas[e].consume > 0 && avail[deltas[e].item] < deltas[e].consume) {
-            enabled = false;
-            break;
-          }
-        }
-        if (enabled) {
-          chosen = r;
-          break;
-        }
-      }
+      bool anyLeft;
+      const uint32_t chosen = firstEnabled(recipes, remaining, deltas, avail, anyLeft);
       if (!anyLeft)
         break;
       // Every remaining recipe needs more than the stock and the already-fired
@@ -240,30 +276,42 @@ bool planIsFireable(const Subgraph &sub, std::span<const Amount> invSrc,
       if (chosen == UINT32_MAX)
         return false;
 
-      // The most firings that can happen back to back. A net-consuming input
-      // sets the batch; a net-producing one cannot run out inside the batch.
-      int64_t batch = remaining[chosen];
-      for (uint e = deltaOffsets[chosen]; e < deltaOffsets[chosen + 1]; e++) {
-        const Amount consume = deltas[e].consume;
-        const Amount delta = deltas[e].delta;
-        if (consume <= 0 || delta >= 0)
-          continue;
-        const Amount extra = (avail[deltas[e].item] - consume) / (-delta);
-        const int64_t bound = extra >= batch - 1 ? batch : extra + 1;
-        if (bound < batch)
-          batch = bound;
-      }
-      if (batch < 1)
-        batch = 1;
-
-      for (uint e = deltaOffsets[chosen]; e < deltaOffsets[chosen + 1]; e++)
-        applyDelta(avail[deltas[e].item], (aw::int128) deltas[e].delta * (aw::int128) batch);
+      const int64_t batch = maxBatch(chosen, remaining[chosen], deltas, avail);
+      for (uint e = deltas.offsets[chosen]; e < deltas.offsets[chosen + 1]; e++)
+        applyDelta(avail[deltas.entries[e].item],
+                   (aw::int128) deltas.entries[e].delta * (aw::int128) batch);
       remaining[chosen] -= batch;
       if (++batchCount > FIRE_BUDGET)
         return false;
     }
   }
   return true;
+}
+
+}  // namespace
+
+bool planIsFireable(const Subgraph &sub, std::span<const Amount> invSrc,
+                    std::span<const int64_t> exec) noexcept {
+  const BaseCraftingGraph &g = sub.graph;
+  const uint32_t n = g.nRecipe;
+  if (exec.size() != n || n == 0)
+    return true;
+
+  const RecipeDeltas deltas = buildRecipeDeltas(g, exec);
+  const ProducerGraph adj = buildProducerGraph(g, exec);
+
+  // Tarjan numbers the components in reverse topological order: a cross edge
+  // a -> b has comp[b] < comp[a]. Our edges point from a consumer to its
+  // producers, so ascending component order processes producers first.
+  aw::vector<int32_t> comp;
+  aw::vector<uint32_t> repOfComp;
+  aw::vector<uint8_t> keep;
+  const uint32_t nComp = detail::markSinkRepresentatives(
+      n, adj.offsets, adj.targets, comp, repOfComp, keep);
+  if (nComp == 0)
+    return true;
+
+  return fireComponents(sub, invSrc, exec, deltas, comp, nComp);
 }
 
 }  // namespace aw
