@@ -225,7 +225,6 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
         !readBool(j, "recipePruning", next.recipePruning, error) ||
         !readBool(j, "directPruning", next.directPruning, error) ||
         !readBool(j, "substitutionPruning", next.substitutionPruning, error) ||
-        !readBool(j, "deadNodePruning", next.deadNodePruning, error) ||
         !readBool(j, "seedPruning", next.seedPruning, error))
       return false;
 
@@ -276,6 +275,9 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
         !readInt(j, "maxPropIterations", next.maxPropIterations, error))
       return false;
 
+    // `deadNodePruning` is a retired knob: seed pruning subsumes it. It is kept
+    // in the known set so an older client that still sends it is not rejected;
+    // the value is ignored, and it is not written back by plannerOptionsJson.
     if (!checkKnown(j,
                     {"nonoptimal", "tagPruning", "recipePruning", "directPruning",
                      "substitutionPruning", "deadNodePruning", "seedPruning",
@@ -346,7 +348,6 @@ std::string plannerOptionsJson() noexcept {
     j["recipePruning"] = options.recipePruning;
     j["directPruning"] = options.directPruning;
     j["substitutionPruning"] = options.substitutionPruning;
-    j["deadNodePruning"] = options.deadNodePruning;
     j["seedPruning"] = options.seedPruning;
     switch (options.tagInlining) {
       case TagInlineMode::OFF: j["tagInlining"] = "off"; break;

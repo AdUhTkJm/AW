@@ -158,7 +158,7 @@ run `summarize.py --mean` or `--max` for the mean/worst ratio).
 ### 3.5 Ablation stages (cumulative, `nonoptimal=true`)
 
 ```
-none → dead_node → direct → recipe → substitution → tag → pack → satellite
+none → seed → direct → recipe → substitution → tag → pack → satellite
 ```
 
 `direct` is column dominance, `recipe` is the composite (inline) pass, `substitution` is
@@ -205,7 +205,9 @@ python3 bench/run.py --datasets recipes-vanilla,recipes-small --time-limit 5
 python3 bench/summarize.py
 ```
 
-Expected shape of the output (vanilla, 5 s cutoff, 5 s Java watchdog):
+Expected shape of the output (vanilla, 5 s cutoff, 5 s Java watchdog). The
+`dead_node` row below is from before that stage was renamed to `seed`; rerun
+`run.py` to refresh it:
 
 ```
 == recipes-vanilla ==

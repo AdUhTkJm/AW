@@ -98,7 +98,7 @@ struct SatellitePruneOptions {
 // This is the single home for every pruning switch and tuning bound. The
 // registration-time knobs (tag inlining, the dominance and pack passes) are
 // read once by registerCraftingGraph, so they must be set before registering a
-// graph; the query-time ones (satellite elimination, dead-node cleanup and the
+// graph; the query-time ones (satellite elimination, seed pruning and the
 // query-time half of tag inlining) can be flipped at any time.
 struct Options {
   // Integrality relaxation for the dominance passes. On by default. Exact mode
@@ -113,15 +113,15 @@ struct Options {
   bool directPruning = true;
   bool substitutionPruning = true;
 
-  // Query-time passes, independent of the registration-time ones above.
-  bool deadNodePruning = true;
-
   // Seed-reachability pruning. Drops every recipe with an input that cannot be
-  // produced from the player's stock and the recipes that fire from nowhere.
-  // Such a recipe can never be executed, because the balance the solver sees
-  // is a net condition and does not know that a consumed item has to exist
-  // before the recipe runs. Sound (never removes a realizable recipe) and
-  // toggleable. See docs/algorithm.typ, "启动可达性".
+  // produced from the player's stock; input-less recipes are the seeds. Such a
+  // recipe can never be executed, because the balance the solver sees is a net
+  // condition and does not know that a consumed item has to exist before the
+  // recipe runs. This also covers the acyclic dead branches that dead-node
+  // cleanup used to remove -- a zero-stock item with no surviving producer is
+  // simply never attainable -- so there is no separate dead-node pass. Sound
+  // (never removes a realizable recipe) and toggleable. See docs/algorithm.typ,
+  // "启动可达性".
   bool seedPruning = true;
 
 #ifdef AW_PROFILE_PRUNING

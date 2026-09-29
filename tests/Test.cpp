@@ -128,7 +128,7 @@ aw::vector<std::byte> buildReachSample() {
   return w.out;
 }
 
-// A dump for the dead-node cleanup. Handles 1..3 are real.
+// A dump for seed-reachability pruning. Handles 1..3 are real.
 //
 //   item 1 <- rT  (x1, workstations [1], inputs item-2 x1)
 //          <- rT2 (x1, workstations [1], inputs item-3 x1)
@@ -136,8 +136,10 @@ aw::vector<std::byte> buildReachSample() {
 //
 // item 3 has no producer. Recipe ids in file order: rT=0, rT2=1, rA=2. When
 // only workstation 1 is allowed, item 2 keeps a producer in the source graph
-// but has none in the subgraph, so the cleanup must drop rT.
-aw::vector<std::byte> buildDeadNodeSample() {
+// but has none in the subgraph. With nothing in stock neither item 2 nor item
+// 3 can be reached, so both consumers are dropped; stocking one leaf keeps
+// exactly its own branch.
+aw::vector<std::byte> buildSeedSample() {
   AwrWriter w;
   w.header(3, 2);
   w.item(1, 2);
@@ -1216,11 +1218,13 @@ void testPlanInfeasible() {
   expect(aw::getCraftingError() == nullptr, "leaf sample parses");
 
   const aw::Handle all[] = {1};
-  // Satellite elimination now drops the dead raw-material route as well, which
-  // would hide the missing leaf this test is about; keep the pass off so the
-  // reachability shape stays visible.
+  // Satellite elimination and seed pruning would both drop the dead
+  // raw-material route, and hide the missing leaf this test is about; keep
+  // them off so the reachability shape stays visible and the solver sees it.
   aw::options.satellite.enabled = false;
+  aw::options.seedPruning = false;
   const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+  aw::options.seedPruning = true;
   aw::options.satellite.enabled = true;
   expect(sub.graph.nItem == 2 && sub.graph.nRecipe == 1, "leaf subgraph shape");
 
@@ -1263,8 +1267,10 @@ void testDuplicateRecipes() {
   aw::options.recipePruning = false;
   aw::options.directPruning = false;
   aw::options.satellite.enabled = false;
+  aw::options.seedPruning = false;
   const aw::Handle all[] = {1, 2, 3};
   const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+  aw::options.seedPruning = true;
   aw::options.satellite.enabled = true;
   aw::options.directPruning = true;
   aw::options.recipePruning = true;
@@ -1334,12 +1340,10 @@ void testNetLossRecipes() {
   aw::options.recipePruning = false;
   aw::options.directPruning = false;
   aw::options.satellite.enabled = false;
-  aw::options.deadNodePruning = false;
   const aw::Handle all[] = {1};
   aw::vector<aw::Amount> inventory(graph.nItem, 0);
   inventory[0] = 100;
   const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
-  aw::options.deadNodePruning = true;
   aw::options.directPruning = true;
   aw::options.satellite.enabled = true;
   aw::options.recipePruning = true;
@@ -1383,13 +1387,12 @@ void testNonPositiveInputs() {
   aw::options.directPruning = false;
   aw::options.substitutionPruning = false;
   aw::options.satellite.enabled = false;
-  aw::options.deadNodePruning = false;
+  aw::options.seedPruning = false;
   const aw::Handle all[] = {1, 2};
   const aw::Subgraph sub = aw::reachableSubgraph(1, all);
-  std::cerr << sub.graph.nRecipe << "\n";
   expect(sub.graph.nRecipe == 3, "the input-less recipe reaches the subgraph");
   const aw::PlanResult plan = aw::planCrafting(sub, sub.translate(0), 1, {});
-  aw::options.deadNodePruning = true;
+  aw::options.seedPruning = true;
   aw::options.satellite.enabled = true;
   aw::options.substitutionPruning = true;
   aw::options.directPruning = true;
@@ -1397,6 +1400,12 @@ void testNonPositiveInputs() {
   expect(plan.status == aw::PlanStatus::OK && plan.provenOptimal, "the plan is proven optimal");
   expect(plan.exec.size() == 3 && plan.exec[0] == 0 && plan.exec[1] == 0 && plan.exec[2] == 1,
          "one firing of the input-less recipe covers the request");
+
+  // With seed pruning on, the two routes into the unstocked leaf are dropped
+  // and the input-less recipe is the only survivor.
+  const aw::Subgraph seeded = aw::reachableSubgraph(1, all);
+  expect(seeded.graph.nRecipe == 1 && subgraphHasRecipe(seeded, 2),
+         "seed pruning drops the routes into the unstocked leaf");
 }
 
 void testDegenerateOnlyInput() {
@@ -1413,11 +1422,9 @@ void testDegenerateOnlyInput() {
   aw::options.directPruning = false;
   aw::options.substitutionPruning = false;
   aw::options.satellite.enabled = false;
-  aw::options.deadNodePruning = false;
   const aw::Handle all[] = {1, 2};
   const aw::Subgraph sub = aw::reachableSubgraph(1, all);
   const aw::PlanResult plan = aw::planCrafting(sub, sub.translate(0), 1, {});
-  aw::options.deadNodePruning = true;
   aw::options.satellite.enabled = true;
   aw::options.substitutionPruning = true;
   aw::options.directPruning = true;
@@ -1509,62 +1516,71 @@ void testReachability() {
   expect(ok, "subgraph CSRs are well formed");
 }
 
-void testDeadNodePruning() {
-  std::cout << "[Test] dead-node cleanup\n";
+void testSeedUnreachablePruning() {
+  std::cout << "[Test] seed reachability\n";
   aw::options.tagPruning = false;
   aw::options.recipePruning = false;
   aw::options.directPruning = false;
   aw::options.pack.enabled = false;
   aw::options.satellite.enabled = false;
 
-  aw::registerCraftingGraph(buildDeadNodeSample());
-  expect(aw::getCraftingError() == nullptr, "dead-node sample parses");
+  aw::registerCraftingGraph(buildSeedSample());
+  expect(aw::getCraftingError() == nullptr, "seed sample parses");
   {
     const aw::CraftingGraph &graph = aw::getCraftingGraph();
     expect(graph.nReal == 3 && graph.nItem == 3 && graph.nRecipe == 3,
-           "dead-node sample shape");
+           "seed sample shape");
   }
 
   const aw::Handle onlyT[] = {1};  // rT and rT2 run; rA needs workstation 2.
   aw::vector<aw::Amount> inventory(3, 0);
 
-  // With the cleanup off, item 2 is a leaf that no surviving recipe produces,
-  // and rT is still in the subgraph.
-  aw::options.deadNodePruning = false;
+  // With seed pruning off, the raw-material leaves stay visible.
+  aw::options.seedPruning = false;
   {
     const aw::Subgraph sub = aw::reachableSubgraph(1, onlyT, inventory);
     expect(sub.graph.nItem == 3 && sub.graph.nRecipe == 2,
-           "cleanup off keeps the dead leaf");
-    expect(subgraphHasRecipe(sub, 0), "rT survives with the cleanup off");
-    expect(sub.translate(1) != UINT32_MAX, "item 2 survives with the cleanup off");
+           "seed pruning off keeps the raw-material leaves");
+    expect(subgraphHasRecipe(sub, 0), "rT survives with seed pruning off");
+    expect(sub.translate(1) != UINT32_MAX, "item 2 survives with seed pruning off");
   }
 
-  // With it on, rT goes and item 2 disappears with it. rT2 keeps the target and
-  // the raw material (item 3) alive.
-  aw::options.deadNodePruning = true;
+  // With it on and nothing in stock, neither leaf can be reached, so every
+  // recipe that needs one is dropped.
+  aw::options.seedPruning = true;
   {
     const aw::Subgraph sub = aw::reachableSubgraph(1, onlyT, inventory);
-    expect(sub.graph.nItem == 2 && sub.graph.nRecipe == 1,
-           "cleanup drops the dead branch");
-    expect(subgraphHasRecipe(sub, 1), "the raw-material route survives");
+    expect(sub.graph.nItem == 1 && sub.graph.nRecipe == 0,
+           "seed pruning drops the unseeded branches");
     expect(!subgraphHasRecipe(sub, 0), "the dead consumer is dropped");
     expect(!subgraphHasRecipe(sub, 2), "the unreachable producer is kept out");
     expect(sub.translate(0) != UINT32_MAX, "the target survives");
     expect(sub.translate(1) == UINT32_MAX, "the dead item is gone");
-    expect(sub.translate(2) != UINT32_MAX, "the raw material survives");
   }
 
-  // Stock on item 2 makes rT usable, so nothing is dead.
+  // Stock on item 2 seeds rT, so only that branch survives.
   {
     aw::vector<aw::Amount> stocked = inventory;
     stocked[1] = 5;  // item 2
     const aw::Subgraph sub = aw::reachableSubgraph(1, onlyT, stocked);
-    expect(sub.graph.nItem == 3 && sub.graph.nRecipe == 2,
+    expect(sub.graph.nItem == 2 && sub.graph.nRecipe == 1,
            "stock keeps the branch");
     expect(subgraphHasRecipe(sub, 0), "rT survives when its input is stocked");
+    expect(!subgraphHasRecipe(sub, 1), "the unseeded sibling is dropped");
   }
 
-  // The cleanup must not change the plan optimum.
+  // Stock on item 3 seeds the other branch instead.
+  {
+    aw::vector<aw::Amount> stocked = inventory;
+    stocked[2] = 10;  // item 3, the shared raw input
+    const aw::Subgraph sub = aw::reachableSubgraph(1, onlyT, stocked);
+    expect(sub.graph.nItem == 2 && sub.graph.nRecipe == 1,
+           "the other raw input keeps its own branch");
+    expect(subgraphHasRecipe(sub, 1), "rT2 survives when item 3 is stocked");
+    expect(!subgraphHasRecipe(sub, 0), "the unseeded sibling is dropped");
+  }
+
+  // Seed pruning must not change the plan optimum.
   {
     aw::vector<aw::Amount> stocked = inventory;
     stocked[2] = 10;  // item 3, the shared raw input
@@ -1574,16 +1590,16 @@ void testDeadNodePruning() {
         sum += x;
       return sum;
     };
-    aw::options.deadNodePruning = false;
+    aw::options.seedPruning = false;
     const aw::Subgraph full = aw::reachableSubgraph(1, onlyT, stocked);
     const aw::PlanResult fullPlan = aw::planCrafting(full, full.translate(0), 1, stocked);
-    aw::options.deadNodePruning = true;
+    aw::options.seedPruning = true;
     const aw::Subgraph pruned = aw::reachableSubgraph(1, onlyT, stocked);
     const aw::PlanResult prunedPlan =
         aw::planCrafting(pruned, pruned.translate(0), 1, stocked);
-    expect(fullPlan.status == prunedPlan.status, "dead-node: status agrees");
+    expect(fullPlan.status == prunedPlan.status, "seed: status agrees");
     expect(fullPlan.status != aw::PlanStatus::OK || total(fullPlan) == total(prunedPlan),
-           "dead-node: optimum agrees");
+           "seed: optimum agrees");
   }
 
   aw::options.tagPruning = true;
@@ -1683,12 +1699,14 @@ void testTagPruning() {
     expect(keepsStainedEdge(sub), "inventory keeps the dominated tag edge");
   }
   {
-    // The A/B switch turns the drop off entirely. Satellite elimination is
-    // disabled too: it drops the same dead tag island independently of the tag
-    // pass.
+    // The A/B switch turns the drop off entirely. Satellite elimination and
+    // seed pruning are disabled too: they drop the same dead tag island
+    // independently of the tag pass.
     aw::options.tagPruning = false;
     aw::options.satellite.enabled = false;
+    aw::options.seedPruning = false;
     const aw::Subgraph sub = aw::reachableSubgraph(5, all);
+    aw::options.seedPruning = true;
     aw::options.satellite.enabled = true;
     aw::options.tagPruning = true;
     expect(keepsStainedEdge(sub), "disabling pruning keeps every tag edge");
@@ -2115,12 +2133,15 @@ void testRecipePruning() {
     expect(r.status == aw::PlanStatus::OK, "a stocked guard still plans");
   }
   {
-    // The A/B switch turns the drop off entirely. Satellite elimination is
-    // disabled too: it would drop the same dead island on its own.
+    // The A/B switch turns the drop off entirely. Satellite elimination and
+    // seed pruning are disabled too: they would drop the same dead island on
+    // their own.
     const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
     aw::options.recipePruning = false;
     aw::options.satellite.enabled = false;
+    aw::options.seedPruning = false;
     const aw::Subgraph sub = aw::reachableSubgraph(4, all);
+    aw::options.seedPruning = true;
     aw::options.satellite.enabled = true;
     aw::options.recipePruning = true;
     bool kept = false;
@@ -2545,11 +2566,14 @@ void testPackPruning() {
   {
     aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
     inventory[3] = 10;  // nugget
-    // Satellite elimination is off here: stick is still an unstocked leaf, so
-    // the generalized pass drops the pickaxe recipe no matter what the pack
-    // pass does. This block is about the pack certificate's zero-stock gate.
+    // Satellite elimination and seed pruning are off here: stick is still an
+    // unstocked leaf, so both would drop the pickaxe recipe no matter what the
+    // pack pass does. This block is about the pack certificate's zero-stock
+    // gate, so isolate it.
     aw::options.satellite.enabled = false;
+    aw::options.seedPruning = false;
     const aw::Subgraph sub = aw::reachableSubgraph(3, all, inventory);
+    aw::options.seedPruning = true;
     aw::options.satellite.enabled = true;
     expect(subgraphHasRecipe(sub, 0), "stocked nugget keeps the ingot recipe");
   }
@@ -3202,7 +3226,7 @@ int main() {
   testNonPositiveInputs();
   testDegenerateOnlyInput();
   testReachability();
-  testDeadNodePruning();
+  testSeedUnreachablePruning();
   testSolver();
   testReducedCostFixing();
   testFlash();

@@ -155,8 +155,7 @@ leaves the running configuration untouched.
 
 ```
 nonoptimal, tagPruning, recipePruning, directPruning, substitutionPruning,
-deadNodePruning, seedPruning
-                           bool
+seedPruning                bool
 outputPruningProfile       bool   (accepted on every platform; only meaningful
                                    in a build with AW_PROFILE_PRUNING)
 tagInlining                string "off" | "prePrune" | "queryTime" | "both",
@@ -189,12 +188,16 @@ objectiveCap, objectiveUpperBound, reducedCostGap, flash
 `plannerOptionsJson()` / `solverOptionsJson()` dump the current values as a
 document the setters accept verbatim.
 
+`deadNodePruning` is a retired knob: `seedPruning` now subsumes the dead-node
+cleanup, so the separate pass is gone. The key is still accepted on input and
+ignored, so an older client that sends it is not rejected; it is not written
+back by `plannerOptionsJson()`.
+
 The registration-time switches (`tagInlining` and the dominance / pack passes)
 are read once by `registerCraftingGraph`, so they take effect on the next
-registration. The query-time ones (`satellite`, `deadNodePruning` and the
-query-time half of tag inlining) can be changed at any time. The solver budget is
-re-read on every `plan` call, so it applies to the next query without
-re-registering.
+registration. The query-time ones (`satellite`, `seedPruning` and the query-time
+half of tag inlining) can be changed at any time. The solver budget is re-read on
+every `plan` call, so it applies to the next query without re-registering.
 
 ## Building the library
 

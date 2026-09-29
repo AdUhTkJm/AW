@@ -185,7 +185,7 @@ bool splitCommas(const std::string &text, aw::vector<std::string> &out) {
 // query-time gates read by `reachableSubgraph`.
 struct Stage {
   const char *name;
-  bool dead;
+  bool seed;
   bool direct;
   bool recipe;
   bool subs;
@@ -195,10 +195,10 @@ struct Stage {
 };
 
 // The agreed cumulative order:
-//   nothing -> dead_node -> direct -> recipe -> substitution -> tag -> pack -> satellite
+//   nothing -> seed -> direct -> recipe -> substitution -> tag -> pack -> satellite
 const Stage kStages[] = {
     {"none", false, false, false, false, false, false, false},
-    {"dead_node", true, false, false, false, false, false, false},
+    {"seed", true, false, false, false, false, false, false},
     {"direct", true, true, false, false, false, false, false},
     {"recipe", true, true, true, false, false, false, false},
     {"substitution", true, true, true, true, false, false, false},
@@ -214,7 +214,7 @@ const Stage *findStage(const std::string &name) {
 }
 
 void applyStage(const Stage &stage) {
-  aw::options.deadNodePruning = stage.dead;
+  aw::options.seedPruning = stage.seed;
   aw::options.directPruning = stage.direct;
   aw::options.recipePruning = stage.recipe;
   aw::options.substitutionPruning = stage.subs;
@@ -242,7 +242,7 @@ void configureForRegistration(bool nonoptimal, double packSeconds, double satell
   aw::options.recipePruning = true;
   aw::options.directPruning = true;
   aw::options.substitutionPruning = true;
-  aw::options.deadNodePruning = true;
+  aw::options.seedPruning = true;
   aw::options.satellite.enabled = true;
 }
 
@@ -332,7 +332,7 @@ void usage() {
                "registration row, then exits without running a single query. Use it to refresh\n"
                "the preprocessing half of an existing JSONL without paying for plan_ms again.\n"
                "\n"
-               "stages (cumulative): none dead_node direct recipe substitution tag pack satellite\n");
+               "stages (cumulative): none seed direct recipe substitution tag pack satellite\n");
 }
 
 }  // namespace

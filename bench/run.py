@@ -56,7 +56,7 @@ DATASETS = {
 
 # The cumulative ablation order agreed for the paper. `satellite` is the last
 # stage, so it is also "everything on" in nonoptimal mode.
-AW_STAGES = ["none", "dead_node", "direct", "recipe", "substitution", "tag", "pack",
+AW_STAGES = ["none", "seed", "direct", "recipe", "substitution", "tag", "pack",
              "satellite"]
 
 AW_CONFIGS = ("aw-nonopt", "aw-optimal", "aw-flash")

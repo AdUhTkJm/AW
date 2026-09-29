@@ -896,80 +896,7 @@ struct ReachQuery {
     }
   }
 
-  // Remove zero-stock nodes without a recipe to produce.
-  void pruneDeadNodes() noexcept {
-    if (!options.deadNodePruning)
-      return;
-    const uint nItem = graph.nItem;
-    const uint nRecipe = graph.nRecipe;
-    const NodeId target = CraftingGraph::itemNode(output);
-
-    // How many surviving recipes produce each item.
-    aw::vector<uint> produced(nItem, 0);
-    for (uint r = 0; r < nRecipe; r++) {
-      if (recipeSeen[r])
-        produced[graph.output[r]]++;
-    }
-    
-    // Item -> surviving recipes that consume it, as a CSR.
-    aw::vector<uint> consOffsets(nItem + 1, 0);
-    for (uint r = 0; r < nRecipe; r++) {
-      if (!recipeSeen[r])
-        continue;
-      for (NodeId input : graph.r2i.targetsOf(r))
-        consOffsets[input + 1]++;
-    }
-    for (NodeId item = 0; item < nItem; item++)
-      consOffsets[item + 1] += consOffsets[item];
-    aw::vector<uint> consTargets(consOffsets.back());
-    aw::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
-    for (uint r = 0; r < nRecipe; r++) {
-      if (!recipeSeen[r])
-        continue;
-      for (NodeId input : graph.r2i.targetsOf(r))
-        consTargets[cursor[input]++] = r;
-    }
-
-    auto usable = [&](NodeId item) {
-      return item == target || produced[item] != 0 || held(item) != 0;
-    };
-
-    aw::vector<NodeId> dead;
-    dead.reserve(nItem);
-    aw::vector<uint8_t> queued(nItem, 0);
-    for (NodeId item = 0; item < nItem; item++) {
-      if (itemSeen[item] && !usable(item)) {
-        queued[item] = 1;
-        dead.push_back_unchecked(item);
-      }
-    }
-
-    bool changed = false;
-    for (size_t q = 0; q < dead.size(); q++) {
-      const NodeId item = dead[q];
-      for (uint slot = consOffsets[item]; slot < consOffsets[item + 1]; slot++) {
-        const uint r = consTargets[slot];
-        if (disabled[r])
-          continue;
-        disabled[r] = 1;
-        recipeSeen[r] = 0;
-        changed = true;
-        const NodeId out = graph.output[r];
-        if (produced[out] > 0)
-          produced[out]--;
-        if (produced[out] == 0 && itemSeen[out] && !queued[out] && !usable(out)) {
-          queued[out] = 1;
-          dead.push_back_unchecked(out);
-        }
-      }
-    }
-    // Rebuild the walk so items only needed by the dropped recipes disappear
-    // too; the closure above guarantees no new producer-less item appears.
-    if (changed)
-      walk();
-  }
-
-  // Remove uncraftable nodes from stock.
+  // Remove uncraftable items/recipes from stock.
   void pruneSeedUnreachable() noexcept {
     if (!options.seedPruning)
       return;
@@ -1298,7 +1225,6 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   query.walk();
   query.prunePackCertificates();
   query.pruneSatellites();
-  query.pruneDeadNodes();
   query.pruneSeedUnreachable();
 
   aw::vector<MutableRecipe> built = collectSurvivingRecipes(query.recipeSeen);

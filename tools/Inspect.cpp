@@ -886,7 +886,7 @@ int main(int argc, char** argv) {
   bool noSubstitutionPrune = false;
   bool noPackPrune = false;
   bool noSatellitePrune = false;
-  bool noDeadNodePrune = false;
+  bool noSeedPrune = false;
   bool optimalPruning = false;
   bool doReach = false;
   bool doTree = false;
@@ -913,8 +913,8 @@ int main(int argc, char** argv) {
       noPackPrune = true;
     } else if (arg == "--no-satellite-prune") {
       noSatellitePrune = true;
-    } else if (arg == "--no-dead-node-prune") {
-      noDeadNodePrune = true;
+    } else if (arg == "--no-seed-prune") {
+      noSeedPrune = true;
     } else if (arg == "--optimal") {
       optimalPruning = true;
     } else if (arg == "--dump-ws") {
@@ -1021,7 +1021,7 @@ int main(int argc, char** argv) {
                    "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                    "                   [--no-pack-prune]\n"
                    "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
-                   "                   [--no-dead-node-prune] [--optimal] [--flash]\n"
+                   "                   [--no-seed-prune] [--optimal] [--flash]\n"
                    "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                    "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
@@ -1041,7 +1041,7 @@ int main(int argc, char** argv) {
                  "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                  "                   [--no-pack-prune]\n"
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
-                 "                   [--no-dead-node-prune] [--optimal] [--flash]\n"
+                 "                   [--no-seed-prune] [--optimal] [--flash]\n"
                  "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                  "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
@@ -1098,8 +1098,8 @@ int main(int argc, char** argv) {
     aw::options.satellite = satelliteOptions;
   }
 
-  // Dead-node cleanup runs per query, after the walk and every pruning pass.
-  aw::options.deadNodePruning = !noDeadNodePrune && !noPrune;
+  // Seed pruning runs per query, after the walk and every pruning pass.
+  aw::options.seedPruning = !noSeedPrune && !noPrune;
 
   // Profile the whole run: decode + canonicalize + prune precompute, the
   // reachability pass, the LP/CP-SAT solve, and the report. Started before the
