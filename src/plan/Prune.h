@@ -71,12 +71,9 @@ void compositeWorkstations(const CraftingGraph &graph,
                           const aw::vector<uint32_t> &recs,
                           aw::vector<aw::vector<NodeId>> &compWs) noexcept;
 
-// Fills packDominated / packCertificates with the multi-item "wasteful pack"
-// certificates. Called by computePruning after the tag and composite passes,
-// so recipes those passes already drop are skipped. The implementation lives in
-// PackPrune.cpp.
-void computePackPruning(CraftingGraph& graph) noexcept;
 
+void computeTagPruning(CraftingGraph &graph) noexcept;
+void computePackPruning(CraftingGraph& graph) noexcept;
 void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) noexcept;
 
 }  // namespace aw

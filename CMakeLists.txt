@@ -80,6 +80,7 @@ add_library(aw_crafting STATIC
    src/plan/Protocol.cpp
    src/plan/SatellitePrune.cpp
    src/plan/SubstitutionPrune.cpp
+   src/plan/TagPrune.cpp
 )
 target_include_directories(aw_crafting PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(aw_crafting PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -103,6 +104,7 @@ if(AW_STRICT_FLAGS)
       src/plan/Prune.cpp
       src/plan/Protocol.cpp
       src/plan/SubstitutionPrune.cpp
+      src/plan/TagPrune.cpp
       PROPERTIES COMPILE_OPTIONS "${AW_STRICT_FLAGS}")
 endif()
 
