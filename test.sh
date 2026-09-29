@@ -10,11 +10,11 @@ JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk-amd64} cmake -S . -B build -
 cmake --build build
 
 # Refresh the sample corpus when a client run is available.
-DUMPS=/mnt/d/IdeaProjects/AppliedWheelchair/runs/client/aw
-if [ -f "$DUMPS/recipes.awr" ]; then
-  cp "$DUMPS/recipes.awr" temp/recipes-vanilla.awr
-  [ -f "$DUMPS/recipes.names.tsv" ] && cp "$DUMPS/recipes.names.tsv" temp/recipes-vanilla.names.tsv
-fi
+# DUMPS=/mnt/d/IdeaProjects/AppliedWheelchair/runs/client/aw
+# if [ -f "$DUMPS/recipes.awr" ]; then
+#   cp "$DUMPS/recipes.awr" temp/recipes-vanilla.awr
+#   [ -f "$DUMPS/recipes.names.tsv" ] && cp "$DUMPS/recipes.names.tsv" temp/recipes-vanilla.names.tsv
+# fi
 
 # Run tests
 build/aw_tests
