@@ -18,6 +18,10 @@
 // that reads across witnesses is the sink-SCC reduction of pruneDominatedEdges;
 // it consumes a per-tag bit matrix of the alive co-member edges, which
 // recordRowScc fills while each row is still in hand.
+//
+// Every node id read out of a recipe is below nItem: the parser sizes the item
+// arrays from the largest handle in the dump, so an input either is a real item
+// (below nReal) or a tag, and nothing below has to re-check that.
 
 #include <algorithm>
 #include <bit>
@@ -86,7 +90,8 @@ void mergeDisjoint(const aw::vector<NodeId> &a, const aw::vector<NodeId> &b,
 //   budgetTagUniverse       admit tags into the relation within the pair budget
 //   buildMemberIndex        member -> tags containing it (CSR)
 //   buildConsumerIndex      tag -> real items consuming it (CSR)
-//   computeQualifiedInputs  per-item inputs consumed in at least the output amount
+//   buildQualifiedInputs    per-recipe inputs consumed in at least the output amount
+//   computeQualifiedInputs  per-item union of those, the closure seeds
 //   computeUnitOutputs      batching guard, exact mode only
 //   allocateTagAdjacency    per-tag alive-edge bit matrix for the SCC stage
 //   seedWitnessPairs        bucket the witness seeds (m, w) by w
@@ -131,6 +136,14 @@ struct TagPruner {
 
   // Amount-qualified inputs, see computeQualifiedInputs().
   aw::vector<aw::vector<NodeId>> qualReal, qualTags;  // nReal each
+
+  // Per recipe, the inputs it consumes at least as much of as it outputs, with
+  // tags the budget dropped left out. Recipes, amounts and the tag budget are
+  // all fixed before the row loop, so the rule is applied once here instead of
+  // on every one of the millions of validItem() and seedWitnessPairs() steps
+  // that need it. computeQualifiedInputs() unions these per item.
+  aw::vector<uint> qualInputOffsets;       // nRecipe + 1 after prefixSum
+  aw::vector<NodeId> qualInputItems;
 
   // Witness seeds grouped by witness: witnessByW[w] holds the m with a witness
   // pair (m, w). Seeding is per item but solving is per witness, so the pairs
@@ -180,6 +193,7 @@ struct TagPruner {
   void budgetTagUniverse() noexcept;
   void buildMemberIndex() noexcept;
   void buildConsumerIndex() noexcept;
+  void buildQualifiedInputs() noexcept;
   void computeQualifiedInputs() noexcept;
   void computeUnitOutputs() noexcept;
   void allocateTagAdjacency() noexcept;
@@ -225,6 +239,7 @@ void TagPruner::run() noexcept {
   budgetTagUniverse();
   buildMemberIndex();
   buildConsumerIndex();
+  buildQualifiedInputs();
   computeQualifiedInputs();
   computeUnitOutputs();
   allocateTagAdjacency();
@@ -400,7 +415,7 @@ void TagPruner::buildConsumerIndex() noexcept {
       continue;
     
     for (NodeId j : graph.r2i.targetsOf(r)) {
-      if (j >= nReal && j < nItem && allowedTags[j])
+      if (j >= nReal && allowedTags[j])
         tagConsumerOffsets[j]++;
     }
   }
@@ -413,34 +428,60 @@ void TagPruner::buildConsumerIndex() noexcept {
       continue;
     const NodeId m = graph.output[r];
     for (NodeId j : graph.r2i.targetsOf(r))
-      if (j >= nReal && j < nItem && allowedTags[j])
+      if (j >= nReal && allowedTags[j])
         tagConsumerTargets[cursor[j]++] = m;
   }
 }
 
 // ---- Amount-qualified inputs ------------------------------------------
+// A recipe's amount-qualified inputs are the ones a single execution of it
+// consumes at least as much of as the recipe outputs; only those can carry a
+// substitution, because a plan can drop one execution and pay for it with the
+// input. A tag the budget dropped is left out, since it can never justify a
+// pair -- exactly as if the recipe did not list it.
+void TagPruner::buildQualifiedInputs() noexcept {
+  qualInputOffsets.assign(nRecipe, 0);
+  for (uint r = 0; r < nRecipe; r++) {
+    const auto inputs = graph.r2i.targetsOf(r);
+    const auto weights = graph.r2i.weightsOf(r);
+    const Amount out = graph.outputAmt[r];
+    for (size_t k = 0; k < inputs.size(); k++)
+      if (weights[k] >= out && (inputs[k] < nReal || allowedTags[inputs[k]]))
+        qualInputOffsets[r]++;
+  }
+  prefixSum(qualInputOffsets);
+  qualInputItems.resize(qualInputOffsets.back());
+
+  aw::vector<uint> cursor(qualInputOffsets.begin(), qualInputOffsets.end() - 1);
+  for (uint r = 0; r < nRecipe; r++) {
+    const auto inputs = graph.r2i.targetsOf(r);
+    const auto weights = graph.r2i.weightsOf(r);
+    const Amount out = graph.outputAmt[r];
+    for (size_t k = 0; k < inputs.size(); k++) {
+      const NodeId j = inputs[k];
+      if (weights[k] >= out && (j < nReal || allowedTags[j]))
+        qualInputItems[cursor[r]++] = j;
+    }
+  }
+}
+
+// ---- The per-item union of those --------------------------------------
 // Per real item: the real items and simple tags that some recipe of it
-// consumes in an amount at least equal to that recipe's output. Those are the
-// inputs a single execution can rely on; `validItem` repeats the same scan
-// recipe by recipe, and the closure below expands the whole relation.
+// consumes in an amount at least equal to that recipe's output. `validItem`
+// reads the per-recipe lists directly; the closure below expands this union.
 void TagPruner::computeQualifiedInputs() noexcept {
   qualReal.resize(nReal);
   qualTags.resize(nReal);
   for (NodeId m = 0; m < nReal; m++) {
     for (NodeId recipeNode : graph.i2r.targetsOf(m)) {
       const uint r = recipeNode - nItem;
-      const Amount out = graph.outputAmt[r];
-      const auto inputs = graph.r2i.targetsOf(r);
-      const auto weights = graph.r2i.weightsOf(r);
-      for (size_t k = 0; k < inputs.size(); k++) {
-        if (weights[k] < out)
-          continue;
-        const NodeId j = inputs[k];
+      for (uint e = qualInputOffsets[r]; e < qualInputOffsets[r + 1]; e++) {
+        const NodeId j = qualInputItems[e];
         if (j < nReal) {
           // A raw input is gathered, not crafted, so it never requires w.
           if (producible[j])
             qualReal[m].push_back(j);
-        } else if (j < nItem && allowedTags[j]) {
+        } else {
           qualTags[m].push_back(j);
         }
       }
@@ -503,19 +544,13 @@ void TagPruner::seedWitnessPairs() noexcept {
     acc.clear();
     for (NodeId recipeNode : recipes) {
       const uint r = recipeNode - nItem;
-      const Amount out = graph.outputAmt[r];
       scratch.clear();
-      const auto inputs = graph.r2i.targetsOf(r);
-      const auto weights = graph.r2i.weightsOf(r);
-      for (size_t k = 0; k < inputs.size(); k++) {
-        if (weights[k] < out)
-          continue;
-        const NodeId j = inputs[k];
-        if (j < nReal) {
+      for (uint e = qualInputOffsets[r]; e < qualInputOffsets[r + 1]; e++) {
+        const NodeId j = qualInputItems[e];
+        if (j < nReal)
           scratch.push_back(j);
-        } else if (j < nItem && allowedTags[j]) {
+        else
           scratch.insert(scratch.end(), members[j].begin(), members[j].end());
-        }
       }
       sortIds(scratch);
       if (first) {
@@ -735,27 +770,20 @@ bool TagPruner::validTag(NodeId t, NodeId w) noexcept {
 bool TagPruner::validItem(NodeId m, NodeId w) noexcept {
   for (NodeId recipeNode : graph.i2r.targetsOf(m)) {
     const uint r = recipeNode - nItem;
-    const Amount out = graph.outputAmt[r];
-    const auto inputs = graph.r2i.targetsOf(r);
-    const auto weights = graph.r2i.weightsOf(r);
     bool ok = false;
-    for (size_t k = 0; k < inputs.size(); k++) {
-      if (weights[k] < out)
-        continue;
-      const NodeId j = inputs[k];
+    for (uint e = qualInputOffsets[r]; e < qualInputOffsets[r + 1]; e++) {
+      const NodeId j = qualInputItems[e];
+      // Consuming w itself is the strongest justification, and it holds even
+      // for a gathered w, which never carries a pair of its own.
       if (j == w) {
         ok = true;
         break;
       }
-      if (j < nReal) {
-        // Chaining real inputs is the transitive closure; exact mode only
-        // accepts the direct w above. A raw input has no pair, so it fails
-        // the lookup below, which is what we want.
-        if (!nonoptimal)
-          continue;
-      } else if (j >= nItem || !allowedTags[j]) {
+      // Chaining a real input is the transitive closure; exact mode only
+      // accepts the direct w above. A raw input has no pair, so the lookup
+      // below fails for it, which is what we want.
+      if (j < nReal && !nonoptimal)
         continue;
-      }
       if (rowAliveOf(j)) {
         ok = true;
         break;
