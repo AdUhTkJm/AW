@@ -49,6 +49,7 @@
 #include <utility>
 
 #include "aw/plan/Options.h"
+#include "aw/utils/Helpers.h"
 #ifdef AW_PROFILE_PRUNING
 #  include "aw/plan/Profiler.h"
 #endif
@@ -236,101 +237,6 @@ void compositeWorkstations(const CraftingGraph &graph,
 namespace aw {
 namespace {
 
-// Returns true when a * b does not fit in int64_t. `out` is only written when
-// it fits.
-bool mulOverflow(int64_t a, int64_t b, int64_t &out) noexcept {
-  if (a == 0 || b == 0) {
-    out = 0;
-    return false;
-  }
-  const bool overflow = a > 0
-                            ? (b > 0 ? a > INT64_MAX / b : b < INT64_MIN / a)
-                            : (b > 0 ? a < INT64_MIN / b : a < INT64_MAX / b);
-  if (overflow)
-    return true;
-  out = a * b;
-  return false;
-}
-
-bool addOverflow(int64_t a, int64_t b, int64_t &out) noexcept {
-  if (b > 0 ? a > INT64_MAX - b : a < INT64_MIN - b)
-    return true;
-  out = a + b;
-  return false;
-}
-
-// Builds `c = alpha * v_r + v_R`, sorted and unique, into `outItems` / `outCoeffs`.
-// Returns false on integer overflow, which is treated as "cannot prove
-// dominance" by the caller.
-bool buildComposite(int64_t alpha, const RecipeVectors &vec, uint r, uint R,
-                    aw::vector<NodeId> &outItems,
-                    aw::vector<Amount> &outCoeffs) noexcept {
-  const auto ri = vec.itemsOf(r);
-  const auto rc = vec.coeffsOf(r);
-  const auto Ri = vec.itemsOf(R);
-  const auto Rc = vec.coeffsOf(R);
-  outItems.clear();
-  outCoeffs.clear();
-
-  size_t i = 0, j = 0;
-  while (i < ri.size() || j < Ri.size()) {
-    NodeId next = UINT32_MAX;
-    if (i < ri.size())
-      next = std::min(next, ri[i]);
-    if (j < Ri.size())
-      next = std::min(next, Ri[j]);
-
-    Amount coeff = 0;
-    if (i < ri.size() && ri[i] == next) {
-      int64_t scaled = 0;
-      if (mulOverflow(alpha, rc[i], scaled))
-        return false;
-      coeff = scaled;
-      i++;
-    }
-    if (j < Ri.size() && Ri[j] == next) {
-      int64_t sum = 0;
-      if (addOverflow(coeff, Rc[j], sum))
-        return false;
-      coeff = sum;
-      j++;
-    }
-    if (coeff != 0) {
-      outItems.push_back(next);
-      outCoeffs.push_back(coeff);
-    }
-  }
-  return true;
-}
-
-// True when c <= vS componentwise over the union of the two supports. A key
-// present only in vS compares against 0, which is what makes a right-only
-// negative entry (an input the composite does not mention) fail the test.
-bool leVector(std::span<const NodeId> ci, std::span<const Amount> cc,
-              std::span<const NodeId> si, std::span<const Amount> sc) noexcept {
-  size_t i = 0, j = 0;
-  while (i < ci.size() || j < si.size()) {
-    NodeId next = UINT32_MAX;
-    if (i < ci.size())
-      next = std::min(next, ci[i]);
-    if (j < si.size())
-      next = std::min(next, si[j]);
-
-    const Amount c = (i < ci.size() && ci[i] == next) ? cc[i++] : 0;
-    const Amount s = (j < si.size() && si[j] == next) ? sc[j++] : 0;
-    if (c > s)
-      return false;
-  }
-  return true;
-}
-
-bool leZero(std::span<const Amount> cc) noexcept {
-  for (Amount c : cc)
-    if (c > 0)
-      return false;
-  return true;
-}
-
 // Compares two sibling columns after normalizing their output amount to 1: a
 // recipe that yields `out` units has the per-unit column `v / out`. `iLeJ` is
 // set when every coefficient of i / outI is at most the matching coefficient
@@ -377,173 +283,6 @@ void compareNormalized(std::span<const NodeId> ii, std::span<const Amount> ic,
       jLeI = false;
     if (!iLeJ && !jLeI)
       return;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Real-recipe (composite) dominance pruning
-// ---------------------------------------------------------------------------
-// For a real item X with recipes recs, an edge R -> S means S dominates R: for
-// every recipe r producing a real witness input Y of R, the composite
-//
-//   c_r = ceil(q / p_r) * v_r + v_R
-//
-// satisfies c_r <= v_S (replace the pair r, R by one S) or c_r <= 0 (the pair
-// is a net loss). The keep set is one representative per sink SCC of the edge
-// graph, exactly as in the tag pass, so every item keeps at least one recipe.
-// A dominated recipe is only dropped by reachability when its witness input has
-// no inventory and a replacement can actually be run.
-//
-// In nonoptimal mode the inline count is floored instead of
-// rounded up, so a producer that overshoots q is treated as if the excess came
-// for free and more recipes are dominated.
-//
-// Unlike the tag pass, the relation is a pure cost comparison, so R and S may
-// need disjoint workstations and the edge is built regardless. Replacing R by S
-// is only valid when S is usable, which depends on the availability set of the
-// query, so the pass records the workstations of the kept representatives R can
-// reach and reachableSubgraph checks them. The tag pass does not need this
-// because its `requires(m, w)` relation already says m cannot be crafted
-// without w.
-
-void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexcept {
-  graph.recipeDominated.assign(graph.nRecipe, 0);
-  graph.recipeGuardInput.assign(graph.nRecipe, UINT32_MAX);
-  graph.recipeDominatorWorkstations.assign(graph.nRecipe, {});
-
-  const uint nReal = graph.nReal;
-  if (nReal == 0 || graph.nRecipe == 0)
-    return;
-
-  aw::vector<uint32_t> recs;
-  aw::vector<aw::vector<uint32_t>> adj;
-  aw::vector<NodeId> guard;
-
-  aw::vector<NodeId> cItems;
-  aw::vector<Amount> cCoeffs;
-  aw::vector<uint32_t> candidates;
-  aw::vector<uint> adjOffsets;
-  aw::vector<uint32_t> adjTargets;
-  aw::vector<int32_t> comp;
-  aw::vector<uint32_t> repOfComp;
-  aw::vector<uint8_t> keep;
-  aw::vector<aw::vector<NodeId>> compWs;
-
-  for (NodeId X = 0; X < nReal; X++) {
-    const auto recipeNodes = graph.i2r.targetsOf(X);
-    if (recipeNodes.size() < 2)
-      continue;
-    // Comparing every pair of X's recipes costs O(k^2) time and can build a
-    // k^2-edge adjacency. Leave an item with an absurd fan-out unpruned rather
-    // than spend gigabytes on it.
-    if (recipeNodes.size() > options.maxSiblingRecipes)
-      continue;
-
-    recs.clear();
-    recs.reserve(recipeNodes.size());
-    for (NodeId recipeNode : recipeNodes)
-      recs.push_back_unchecked(recipeNode - graph.nItem);
-    const uint k = (uint) recs.size();
-
-    adj.assign(k, {});
-    guard.assign(k, UINT32_MAX);
-    candidates.reserve(k);
-
-    for (uint i = 0; i < k; i++) {
-      const uint R = recs[i];
-      const auto inputs = graph.r2i.targetsOf(R);
-      const auto weights = graph.r2i.weightsOf(R);
-      for (size_t a = 0; a < inputs.size(); a++) {
-        const NodeId Y = inputs[a];
-        if (!graph.isRealItem(Y))
-          continue;
-        const Amount q = weights[a];
-        const auto producers = graph.i2r.targetsOf(Y);
-
-        // The composite has to be at least as good for every producer of Y, so
-        // the inner loop is proportional to producers(Y). Skip a witness that
-        // is itself produced by an absurd number of recipes; that just leaves
-        // R without a guard.
-        if (producers.size() > options.maxWitnessProducers)
-          continue;
-
-        // Every sibling is a candidate: the workstation condition is deferred
-        // to query time, where the availability set is known. If no sibling
-        // qualifies after the producer filter, try the next input rather than
-        // giving up on R.
-        candidates.clear();
-        for (uint j = 0; j < k; j++)
-          if (j != i)
-            candidates.push_back_unchecked(j);
-
-        if (producers.empty()) {
-          // Y cannot be produced. Unless the player holds stock (which the
-          // query-time guard checks), R is unusable, so any sibling is at least
-          // as good.
-          for (uint32_t j : candidates)
-            adj[i].push_back(j);
-          guard[i] = Y;
-          break;
-        }
-
-        for (NodeId producerNode : producers) {
-          const uint r = producerNode - graph.nItem;
-          const Amount p = graph.outputAmt[r];
-          if (p <= 0) {
-            candidates.clear();
-            break;
-          }
-          Amount alpha = q / p;
-          if (!options.nonoptimal && q % p != 0)
-            alpha++;
-          if (!buildComposite(alpha, vec, r, R, cItems, cCoeffs)) {
-            candidates.clear();
-            break;
-          }
-
-          const bool loss = leZero(cCoeffs);
-          size_t kept = 0;
-          for (size_t c = 0; c < candidates.size(); c++) {
-            const uint32_t j = candidates[c];
-            const uint S = recs[j];
-            if (loss || leVector(cItems, cCoeffs, vec.itemsOf(S), vec.coeffsOf(S)))
-              candidates[kept++] = j;
-          }
-          candidates.resize(kept);
-          if (candidates.empty())
-            break;
-        }
-
-        if (!candidates.empty()) {
-          for (uint32_t j : candidates)
-            adj[i].push_back(j);
-          guard[i] = Y;
-          break;  // one witness input is enough; stop scanning inputs
-        }
-      }
-    }
-
-    // One representative per sink SCC.
-    buildAdjacency(adj, adjOffsets, adjTargets);
-    const uint32_t nComp =
-        markSinkRepresentatives(k, adjOffsets, adjTargets, comp, repOfComp, keep);
-
-    // The union of the workstations of every kept representative a node can
-    // reach. Those are the replacements reachableSubgraph may fall back on, so
-    // it drops the node when one of them is available. Tarjan numbers
-    // components in reverse topological order, so a component's successors are
-    // already final when it is processed.
-    compWs.assign(nComp, {});
-    compositeWorkstations(graph, adj, comp, repOfComp, recs, compWs);
-
-    for (uint i = 0; i < k; i++) {
-      if (keep[i])
-        continue;
-      const uint r = recs[i];
-      graph.recipeDominated[r] = 1;
-      graph.recipeGuardInput[r] = guard[i];
-      graph.recipeDominatorWorkstations[r] = compWs[comp[i]];
-    }
   }
 }
 
@@ -738,7 +477,7 @@ void prune(CraftingGraph &graph) noexcept {
     std::fprintf(stderr, "[time] direct dominance pruning: %.6f s\n", aw::since(start));
 #endif
 
-  detail::computeSubstitutionPruning(graph, vec);
+  computeSubstitutionPruning(graph, vec);
 #ifdef AW_PROFILE_PRUNING
   if (options.outputPruningProfile)
     std::fprintf(stderr, "[time] substitution pruning: %.6f s\n", aw::since(start));
@@ -750,7 +489,7 @@ void prune(CraftingGraph &graph) noexcept {
     std::fprintf(stderr, "[time] dead node pruning: %.6f s\n", aw::since(start));
 #endif
 
-  detail::computePackPruning(graph);
+  computePackPruning(graph);
 #ifdef AW_PROFILE_PRUNING
   if (options.outputPruningProfile)
     std::fprintf(stderr, "[time] pack pruning: %.6f s\n", aw::since(start));

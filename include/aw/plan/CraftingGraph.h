@@ -78,7 +78,7 @@ struct BaseCraftingGraph {
 
   [[nodiscard]]
   bool isRealItem(NodeId node) const noexcept {
-    return node < nItem && node < nReal;
+    return node < nReal;
   }
 };
 

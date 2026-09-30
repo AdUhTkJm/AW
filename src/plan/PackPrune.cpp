@@ -29,47 +29,12 @@
 #include "aw/plan/CraftingGraph.h"
 #include "aw/plan/Options.h"
 #include "aw/utils/Int128.h"
+#include "aw/utils/Helpers.h"
 
 namespace aw::detail {
 namespace {
 
 using uint = uint32_t;
-
-// GCC and Clang have the overflow builtins and define __has_builtin; MSVC has
-// neither.
-#if defined(__has_builtin)
-#  if __has_builtin(__builtin_add_overflow) && __has_builtin(__builtin_mul_overflow)
-#    define AW_HAVE_OVERFLOW_BUILTINS 1
-#  endif
-#endif
-
-bool addOverflow(int64_t a, int64_t b, int64_t &out) noexcept {
-#ifdef AW_HAVE_OVERFLOW_BUILTINS
-  return __builtin_add_overflow(a, b, &out);
-#else
-  if (b > 0 ? a > INT64_MAX - b : a < INT64_MIN - b)
-    return true;
-  out = a + b;
-  return false;
-#endif
-}
-
-bool mulOverflow(int64_t a, int64_t b, int64_t &out) noexcept {
-#ifdef AW_HAVE_OVERFLOW_BUILTINS
-  return __builtin_mul_overflow(a, b, &out);
-#else
-  if (a == 0 || b == 0) {
-    out = 0;
-    return false;
-  }
-  const bool over = a > 0 ? (b > 0 ? a > INT64_MAX / b : b < INT64_MIN / a)
-                          : (b > 0 ? a < INT64_MIN / b : a < INT64_MAX / b);
-  if (over)
-    return true;
-  out = a * b;
-  return false;
-#endif
-}
 
 int64_t ceilDiv(int64_t n, int64_t d) noexcept {
   return n / d + (n % d != 0 ? 1 : 0);

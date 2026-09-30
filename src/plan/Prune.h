@@ -72,9 +72,13 @@ void compositeWorkstations(const CraftingGraph &graph,
                           aw::vector<aw::vector<NodeId>> &compWs) noexcept;
 
 
+bool leVector(std::span<const NodeId> ci, std::span<const Amount> cc,
+              std::span<const NodeId> si, std::span<const Amount> sc) noexcept;
+
 void computeTagPruning(CraftingGraph &graph) noexcept;
 void computePackPruning(CraftingGraph& graph) noexcept;
 void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) noexcept;
+void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexcept;
 
 // Query-time re-pruning of a reachable subgraph. Runs the composite, direct and
 // (optionally) pack passes on the workstation-free subgraph and returns one byte

@@ -72,6 +72,7 @@ add_library(aw_crafting STATIC
    src/plan/Plan.cpp
    src/plan/Prune.cpp
    src/plan/Protocol.cpp
+   src/plan/RecipePrune.cpp
    src/plan/SatellitePrune.cpp
    src/plan/SubstitutionPrune.cpp
    src/plan/TagPrune.cpp
@@ -97,9 +98,11 @@ if(AW_STRICT_FLAGS)
       src/plan/Plan.cpp
       src/plan/Prune.cpp
       src/plan/Protocol.cpp
+      src/plan/RecipePrune.cpp
       src/plan/SubstitutionPrune.cpp
       src/plan/TagPrune.cpp
-      PROPERTIES COMPILE_OPTIONS "${AW_STRICT_FLAGS}")
+      PROPERTIES COMPILE_OPTIONS "${AW_STRICT_FLAGS}"
+   )
 endif()
 
 # The item search index. It is deliberately independent of OR-Tools and of
