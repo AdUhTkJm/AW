@@ -3219,6 +3219,8 @@ int main() {
   // below -- which assert that pruning preserves the optimum -- must run with
   // it off. The dedicated testNonoptimal exercises the relaxed behaviour.
   aw::options.nonoptimal = false;
+  aw::options.tagInlining = aw::TagInlineMode::OFF;
+  aw::options.reprune.enabled = false;
 
   testSample();
   testRejectsBadInput();

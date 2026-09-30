@@ -632,9 +632,6 @@ int main(int argc, char **argv) {
   // installed once here and every stage/group query below sees it.
   aw::options.reprune.enabled = reprune;
   aw::options.reprune.exact = repruneExact;
-  aw::options.reprune.pack = reprunePack;
-  aw::options.reprune.packSeconds = reprunePackSeconds;
-
   std::ofstream out(outPath);
   if (!out) {
     std::fprintf(stderr, "cannot write %s\n", outPath.c_str());

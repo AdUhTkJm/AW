@@ -1102,6 +1102,7 @@ int main(int argc, char** argv) {
   // Prune profiling is on by default.
 #ifdef AW_PROFILE_PRUNING
   aw::options.outputPruningProfile = true;
+  aw::options.outputRepruningProfile = true;
 #endif
 
   // The certificate pass runs at registration time, so its options have to be

@@ -466,9 +466,13 @@ bool matchHandle(const TextIndex &text, uint32_t handle,
 
 void buildSearchIndex(const TextIndex &text) {
   SearchIndex index;
-  if (!text.empty())
+  if (text.empty()) {
+    // An empty corpus must also clear the derived index; otherwise stale
+    // ranges would outlive the strings they point into.
+    gIndex = std::move(index);
     return;
-  
+  }
+
   index.empty = false;
   index.handles.resize(text.handleCount + 1);
   std::vector<ReadingList> chars;

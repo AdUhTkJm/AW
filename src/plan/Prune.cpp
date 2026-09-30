@@ -765,6 +765,9 @@ namespace detail {
 // pruning vectors are written, so the copy is the whole cost.
 aw::vector<uint8_t> repruneSubgraph(const Subgraph &sub,
                                     std::span<const Amount> sourceInventory) noexcept {
+#ifdef AW_PROFILE_PRUNING
+  auto start = std::chrono::steady_clock::now();
+#endif
   const uint nRecipe = sub.graph.nRecipe;
   aw::vector<uint8_t> drop(nRecipe, 0);
   if (!options.reprune.enabled || nRecipe == 0)
@@ -783,22 +786,44 @@ aw::vector<uint8_t> repruneSubgraph(const Subgraph &sub,
   g.tagEdgeDominated.assign(nRecipe, 0);
 
   const bool savedNonoptimal = options.nonoptimal;
-  const bool savedPack = options.pack.enabled;
-  const double savedPackSeconds = options.pack.maxSeconds;
   options.nonoptimal = !options.reprune.exact;
-  options.pack.enabled = options.reprune.pack;
-  if (options.reprune.pack && options.reprune.packSeconds > 0.0)
-    options.pack.maxSeconds = options.reprune.packSeconds;
+
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputRepruningProfile)
+    std::fprintf(stderr, "[time/reprune] copy graph: %.6f s\n", aw::since(start));
+#endif
 
   RecipeVectors vec(g);
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputRepruningProfile)
+    std::fprintf(stderr, "[time/reprune] construct recipe vectors: %.6f s\n", aw::since(start));
+#endif
+
   computeRecipePruning(g, vec);
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputRepruningProfile)
+    std::fprintf(stderr, "[time/reprune] recipe pruning: %.6f s\n", aw::since(start));
+#endif
+
   computeDirectDominancePruning(g, vec);
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputRepruningProfile)
+    std::fprintf(stderr, "[time/reprune] direct pruning: %.6f s\n", aw::since(start));
+#endif
+
   computeDeadnodePruning(g);
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputRepruningProfile)
+    std::fprintf(stderr, "[time/reprune] dead node pruning: %.6f s\n", aw::since(start));
+#endif
+
   computePackPruning(g);
+#ifdef AW_PROFILE_PRUNING
+  if (options.outputRepruningProfile)
+    std::fprintf(stderr, "[time/reprune] pack pruning: %.6f s\n", aw::since(start));
+#endif
 
   options.nonoptimal = savedNonoptimal;
-  options.pack.enabled = savedPack;
-  options.pack.maxSeconds = savedPackSeconds;
 
   // Stock of a subgraph item, read through the remapping.
   const auto held = [&](NodeId subItem) noexcept -> Amount {

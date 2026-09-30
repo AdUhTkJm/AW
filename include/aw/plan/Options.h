@@ -64,33 +64,17 @@ struct PackPruneOptions {
   double maxSeconds = 60.0;
 };
 
-// Query-time re-pruning of the reachable subgraph. Off by default; it is an
-// experiment.
-//
-// The registration-time dominance passes run on the whole graph, where the
-// workstation and stock guards cannot be resolved. By the time reachability has
-// finished, the subgraph holds only recipes the query can actually run, so the
-// cheap passes can be run again on it: the composite and direct passes no
-// longer need a workstation guard (a dominator that is present is runnable), and
-// a single-member tag inlined just before them removes the pseudo-node the
-// composite pass could not see through. Only recipes with a real output are
-// dropped here; the tag edges keep their own passes.
+// Query-time re-pruning of the reachable subgraph. This might give us more
+// per-query information.
 struct SubgraphRepruneOptions {
-  bool enabled = false;
+  bool enabled = true;
 
-  // Re-run the pack certificates on the subgraph too.
-  bool pack = true;
-
-  // Use the exact relation instead of the nonoptimal relaxation. Exact is the
-  // safe default; the relaxation was only argued for one application on the
-  // whole graph, see Prune.cpp.
+  // Use the exact relation instead of the nonoptimal relaxation.
+  // The nonoptimal mode might cause solution downgrade.
   bool exact = true;
-
-  // Wall-clock budget for the pack pass on the subgraph. <= 0 means no limit.
-  double packSeconds = 0.3;
 };
 
-// Budget for the satellite-elimination pass (docs/algorithm.typ, "孤岛消除").
+// Budget for the satellite-elimination pass.
 //
 // The pass runs inside reachableSubgraph, where the target and the inventory
 // are known: it looks for groups of recipes whose only net output to the rest
@@ -127,35 +111,22 @@ struct SatellitePruneOptions {
 // graph; the query-time ones (satellite elimination, seed pruning and the
 // query-time half of tag inlining) can be flipped at any time.
 struct Options {
-  // Integrality relaxation for the dominance passes. On by default. Exact mode
-  // (false) keeps every guard the relaxed relation drops and computes the
-  // exact cost relation instead; see Prune.cpp for the precise difference.
+  // Integrality relaxation for the dominance passes. On by default.
   bool nonoptimal = true;
-
-  // Dominance pruning switches. All on by default; each pass exists so it can
-  // be A/B tested against the unpruned graph.
+  
   bool tagPruning = true;
   bool recipePruning = true;
   bool directPruning = true;
   bool substitutionPruning = true;
-
-  // Seed-reachability pruning. Drops every recipe with an input that cannot be
-  // produced from the player's stock; input-less recipes are the seeds. Such a
-  // recipe can never be executed, because the balance the solver sees is a net
-  // condition and does not know that a consumed item has to exist before the
-  // recipe runs. This also covers the acyclic dead branches that dead-node
-  // cleanup used to remove -- a zero-stock item with no surviving producer is
-  // simply never attainable -- so there is no separate dead-node pass. Sound
-  // (never removes a realizable recipe) and toggleable. See docs/algorithm.typ,
-  // "启动可达性".
   bool seedPruning = true;
 
 #ifdef AW_PROFILE_PRUNING
   bool outputPruningProfile = false;
+  bool outputRepruningProfile = false;
 #endif
 
   // Where single-use tag inlining runs. Read at registration time.
-  TagInlineMode tagInlining = TagInlineMode::OFF;
+  TagInlineMode tagInlining = TagInlineMode::QUERY_TIME;
 
   // The single-member half of the inliner, see inlineSingleUseTagsCore. On by
   // default; it is a plain substitution and never grows the recipe list, but it
