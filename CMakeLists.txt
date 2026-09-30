@@ -169,6 +169,13 @@ if(AW_BUILD_TOOLS)
    target_link_libraries(aw_bench PRIVATE aw_crafting)
    target_compile_options(aw_bench PRIVATE ${AW_STRICT_FLAGS})
 
+   # SCC probe: measures how much of a strongly connected component survives
+   # the pruning passes, on the real reachableSubgraph rather than a Python
+   # re-implementation. See tools/SccProbe.cpp.
+   add_executable(aw_scc tools/SccProbe.cpp)
+   target_link_libraries(aw_scc PRIVATE aw_crafting)
+   target_compile_options(aw_scc PRIVATE ${AW_STRICT_FLAGS})
+
    # Development-only CPU profiling (gperftools). It is linked in whenever the
    # library is installed, but only into awr_inspect, and it only does anything
    # when the tool is run with --profile. aw_crafting, aw_jni and the Windows
