@@ -2,6 +2,8 @@
 #include "aw/plan/Options.h"
 #include <algorithm>
 
+#define CHECK_WORK [[unlikely]] if (work == 0) break
+
 namespace aw::detail {
 
 struct ColumnView {
@@ -97,10 +99,6 @@ void addToColumn(const ColumnView &col,
 struct CostContext {
   const CraftingGraph *graph = nullptr;
   aw::vector<aw::vector<NodeId>> tagMembers;
-  // Exact mode only: an item whose producers can emit a batch has a surplus a
-  // plan can spend for free, so the per-unit bound is not enough. Requiring
-  // every item on the chain to be unit-output removes the surplus.
-  bool requireUnit = false;
 
   // member -> real recipes that consume it as an amount-qualified input. A
   // synthetic tag recipe is left out: a tag is the AND over its members, not
@@ -130,50 +128,51 @@ struct CostContext {
   aw::vector<uint8_t> rowDone;             // nItem
   aw::vector<aw::vector<NodeId>> rowTrue;  // nItem
 
+  // Temporary vectors, extracted to avoid repeated vector construction/destruction.
+  aw::vector<NodeId> tmpItems, nextItems;
+  aw::vector<Amount> tmpCoeffs, nextCoeffs;
+
   uint64_t work;
-  uint64_t trueTotal = 0;
-  bool exhausted = false;
 
   CostContext(const CraftingGraph &graph, uint64_t work)
       : graph(&graph), work(work) {}
 
-  void build(const aw::vector<uint8_t> &unitOutput) noexcept;
+  void build(bool requireUnit, const aw::vector<uint8_t> &unitOutput) noexcept;
 };
 
 // Precomputes the two inverted indices the row closure walks: recipes per
 // amount-qualified input, and eligible simple tags per real member.
-void CostContext::build(const aw::vector<uint8_t> &unitOutput) noexcept {
+void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput) noexcept {
   const CraftingGraph &g = *graph;
 
   aw::vector<uint8_t> tagEligible(g.nItem, 0);
-  aw::vector<uint32_t> tagCount(g.nItem, 0);
   for (NodeId t = g.nReal; t < g.nItem; t++) {
     const aw::vector<NodeId> &ms = tagMembers[t];
     if (ms.empty())
       continue;
     bool ok = true;
-    for (NodeId z : ms)
+    for (NodeId z : ms) {
       if (requireUnit && !unitOutput[z]) {
         ok = false;
         break;
       }
+    }
     tagEligible[t] = ok;
-    tagCount[t] = (uint32_t) ms.size();
   }
 
-  // Recipes per amount-qualified input, real recipes only.
-  aw::vector<uint32_t> counts(g.nItem, 0);
+  // Recipes per amount-qualified input. Skip tags.
+  qualOffsets.assign(g.nItem, 0);
   for (uint r = 0; r < g.nRecipe; r++) {
     if (g.output[r] >= g.nReal)
       continue;
     const Amount out = g.outputAmt[r];
     const auto inputs = g.r2i.targetsOf(r);
     const auto weights = g.r2i.weightsOf(r);
-    for (size_t k = 0; k < inputs.size(); k++)
+    for (size_t k = 0; k < inputs.size(); k++) {
       if (weights[k] >= out)
-        counts[inputs[k]]++;
+        qualOffsets[inputs[k]]++;
+    }
   }
-  qualOffsets = counts;
   prefixSum(qualOffsets);
   qualRecipes.resize(qualOffsets.back());
   aw::vector<uint32_t> cursor(qualOffsets.begin(), qualOffsets.end() - 1);
@@ -183,25 +182,29 @@ void CostContext::build(const aw::vector<uint8_t> &unitOutput) noexcept {
     const Amount out = g.outputAmt[r];
     const auto inputs = g.r2i.targetsOf(r);
     const auto weights = g.r2i.weightsOf(r);
-    for (size_t k = 0; k < inputs.size(); k++)
+    for (size_t k = 0; k < inputs.size(); k++) {
       if (weights[k] >= out)
         qualRecipes[cursor[inputs[k]]++] = r;
+    }
   }
 
   // Eligible tags per real member.
-  counts.assign(g.nReal, 0);
-  for (NodeId t = g.nReal; t < g.nItem; t++)
+  aw::vector<uint32_t> counts(g.nReal, 0);
+  for (NodeId t = g.nReal; t < g.nItem; t++) {
     if (tagEligible[t])
       for (NodeId z : tagMembers[t])
         counts[z]++;
+  }
+
   memberTagOffsets = counts;
   prefixSum(memberTagOffsets);
   memberTagTargets.resize(memberTagOffsets.back());
   cursor.assign(memberTagOffsets.begin(), memberTagOffsets.end() - 1);
-  for (NodeId t = g.nReal; t < g.nItem; t++)
+  for (NodeId t = g.nReal; t < g.nItem; t++) {
     if (tagEligible[t])
       for (NodeId z : tagMembers[t])
         memberTagTargets[cursor[z]++] = t;
+  }
 
   recipeCount.assign(g.nReal, 0);
   realEligible.assign(g.nReal, 0);
@@ -226,11 +229,6 @@ void CostContext::build(const aw::vector<uint8_t> &unitOutput) noexcept {
 void addRowItem(CostContext &ctx, NodeId x, uint32_t level) noexcept {
   if (ctx.stamp[x] == ctx.gen)
     return;
-  if (ctx.trueTotal >= options.maxCostMemo) {
-    ctx.exhausted = true;
-    return;
-  }
-  ctx.trueTotal++;
   ctx.stamp[x] = ctx.gen;
   ctx.level[x] = level;
   ctx.queue.push_back(x);
@@ -253,10 +251,9 @@ void computeRow(CostContext &ctx, NodeId w) noexcept {
 
   const CraftingGraph &g = *ctx.graph;
   for (size_t head = 0; head < ctx.queue.size(); head++) {
-    if (ctx.work == 0) {
-      ctx.exhausted = true;
+    if (ctx.work == 0)
       return;
-    }
+    
     ctx.work--;
     const NodeId x = ctx.queue[head];
     const uint32_t lx = ctx.level[x];
@@ -266,10 +263,9 @@ void computeRow(CostContext &ctx, NodeId w) noexcept {
 
     // Any qualified input of a recipe satisfies that recipe outright.
     for (uint32_t e = ctx.qualOffsets[x]; e < ctx.qualOffsets[x + 1]; e++) {
-      if (ctx.work == 0) {
-        ctx.exhausted = true;
+      if (ctx.work == 0)
         return;
-      }
+      
       ctx.work--;
       const uint32_t r = ctx.qualRecipes[e];
       if (ctx.recipeSat[r] == ctx.gen)
@@ -291,10 +287,9 @@ void computeRow(CostContext &ctx, NodeId w) noexcept {
     if (x >= g.nReal)
       continue;
     for (uint32_t e = ctx.memberTagOffsets[x]; e < ctx.memberTagOffsets[x + 1]; e++) {
-      if (ctx.work == 0) {
-        ctx.exhausted = true;
+      if (ctx.work == 0)
         return;
-      }
+      
       ctx.work--;
       const NodeId t = ctx.memberTagTargets[e];
       if (ctx.rmStamp[t] != ctx.gen) {
@@ -316,12 +311,8 @@ void computeRow(CostContext &ctx, NodeId w) noexcept {
 bool costs(CostContext &ctx, NodeId y, NodeId w) noexcept {
   if (y == w)
     return true;
-  if (ctx.exhausted)
-    return false;
   if (!ctx.rowDone[w])
     computeRow(ctx, w);
-  if (ctx.exhausted)
-    return false;
   const aw::vector<NodeId> &row = ctx.rowTrue[w];
   return std::binary_search(row.begin(), row.end(), y);
 }
@@ -369,9 +360,8 @@ bool substitutionDominates(CostContext &ctx, const ColumnView &cur, const Column
   if (deficit <= 0)
     return false;
 
-  aw::vector<NodeId> tmpItems, nextItems;
-  aw::vector<Amount> tmpCoeffs, nextCoeffs;
-
+  ctx.tmpItems.clear();
+  ctx.nextCoeffs.clear();
   for (size_t k = 0; k < cur.size(); k++) {
     const NodeId y = cur.items[k];
     const Amount coeff = cur.coeffs[k];
@@ -387,12 +377,12 @@ bool substitutionDominates(CostContext &ctx, const ColumnView &cur, const Column
     if (t <= 0)
       continue;
 
-    addToColumn(cur, y, t, tmpItems, tmpCoeffs);
-    addToColumn(ColumnView(tmpItems, tmpCoeffs), d, -t, nextItems, nextCoeffs);
+    addToColumn(cur, y, t, ctx.tmpItems, ctx.tmpCoeffs);
+    addToColumn(ColumnView(ctx.tmpItems, ctx.tmpCoeffs), d, -t, ctx.nextItems, ctx.nextCoeffs);
 
     const size_t before = collapses.size();
     collapses.push_back_unchecked(y);
-    if (substitutionDominates(ctx, ColumnView(nextItems, nextCoeffs), s,
+    if (substitutionDominates(ctx, ColumnView(ctx.nextItems, ctx.nextCoeffs), s,
                               depth - 1, work, collapses))
       return true;
     collapses.resize(before);
@@ -467,8 +457,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
   if (nReal == 0 || graph.nRecipe == 0)
     return;
 
-  // Simple tags and their members, matching the tag pass's definition: every
-  // synthetic recipe has exactly one real input and no workstation.
+  // Collect tags and members. TODO: can we reuse it from tag prune?
   aw::vector<aw::vector<NodeId>> tagMembers(nItem);
   for (NodeId t = nReal; t < nItem; t++) {
     const auto recipes = graph.i2r.targetsOf(t);
@@ -476,19 +465,11 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
       continue;
     aw::vector<NodeId> ms;
     ms.reserve(recipes.size());
-    bool simple = true;
     for (NodeId recipeNode : recipes) {
       const uint r = recipeNode - graph.nItem;
       const auto inputs = graph.r2i.targetsOf(r);
-      if (!graph.workstations.targetsOf(r).empty() || inputs.size() != 1 ||
-          inputs[0] >= nReal) {
-        simple = false;
-        break;
-      }
       ms.push_back_unchecked(inputs[0]);
     }
-    if (!simple)
-      continue;
     std::sort(ms.begin(), ms.end());
     ms.erase(std::unique(ms.begin(), ms.end()), ms.end());
     // A catch-all tag is neither worth a per-recipe guard list nor cheap to
@@ -498,23 +479,23 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
     tagMembers[t] = std::move(ms);
   }
 
-  // Exact mode needs the batching guard; nonoptimal mode waives it, as the tag
-  // pass does.
+  // Batching guard on exact mode.
   aw::vector<uint8_t> unitOutput;
   if (!options.nonoptimal) {
     unitOutput.assign(nItem, 1);
-    for (NodeId m = 0; m < nReal; m++)
-      for (NodeId recipeNode : graph.i2r.targetsOf(m))
+    for (NodeId m = 0; m < nReal; m++) {
+      for (NodeId recipeNode : graph.i2r.targetsOf(m)) {
         if (graph.outputAmt[recipeNode - graph.nItem] != 1) {
           unitOutput[m] = 0;
           break;
         }
+      }
+    }
   }
 
   CostContext ctx(graph, options.maxSubstitutionCostWork);
-  ctx.requireUnit = !options.nonoptimal;
   ctx.tagMembers = std::move(tagMembers);
-  ctx.build(unitOutput);
+  ctx.build(!options.nonoptimal, unitOutput);
 
   uint64_t work = options.maxSubstitutionWork;
   size_t guardTotal = 0;
@@ -534,7 +515,9 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
   // The recursive search abandons any branch that would exceed the depth cap.
   collapses.reserve(options.maxSubstitutionDepth);
 
-  for (NodeId X = 0; X < nReal && work != 0; X++) {
+  recs.reserve(options.maxSiblingRecipes);
+  for (NodeId X = 0; X < nReal; X++) {
+    CHECK_WORK;
     const auto recipeNodes = graph.i2r.targetsOf(X);
     if (recipeNodes.size() < 2)
       continue;
@@ -542,19 +525,20 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
       continue;
 
     recs.clear();
-    recs.reserve(recipeNodes.size());
     for (NodeId recipeNode : recipeNodes)
       recs.push_back_unchecked(recipeNode - graph.nItem);
-    const uint k = (uint) recs.size();
+    const uint k = recs.size();
 
     adj.assign(k, {});
     edgeGuards.assign(k, {});
 
-    for (uint i = 0; i < k && work != 0; i++) {
+    for (uint i = 0; i < k; i++) {
+      CHECK_WORK;
       const uint R = recs[i];
       const auto uItems = vec.itemsOf(R);
       const auto uCoeffs = vec.coeffsOf(R);
-      for (uint j = 0; j < k && work != 0; j++) {
+      for (uint j = 0; j < k; j++) {
+        CHECK_WORK;
         if (i == j)
           continue;
         const uint S = recs[j];

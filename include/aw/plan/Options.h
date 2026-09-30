@@ -229,8 +229,6 @@ struct Options {
   // Longest derivation chain the cost relation accepts, taking one qualified
   // input per recipe.
   uint32_t maxCostDepth = 16;
-  // Cap on the total true pairs cached across every witness row.
-  size_t maxCostMemo = 1'000'000;
   size_t maxSubstitutionGuardItems = 256;
   size_t maxSubstitutionGuardTotal = 1'000'000;
 

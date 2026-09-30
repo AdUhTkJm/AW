@@ -268,7 +268,6 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
         !readU64(j, "maxSubstitutionCostWork", next.maxSubstitutionCostWork, error) ||
         !readU32(j, "maxSubstitutionDepth", next.maxSubstitutionDepth, error) ||
         !readU32(j, "maxCostDepth", next.maxCostDepth, error) ||
-        !readSize(j, "maxCostMemo", next.maxCostMemo, error) ||
         !readSize(j, "maxSubstitutionGuardItems", next.maxSubstitutionGuardItems, error) ||
         !readSize(j, "maxSubstitutionGuardTotal", next.maxSubstitutionGuardTotal, error) ||
         !readI64(j, "maxNeed", next.maxNeed, error) ||
@@ -381,7 +380,6 @@ std::string plannerOptionsJson() noexcept {
     j["maxSubstitutionCostWork"] = options.maxSubstitutionCostWork;
     j["maxSubstitutionDepth"] = options.maxSubstitutionDepth;
     j["maxCostDepth"] = options.maxCostDepth;
-    j["maxCostMemo"] = options.maxCostMemo;
     j["maxSubstitutionGuardItems"] = options.maxSubstitutionGuardItems;
     j["maxSubstitutionGuardTotal"] = options.maxSubstitutionGuardTotal;
     j["maxNeed"] = options.maxNeed;
