@@ -1,24 +1,94 @@
 #include "Prune.h"
 #include "aw/plan/Options.h"
 #include "aw/utils/Helpers.h"
+#include <cstdio>
 
 namespace aw::detail {
 
+FILE *f = fopen("temp/a.txt", "w");
+
+// NOTE: This is linked against other translation units.
+// We don't use it in this particular file, but we cannot delete it.
 bool leVector(std::span<const NodeId> ci, std::span<const Amount> cc,
               std::span<const NodeId> si, std::span<const Amount> sc) noexcept {
   size_t i = 0, j = 0;
-  while (i < ci.size() || j < si.size()) {
-    NodeId next = UINT32_MAX;
-    if (i < ci.size())
-      next = std::min(next, ci[i]);
-    if (j < si.size())
-      next = std::min(next, si[j]);
+  const size_t c_size = ci.size();
+  const size_t s_size = si.size();
 
-    const Amount c = (i < ci.size() && ci[i] == next) ? cc[i++] : 0;
-    const Amount s = (j < si.size() && si[j] == next) ? sc[j++] : 0;
-    if (c > s)
-      return false;
+  // Shared part, where both sides have elements.
+  while (i < c_size && j < s_size) {
+    const NodeId c_id = ci[i];
+    const NodeId s_id = si[j];
+
+    if (c_id == s_id) {
+      if (cc[i] > sc[j])
+        return false;
+      ++i;
+      ++j;
+    } else if (c_id < s_id) {
+      if (cc[i] > 0)
+        return false;
+      ++i;
+    } else {
+      if (sc[j] < 0)
+        return false;
+      ++j;
+    }
   }
+
+  // Now the remaining items for c and s.
+  while (i < c_size) {
+    if (cc[i] > 0)
+      return false;
+    ++i;
+  }
+  while (j < s_size) {
+    if (sc[j] < 0)
+      return false;
+    ++j;
+  }
+
+  return true;
+}
+
+[[gnu::always_inline]]
+inline bool leVectorRaw(const NodeId *ci, const Amount *cc, size_t c_size,
+                 const NodeId *si, const Amount *sc, size_t s_size) noexcept {
+  size_t i = 0, j = 0;
+
+  // Shared part, where both sides have elements.
+  while (i < c_size && j < s_size) {
+    const NodeId cid = ci[i];
+    const NodeId sid = si[j];
+
+    if (cid == sid) {
+      if (cc[i] > sc[j])
+        return false;
+      ++i;
+      ++j;
+    } else if (cid < sid) {
+      if (cc[i] > 0)
+        return false;
+      ++i;
+    } else {
+      if (sc[j] < 0)
+        return false;
+      ++j;
+    }
+  }
+
+  // Now the remaining items for c and s.
+  while (i < c_size) {
+    if (cc[i] > 0)
+      return false;
+    ++i;
+  }
+  while (j < s_size) {
+    if (sc[j] < 0)
+      return false;
+    ++j;
+  }
+
   return true;
 }
 
@@ -186,7 +256,10 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
           for (size_t c = 0; c < candidates.size(); c++) {
             const uint32_t j = candidates[c];
             const uint S = recs[j];
-            if (loss || leVector(cItems, cCoeffs, vec.itemsOf(S), vec.coeffsOf(S)))
+            auto sBegin = vec.items.data() + vec.offsets[S];
+            auto sCoeffBegin = vec.coeffs.data() + vec.offsets[S];
+            const auto size = vec.offsets[S + 1] - vec.offsets[S];
+            if (loss || leVectorRaw(cItems.data(), cCoeffs.data(), cItems.size(), sBegin, sCoeffBegin, size))
               candidates[kept++] = j;
           }
           candidates.resize(kept);
