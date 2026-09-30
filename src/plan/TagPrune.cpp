@@ -31,6 +31,14 @@ using uint = uint32_t;
 
 namespace {
 
+// rowState flags of the row being fixed: the pair's first component is in the
+// row, its pair is still alive, and it sits in the worklist.
+enum RowFlag : uint8_t {
+  ROW_IN = 1,
+  ROW_ALIVE = 2,
+  ROW_QUEUED = 4,
+};
+
 void prefixSum(aw::vector<uint> &v) noexcept {
   v.insert(v.begin(), 0);
   for (uint i = 0; i + 1 < v.size(); i++)
@@ -131,11 +139,10 @@ struct TagPruner {
 
   // The witness row currently being solved. Pairs carry their first component
   // only, because their witness is the row being processed. `rowItems` and
-  // `rowTags` are sorted and unique, `rowX` is their sorted union and
-  // `rowAlive` is parallel to `rowX`. The rows of one witness are independent,
-  // so a row is thrown away as soon as it is fixed.
+  // `rowTags` are sorted and unique and `rowX` is their sorted union. The rows
+  // of one witness are independent, so a row is thrown away as soon as it is
+  // fixed.
   aw::vector<NodeId> rowItems, rowTags, rowX;
-  aw::vector<uint8_t> rowAlive;
   aw::vector<NodeId> candRow;
 
   // Scratch bitmap over the item id universe, one bit per item, always left
@@ -149,14 +156,15 @@ struct TagPruner {
   aw::vector<uint> tagAdjOffsets;          // nItem + 1
   aw::vector<uint64_t> tagAdjBits;
 
-  // Scratch for the witness row currently being fixed. rowSlots is an
-  // open-addressed x -> row-local id + 1 map (0 is empty), sized to at least
-  // twice the row; rowQueue / rowQueued are the fixpoint worklist.
-  aw::vector<uint32_t> rowSlots;
-  uint rowMask = 0;
-  uint rowShift = 0;
-  aw::vector<uint32_t> rowQueue;
-  aw::vector<uint8_t> rowQueued;
+  // State of the pairs of the witness row currently being fixed, indexed by
+  // first component: a byte per item holding the ROW_* flags. The row is small
+  // next to the universe and every lookup is on one of its ids, so the few
+  // lines it touches stay in cache and a flat array answers in one load -- no
+  // hash, no probe, no parallel id array.
+  aw::vector<uint8_t> rowState;            // nItem
+  // The fixpoint worklist. It holds first components, not row-local ids, so a
+  // pop needs no second lookup and the queue cannot outlive the row.
+  aw::vector<NodeId> rowQueue;
 
   // Batching guard, see computeUnitOutputs(). Empty in nonoptimal mode.
   aw::vector<uint8_t> unitOutput;          // nItem
@@ -187,11 +195,12 @@ struct TagPruner {
   bool seedRow(NodeId w) noexcept;
   // Expands that row to its closure; nonoptimal mode only.
   void rowClosure(NodeId w) noexcept;
-  // Builds the row-local lookup for the seeds of seedRow().
+  // Marks the pairs of the row as present and alive in rowState.
   void beginRow() noexcept;
-  // The row-local id of x, or UINT32_MAX when it is not in the row. Only valid
-  // until the next beginRow().
-  uint32_t rowIdOf(NodeId x) const noexcept;
+  // Clears those marks again.
+  void endRow() noexcept;
+  // True while the pair (x, w) of the row being fixed is alive.
+  bool rowAliveOf(NodeId x) const noexcept;
   // Kills the row's unjustified pairs until convergence.
   void fixRow(NodeId w) noexcept;
   // Copies the row's alive co-member edges into tagAdjBits.
@@ -211,6 +220,7 @@ void TagPruner::run() noexcept {
     return;
 
   idBits.assign((nItem + 63) / 64, 0);
+  rowState.assign(nItem, 0);
   findSimpleTags();
   budgetTagUniverse();
   buildMemberIndex();
@@ -226,6 +236,7 @@ void TagPruner::run() noexcept {
       continue;
     fixRow(w);
     recordRowScc(w);
+    endRow();
   }
   pruneDominatedEdges();
 }
@@ -627,50 +638,43 @@ void TagPruner::rowClosure(NodeId w) noexcept {
 }
 
 // ---- Row-local lookup --------------------------------------------------
-// One open-addressed table answers (x, w) with a row-local id, since the row
-// is the only witness in play. The table is sized to at least twice the row,
-// so the load factor stays below 1/2; it is rebuilt per row from scratch.
+// The row is the only witness in play, so a pair is identified by its first
+// component alone and one flat array over the item universe answers all three
+// questions the fixpoint asks about it: is it in the row, is it still alive,
+// is it queued. See rowState.
 void TagPruner::beginRow() noexcept {
-  const uint k = (uint) rowX.size();
-  uint cap = 1, bits = 0;
-  while (cap < 2 * k) {
-    cap <<= 1;
-    bits++;
-  }
-  rowSlots.assign(cap, 0);
-  rowMask = cap - 1;
-  rowShift = 32 - bits;
-  for (uint id = 0; id < k; id++) {
-    uint s = (rowX[id] * 2654435761u) >> rowShift;
-    while (rowSlots[s] != 0)
-      s = (s + 1) & rowMask;
-    rowSlots[s] = id + 1;
-  }
+  for (NodeId x : rowX)
+    rowState[x] = ROW_IN | ROW_ALIVE;
 }
 
-uint32_t TagPruner::rowIdOf(NodeId x) const noexcept {
-  uint s = (x * 2654435761u) >> rowShift;
-  for (;;) {
-    const uint v = rowSlots[s];
-    if (v == 0)
-      return UINT32_MAX;
-    if (rowX[v - 1] == x)
-      return v - 1;
-    s = (s + 1) & rowMask;
+void TagPruner::endRow() noexcept {
+  for (NodeId x : rowX)
+    rowState[x] = 0;
+}
+
+bool TagPruner::rowAliveOf(NodeId x) const noexcept {
+  return (rowState[x] & ROW_ALIVE) != 0;
+}
+
+// Consumes up to `need` units of `item` from `pool`, and returns what is still missing.
+// The sizes are always small (mostly 1 item each), so we use a linear scan.
+Amount consume(aw::vector<std::pair<NodeId, Amount>> &pool, NodeId item,
+               Amount need) noexcept {
+  for (auto &p : pool) {
+    if (p.first != item)
+      continue;
+    const Amount take = std::min(need, p.second);
+    p.second -= take;
+    return need - take;
   }
+  return need;
 }
 
 // ---- Column cover ------------------------------------------------------
 // Besides consuming a dominator (directly or through a tag), a recipe of m
 // can also be replaced by a recipe of the candidate dominator: it must yield
 // at least as much and consume no more of every item, with a simple tag it
-// consumes allowed to pick any member. Swapping the one execution that fed
-// the dropped tag edge is free; the batching guard above is what keeps that
-// from being read as "m can be dropped wholesale". It catches members whose
-// concrete recipes have a dominator-free route (e.g.
-// `_d <- amethyst + quartz_block`) but still consume at least what some
-// dominator route does. The check is budgeted, because the fixpoint may ask
-// for the same pair repeatedly.
+// consumes allowed to pick any member.
 bool TagPruner::covers(uint s, uint r) noexcept {
   if (coverBudget == 0)
     return false;
@@ -683,36 +687,19 @@ bool TagPruner::covers(uint s, uint r) noexcept {
   const auto rw = graph.r2i.weightsOf(r);
   for (size_t j = 0; j < ri.size(); j++)
     cap.emplace_back(ri[j], rw[j]);
-  std::sort(cap.begin(), cap.end(),
-            [](const auto &a, const auto &b) noexcept { return a.first < b.first; });
 
   const auto si = graph.r2i.targetsOf(s);
   const auto sw = graph.r2i.weightsOf(s);
   for (size_t j = 0; j < si.size(); j++) {
     const NodeId h = si[j];
-    Amount need = sw[j];
 
     // An exact row first, so a tag consumed atomically matches itself.
-    auto it = std::lower_bound(
-        cap.begin(), cap.end(), h,
-        [](const auto &p, NodeId v) noexcept { return p.first < v; });
-    if (it != cap.end() && it->first == h) {
-      const Amount take = std::min(need, it->second);
-      it->second -= take;
-      need -= take;
-    }
-    if (need > 0 && h >= nReal && h < nItem && allowedTags[h]) {
+    Amount need = consume(cap, h, sw[j]);
+    if (need > 0 && h >= nReal && allowedTags[h]) {
       for (NodeId z : members[h]) {
         if (need <= 0)
           break;
-        auto jt = std::lower_bound(
-            cap.begin(), cap.end(), z,
-            [](const auto &p, NodeId v) noexcept { return p.first < v; });
-        if (jt != cap.end() && jt->first == z) {
-          const Amount take = std::min(need, jt->second);
-          jt->second -= take;
-          need -= take;
-        }
+        need = consume(cap, z, need);
       }
     }
     if (need > 0)
@@ -735,8 +722,7 @@ bool TagPruner::validTag(NodeId t, NodeId w) noexcept {
   for (NodeId z : members[t]) {
     if (z == w)
       continue;
-    const uint32_t q = rowIdOf(z);
-    if (q == UINT32_MAX || !rowAlive[q])
+    if (!rowAliveOf(z))
       return false;
   }
   return true;
@@ -770,8 +756,7 @@ bool TagPruner::validItem(NodeId m, NodeId w) noexcept {
       } else if (j >= nItem || !allowedTags[j]) {
         continue;
       }
-      const uint32_t q = rowIdOf(j);
-      if (q != UINT32_MAX && rowAlive[q]) {
+      if (rowAliveOf(j)) {
         ok = true;
         break;
       }
@@ -794,56 +779,49 @@ bool TagPruner::validItem(NodeId m, NodeId w) noexcept {
 void TagPruner::fixRow(NodeId w) noexcept {
   beginRow();
   const uint k = (uint) rowX.size();
-  rowAlive.assign(k, 1);
   rowQueue.resize(k);
-  rowQueued.assign(k, 0);
   size_t head = 0, tail = 0, pending = 0;
-  auto push = [&](uint local) noexcept {
-    if (rowQueued[local])
+  auto push = [&](NodeId x) noexcept {
+    if (rowState[x] & ROW_QUEUED)
       return;
-    rowQueued[local] = 1;
-    rowQueue[tail] = local;
+    rowState[x] |= ROW_QUEUED;
+    rowQueue[tail] = x;
     tail++;
     if (tail == k)
       tail = 0;
     pending++;
   };
-  for (uint local = 0; local < k; local++)
-    push(local);
+  for (NodeId x : rowX)
+    push(x);
 
   while (pending != 0) {
-    const uint local = rowQueue[head];
+    const NodeId x = rowQueue[head];
     head++;
     if (head == k)
       head = 0;
     pending--;
-    rowQueued[local] = 0;
-    if (!rowAlive[local])
+    rowState[x] &= (uint8_t) ~ROW_QUEUED;
+    if (!(rowState[x] & ROW_ALIVE))
       continue;
 
-    const NodeId x = rowX[local];
     // A first component at or above nReal is a simple tag: its pair is the
     // AND over its members, not a recipe scan.
     const bool tagPair = x >= nReal;
     if (tagPair ? validTag(x, w) : validItem(x, w))
       continue;
 
-    rowAlive[local] = 0;
+    rowState[x] &= (uint8_t) ~ROW_ALIVE;
     if (tagPair) {
       // The tag lost a member, so every real recipe that consumed it may no
       // longer gate through it.
-      for (uint e = tagConsumerOffsets[x]; e < tagConsumerOffsets[x + 1]; e++) {
-        const uint32_t q = rowIdOf(tagConsumerTargets[e]);
-        if (q != UINT32_MAX)
-          push(q);
-      }
+      for (uint e = tagConsumerOffsets[x]; e < tagConsumerOffsets[x + 1]; e++)
+        if (rowState[tagConsumerTargets[e]] & ROW_IN)
+          push(tagConsumerTargets[e]);
     } else {
       // The item lost, so every tag that contains it lost a supporting member.
-      for (uint e = itemTagOffsets[x]; e < itemTagOffsets[x + 1]; e++) {
-        const uint32_t q = rowIdOf(itemTagTargets[e]);
-        if (q != UINT32_MAX)
-          push(q);
-      }
+      for (uint e = itemTagOffsets[x]; e < itemTagOffsets[x + 1]; e++)
+        if (rowState[itemTagTargets[e]] & ROW_IN)
+          push(itemTagTargets[e]);
     }
   }
 }
@@ -885,10 +863,7 @@ void TagPruner::recordRowScc(NodeId w) noexcept {
         continue;
       const NodeId z = ms[a];
       // Only crafted members carry a pair, hence an edge.
-      if (!producible[z])
-        continue;
-      const uint32_t q = rowIdOf(z);
-      if (q == UINT32_MAX || !rowAlive[q])
+      if (!producible[z] || !rowAliveOf(z))
         continue;
       tagAdjBits[base + a * words + (b >> 6)] |= 1ULL << (b & 63);
     }
