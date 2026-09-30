@@ -3,6 +3,7 @@
 #include "aw/plan/Solver.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 
 namespace aw {
@@ -181,25 +182,67 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
     }
   }
 
-  const solver::Result solved = solver::solve(A, rhs, objective, solveOptions);
-  result.status = solved.status;
-  result.provenOptimal = solved.provenOptimal;
-  result.gap = solved.gap;
-  result.bestBound = solved.bestBound;
-  result.numConflicts = solved.numConflicts;
-  result.numBranches = solved.numBranches;
-  result.fixedColumns = solved.fixedColumns;
-  if (solved.status == PlanStatus::OK) {
+  // Re-solve while the post-solve fireability check rejects the plan. Every
+  // rejected vector becomes a no-good, so the next solve has to return a
+  // different one; see solver::Options::noGoods and PlanStatus. The retries
+  // share the caller's wall-clock budget instead of each getting a fresh one,
+  // so a rejection cannot silently multiply the latency.
+  const double totalBudget = solveOptions.maxTimeSeconds;
+  const bool budgetLimited = totalBudget > 0.0;
+  const auto retryStart = std::chrono::steady_clock::now();
+  const auto budgetLeft = [&]() {
+    return totalBudget - std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                       retryStart)
+                              .count();
+  };
+  int64_t conflicts = 0;
+  int64_t branches = 0;
+  for (int retry = 0;; retry++) {
+    if (budgetLimited) {
+      const double left = budgetLeft();
+      if (left <= 0.0)
+        return result;
+      solveOptions.maxTimeSeconds = left;
+    }
+    const solver::Result solved = solver::solve(A, rhs, objective, solveOptions);
+    conflicts += solved.numConflicts;
+    branches += solved.numBranches;
+    result.numConflicts = conflicts;
+    result.numBranches = branches;
+    if (solved.status != PlanStatus::OK) {
+      // A retry that found nothing proves nothing about the original problem:
+      // the no-goods exclude only the plans already rejected, so a retry's
+      // INFEASIBLE (or ITER_LIMIT) says nothing about the rest. Keep the last
+      // rejection, with its plan, instead of overwriting it. Only a first-solve
+      // failure is reported with the solver's own status.
+      if (result.status == PlanStatus::CYCLE_UNFULFILLED)
+        return result;
+      result.status = solved.status;
+      result.bestBound = solved.bestBound;
+      return result;
+    }
+    result.status = PlanStatus::OK;
+    result.provenOptimal = solved.provenOptimal;
+    result.gap = solved.gap;
+    result.bestBound = solved.bestBound;
+    result.fixedColumns = solved.fixedColumns;
+
     result.exec = solved.x;
     // The solver's balance is a net condition; refuse a plan that cannot be
     // turned into a firing sequence. See planIsFireable and PlanStatus.
-    if (!planIsFireable(sub, invSrc, std::span<const int64_t>(result.exec.data(), result.exec.size()))) {
-      result.status = PlanStatus::CYCLE_UNFULFILLED;
-      result.provenOptimal = false;
-    }
-  }
+    if (planIsFireable(sub, invSrc,
+                      std::span<const int64_t>(result.exec.data(), result.exec.size())))
+      return result;
 
-  return result;
+    result.status = PlanStatus::CYCLE_UNFULFILLED;
+    result.provenOptimal = false;
+    if (retry >= solveOptions.maxCycleRetries)
+      return result;
+    // The rejected plan stays in `result.exec`, so a caller still sees what was
+    // refused. Drop the warm start: it points at the vector just forbidden.
+    solveOptions.noGoods.push_back(solved.x);
+    solveOptions.solutionHint = {};
+  }
 }
 
 }  // namespace aw

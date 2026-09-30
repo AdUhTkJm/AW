@@ -192,6 +192,31 @@ aw::vector<std::byte> buildSeedQuantitySample() {
   return w.out;
 }
 
+// A two-item recycle cycle next to a seed route. `A x5 <- B x1` with
+// `B x2 <- A x1` is net positive, so the balance accepts one execution of each
+// for four A, and that is the cheapest plan; nothing can fire from an empty
+// stock. After the no-good the runner-up starts the loop from the stocked leaf
+// and is fireable, so the retry turns a rejected plan into a real one.
+//
+//   handle 1 (L) leaf, 10 in stock
+//   handle 2 (A) <- r0 (x5, ws [1], input B x1)    recycle
+//                <- r2 (x1, ws [1], input L x1)    seed
+//   handle 3 (B) <- r1 (x2, ws [1], input A x1)    recycle
+//   handle 4 (T) <- r3 (x1, ws [1], input A x4)    target
+aw::vector<std::byte> buildCycleRetrySample() {
+  AwrWriter w;
+  w.header(4, 4);
+  w.item(1, 0);
+  w.item(2, 2);
+  w.recipe(5, {1}, {{3, 1}});
+  w.recipe(1, {1}, {{1, 1}});
+  w.item(3, 1);
+  w.recipe(2, {1}, {{2, 1}});
+  w.item(4, 1);
+  w.recipe(1, {1}, {{2, 4}});
+  return w.out;
+}
+
 // Recipes that differ only in their workstation set are the same LP column,
 // so registration folds them together.
 //
@@ -1209,6 +1234,46 @@ void testFireability() {
     const aw::Subgraph sub = aw::reachableSubgraph(2, all, inventory);
     const aw::PlanResult r = aw::planCrafting(sub, sub.translate(1), 5, inventory);
     expect(r.status == aw::PlanStatus::OK, "two seeds make the cycle fireable");
+  }
+
+  // The no-good retry: the cheapest balance-feasible plan recycles with no
+  // seed, and is rejected; the next cheapest starts the loop from stock and is
+  // returned. With the retry off the same instance still reports the rejection.
+  aw::registerCraftingGraph(buildCycleRetrySample());
+  expect(aw::getCraftingError() == nullptr, "cycle retry sample parses");
+  {
+    const aw::Handle stations[] = {1, 2, 3, 4};
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    aw::vector<aw::Amount> inventory(graph.nItem, 0);
+    inventory[0] = 10;  // handle 1 (L)
+    const aw::Subgraph sub = aw::reachableSubgraph(4, stations, inventory);
+    const aw::NodeId target = sub.translate(3);  // handle 4 (T)
+    expect(target != UINT32_MAX, "the retry target is in the subgraph");
+    expect(sub.graph.nRecipe == 4, "the retry sample keeps every route");
+
+    aw::solver::Options off;
+    off.maxCycleRetries = 0;
+    const aw::PlanResult rejected = aw::planCrafting(sub, target, 1, inventory, off);
+    expect(rejected.status == aw::PlanStatus::CYCLE_UNFULFILLED,
+           "the unseeded recycle plan is rejected when retries are off");
+
+    const aw::PlanResult retried = aw::planCrafting(sub, target, 1, inventory);
+    expect(retried.status == aw::PlanStatus::OK,
+           "the no-good retry finds the seeded plan");
+
+    // The seeding route costs four executions: one seed, one round of each
+    // recycle step, and the target. The rejected plan cost three and used no
+    // seed at all.
+    int64_t total = 0;
+    int64_t seed = 0;
+    for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
+      total += retried.exec[r];
+      const auto inputs = sub.graph.r2i.targetsOf(r);
+      if (inputs.size() == 1 && sub.itemOrigin[inputs[0]] == 0)  // handle 1 (L)
+        seed += retried.exec[r];
+    }
+    expect(total == 4, "the retried plan is the seeded runner-up");
+    expect(seed > 0, "the retried plan draws the seed from stock");
   }
 }
 

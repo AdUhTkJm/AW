@@ -318,13 +318,14 @@ bool applySolverOptionsJson(std::string_view text, std::string &error) noexcept 
         !readI64(j, "objectiveCap", next.objectiveCap, error) ||
         !readI64(j, "objectiveUpperBound", next.objectiveUpperBound, error) ||
         !readDouble(j, "reducedCostGap", next.reducedCostGap, error) ||
+        !readInt(j, "maxCycleRetries", next.maxCycleRetries, error) ||
         !readBool(j, "flash", next.flash, error))
       return false;
 
     if (!checkKnown(j,
                     {"relativeGap", "absoluteGap", "maxTimeSeconds", "numWorkers",
                      "randomSeed", "objectiveCap", "objectiveUpperBound",
-                     "reducedCostGap", "flash"},
+                     "reducedCostGap", "maxCycleRetries", "flash"},
                     error))
       return false;
 
@@ -401,6 +402,7 @@ std::string solverOptionsJson() noexcept {
     j["objectiveCap"] = solverOptions.objectiveCap;
     j["objectiveUpperBound"] = solverOptions.objectiveUpperBound;
     j["reducedCostGap"] = solverOptions.reducedCostGap;
+    j["maxCycleRetries"] = solverOptions.maxCycleRetries;
     j["flash"] = solverOptions.flash;
     return j.dump(2);
   } catch (...) {

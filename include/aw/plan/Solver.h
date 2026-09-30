@@ -102,6 +102,22 @@ struct Options {
   // match the model being solved (for example after reduced-cost column
   // fixing). The planner fills this from its greedy DAG pre-pass.
   std::span<const int64_t> solutionHint;
+
+  // Plans a post-solve check already rejected.
+  //
+  // Each entry is a full assignment, one value per column of the model handed
+  // to `solve`, and is added as a CP-SAT forbidden-assignment table, so the
+  // next solve cannot return that exact vector again. `planCrafting` appends
+  // the plan its fireability check rejected and re-solves, up to
+  // `maxCycleRetries` times. The entries are matched against the original
+  // column space, so they stay valid across the cap retries inside one `solve`
+  // call; a reduced-cost probe is skipped while they are present. See
+  // docs/algorithm.typ, "no-good 重试".
+  aw::vector<aw::vector<int64_t>> noGoods;
+
+  // How many extra solves a caller may run after rejecting a plan. 0 turns the
+  // retry off, which is the behaviour before no-goods existed.
+  int maxCycleRetries = 3;
 };
 
 struct Result {

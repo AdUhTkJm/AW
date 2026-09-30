@@ -135,10 +135,12 @@ cheapest. It is also false for `cycle unfulfilled`.
 `cycle unfulfilled` (5) is the post-solve fireability check: the solver found a
 balance-feasible plan, but some cycle in it cannot be started from the stock
 plus the upstream output, so it is not a runnable plan. It is deliberately
-*unproven*: that plan is unrealizable, but a different plan may still exist. For
-this status `uses` still describes the rejected plan, so a caller can retry
-with a no-good, fall back to the acyclic plan or give up. See
-`docs/algorithm.typ`, "启动可达性".
+*unproven*: that plan is unrealizable, but a different plan may still exist.
+`planCrafting` already spends up to `maxCycleRetries` extra solves looking for
+one, each time forbidding the plan it just rejected; this status is what comes
+back when that budget runs out. For this status `uses` still describes the last
+rejected plan, so a caller can fall back to the acyclic plan or give up. See
+`docs/algorithm.typ`, "启动可达性" and "no-good 重试".
 
 The doubles are raw bits rather than formatted text, so no precision is lost and
 no locale is involved. The Java side reads them with a little-endian
@@ -179,11 +181,18 @@ maxPropIterations                              integer (32-bit)
 
 ```
 relativeGap, absoluteGap, maxTimeSeconds, numWorkers, randomSeed,
-objectiveCap, objectiveUpperBound, reducedCostGap, flash
+objectiveCap, objectiveUpperBound, reducedCostGap, maxCycleRetries, flash
 ```
 
 `solutionHint` is deliberately absent: it is an internal warm start that
-`planCrafting` fills from the greedy DAG pre-pass, not a knob.
+`planCrafting` fills from the greedy DAG pre-pass, not a knob. `noGoods` is
+also absent: `planCrafting` owns that list internally.
+
+`maxCycleRetries` (default 3, 0 disables) bounds how many extra solves
+`planCrafting` runs after its post-solve fireability check rejects a plan. Each
+rejected vector is added as a no-good, and the retries share `maxTimeSeconds`,
+so the total latency stays inside the configured budget. See
+`docs/algorithm.typ`, "no-good 重试", for the soundness caveat.
 
 `plannerOptionsJson()` / `solverOptionsJson()` dump the current values as a
 document the setters accept verbatim.

@@ -364,6 +364,19 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
     }
   }
 
+  // Plans a caller already rejected. A forbidden-assignment table over every
+  // column forbids exactly those full vectors; a shorter or longer entry does
+  // not name this model and is ignored.
+  if (!options.noGoods.empty()) {
+    const absl::Span<const sat::IntVar> all(variables);
+    sat::TableConstraint table = model.AddForbiddenAssignments(all);
+    for (const aw::vector<int64_t> &point : options.noGoods) {
+      if (point.size() != (size_t) A.cols)
+        continue;
+      table.AddTuple(absl::Span<const int64_t>(point.data(), point.size()));
+    }
+  }
+
   aw::vector<sat::IntVar> terms;
   aw::vector<int64_t> coefficients;
   // Capacity survives clear(): a row never exceeds the total nnz, and the
@@ -586,7 +599,8 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   // bound: a feasible answer gives an incumbent tight enough for the reduced
   // costs to fix columns, while an infeasible answer proves the integrality
   // gap is too wide to bother. See docs/algorithm.typ.
-  if (!options.flash && envDouble("AW_RC_GAP", options.reducedCostGap) > 0.0 && lp.ok &&
+  if (!options.flash && options.noGoods.empty() &&
+      envDouble("AW_RC_GAP", options.reducedCostGap) > 0.0 && lp.ok &&
       std::isfinite(lp.value) && lp.value >= 0.0 && A.cols > 0) {
     const int64_t probeCap = std::clamp<int64_t>(
         (int64_t) std::ceil(lp.value + envDouble("AW_RC_GAP", options.reducedCostGap)), 1,
