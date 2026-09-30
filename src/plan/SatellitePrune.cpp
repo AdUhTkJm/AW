@@ -17,6 +17,10 @@
 // oxidation cycle is the motivating case; it shares mekanism:oxygen with the
 // ore processing, so it is not an undirected component.
 //
+// "Cannot reach ... without passing through A" is domination by A in the
+// dependency graph, so the escape enumeration runs off one dominator tree
+// (Lengauer-Tarjan) instead of one graph walk per escape.
+//
 // The condition "G cannot produce a net surplus of A" is the LP
 //
 //   max (A z)_A   s.t.  (A z)_j >= 0 for every item j of I,  sum z <= 1,  z >= 0
@@ -359,6 +363,235 @@ uint32_t computeItemSccs(const ItemGraph& graph, std::span<const uint8_t> itemSe
 }
 
 // ---------------------------------------------------------------------------
+// Dominators of the dependency graph
+// ---------------------------------------------------------------------------
+// The island of an escape A is the largest set of items that cannot reach the
+// target or a stocked item without passing through A, plus the items no such
+// walk reaches at all. The first part is exactly the set A dominates in the
+// dependency graph, so every island is a subtree of one dominator tree: an
+// island is "A dominates I", and the tree gives every escape's I at once.
+//
+// Reachability is an OR over the producers of an item, so the dependency graph
+// is an ordinary digraph and Lengauer-Tarjan applies. The AND-OR obstacle that
+// blocks the *cost* relation ("costs" in SubstitutionPrune.cpp) does not apply
+// to reachability. Building the tree once replaces one graph walk per candidate,
+// and the enumeration used to spend its whole budget on those walks.
+//
+// A virtual root (node `nItem`) has an edge to every required item, so a
+// required item is reachable in one step and no other item can dominate it.
+struct DepGraph {
+  std::span<const uint> offsets;  // nItem + 1
+  std::span<const uint> targets;  // offsets[nItem]
+  std::span<const uint> required;
+  uint nItem;
+};
+
+// The dominator tree of a DepGraph, in the shape the escape enumeration needs.
+struct Dominators {
+  aw::vector<uint8_t> inTree;        // nItem: reached from the virtual root
+  aw::vector<uint32_t> subtreeSeen;  // nItem: subgraph items below it, itself included
+  aw::vector<uint> childOffsets;     // nItem + 2; the virtual root is index nItem
+  aw::vector<uint32_t> children;
+};
+
+// Lengauer-Tarjan's union-find, indexed by DFS number: `eval` returns the node
+// of the path to the root with the smallest semidominator. The recursion of the
+// textbook version is flattened so that a deep path cannot overflow the stack.
+struct LinkEval {
+  aw::vector<uint32_t> &semi;
+  aw::vector<uint32_t> &label;
+  aw::vector<uint32_t> &ancestor;
+  aw::vector<uint32_t> &path;
+
+  [[nodiscard]]
+  uint eval(uint v) noexcept {
+    if (ancestor[v] == UINT32_MAX)
+      return label[v];
+    compress(v);
+    return label[v];
+  }
+
+  void compress(uint v) noexcept {
+    path.clear();
+    uint u = v;
+    while (ancestor[ancestor[u]] != UINT32_MAX) {
+      path.push_back(u);
+      u = ancestor[u];
+    }
+    // The recursive definition updates the topmost frame first, then unwinds.
+    for (size_t k = path.size(); k-- > 0;) {
+      const uint x = path[k];
+      if (semi[label[ancestor[x]]] < semi[label[x]])
+        label[x] = label[ancestor[x]];
+      ancestor[x] = ancestor[ancestor[x]];
+    }
+  }
+};
+
+// Runs the DFS numbering of the dependency graph from the virtual root.
+// `dfn` is indexed by node, `vertex` by DFS number, `parent` by DFS number.
+void numberDependencyGraph(const DepGraph& dep, aw::vector<uint32_t> &dfn,
+                           aw::vector<uint32_t> &vertex, aw::vector<uint32_t> &parent,
+                           uint &count) noexcept {
+  const uint nItem = dep.nItem;
+  const uint root = nItem;
+  aw::vector<uint> cursor(nItem + 1, 0);
+  for (uint v = 0; v < nItem; v++)
+    cursor[v] = dep.offsets[v];
+  aw::vector<uint> stack;
+  stack.reserve(nItem + 1);
+
+  count = 0;
+  dfn[root] = count;
+  vertex[count++] = root;
+  stack.push_back(root);
+  while (!stack.empty()) {
+    const uint x = stack.back();
+    const uint end = x == root ? (uint) dep.required.size() : dep.offsets[x + 1];
+    if (cursor[x] == end) {
+      stack.pop_back();
+      continue;
+    }
+    const uint y = x == root ? dep.required[cursor[x]++] : dep.targets[cursor[x]++];
+    if (dfn[y] != UINT32_MAX)
+      continue;
+    parent[count] = dfn[x];
+    dfn[y] = count;
+    vertex[count++] = y;
+    stack.push_back(y);
+  }
+}
+
+// Builds the predecessor CSR of the dependency graph, the direction
+// Lengauer-Tarjan walks.
+void buildPredecessors(const DepGraph& dep, aw::vector<uint> &offsets,
+                       aw::vector<uint32_t> &targets) noexcept {
+  const uint nItem = dep.nItem;
+  const uint nNodes = nItem + 1;
+  const uint root = nItem;
+
+  offsets.assign(nNodes + 1, 0);
+  for (uint x = 0; x < nItem; x++)
+    for (uint e = dep.offsets[x]; e < dep.offsets[x + 1]; e++)
+      offsets[dep.targets[e] + 1]++;
+  for (uint r : dep.required)
+    offsets[r + 1]++;
+  for (uint v = 0; v < nNodes; v++)
+    offsets[v + 1] += offsets[v];
+
+  targets.resize(offsets[nNodes]);
+  aw::vector<uint> cursor(offsets.begin(), offsets.end() - 1);
+  for (uint x = 0; x < nItem; x++)
+    for (uint e = dep.offsets[x]; e < dep.offsets[x + 1]; e++)
+      targets[cursor[dep.targets[e]]++] = x;
+  for (uint r : dep.required)
+    targets[cursor[r]++] = root;
+}
+
+void computeDominators(const DepGraph& dep, std::span<const uint8_t> itemSeen,
+                       Dominators& out) noexcept {
+  const uint nItem = dep.nItem;
+  const uint nNodes = nItem + 1;
+
+  aw::vector<uint32_t> dfn(nNodes, UINT32_MAX);
+  aw::vector<uint32_t> vertex(nNodes, UINT32_MAX);
+  aw::vector<uint32_t> parent(nNodes, UINT32_MAX);
+  uint n = 0;
+  numberDependencyGraph(dep, dfn, vertex, parent, n);
+
+  aw::vector<uint> predOffsets;
+  aw::vector<uint32_t> preds;
+  buildPredecessors(dep, predOffsets, preds);
+
+  aw::vector<uint32_t> semi(n), label(n), ancestor(n, UINT32_MAX);
+  aw::vector<uint32_t> idom(n, UINT32_MAX);
+  aw::vector<uint32_t> bucketHead(n, UINT32_MAX);
+  aw::vector<uint32_t> bucketNext(n, UINT32_MAX);
+  for (uint i = 0; i < n; i++)
+    semi[i] = label[i] = i;
+
+  aw::vector<uint32_t> path;
+  LinkEval evalState{semi, label, ancestor, path};
+  for (uint i = n; i-- > 1;) {
+    const uint w = vertex[i];
+    for (uint e = predOffsets[w]; e < predOffsets[w + 1]; e++) {
+      const uint p = preds[e];
+      if (dfn[p] == UINT32_MAX)
+        continue;
+      const uint u = evalState.eval(dfn[p]);
+      if (semi[u] < semi[i])
+        semi[i] = semi[u];
+    }
+
+    bucketNext[i] = bucketHead[semi[i]];
+    bucketHead[semi[i]] = i;
+
+    // link(parent[i], i), then settle the subtree of parent[i].
+    ancestor[i] = parent[i];
+    const uint q = parent[i];
+    for (uint v = bucketHead[q]; v != UINT32_MAX; v = bucketNext[v]) {
+      const uint u = evalState.eval(v);
+      idom[v] = semi[u] < semi[v] ? u : q;
+    }
+    bucketHead[q] = UINT32_MAX;
+  }
+  for (uint i = 1; i < n; i++)
+    if (idom[i] != semi[i])
+      idom[i] = idom[idom[i]];
+  idom[0] = 0;
+
+  // Children of the dominator tree, by node id.
+  out.childOffsets.assign(nNodes + 1, 0);
+  for (uint i = 1; i < n; i++)
+    out.childOffsets[vertex[idom[i]] + 1]++;
+  for (uint v = 0; v < nNodes; v++)
+    out.childOffsets[v + 1] += out.childOffsets[v];
+  out.children.resize(out.childOffsets[nNodes]);
+  {
+    aw::vector<uint> cursor(out.childOffsets.begin(), out.childOffsets.end() - 1);
+    for (uint i = 1; i < n; i++) {
+      const uint v = vertex[i];
+      out.children[cursor[vertex[idom[i]]]++] = v;
+    }
+  }
+
+  // The item count of every subtree. A child of the tree always has a larger
+  // DFS number than its parent, so one sweep in reverse accumulates them all.
+  out.inTree.assign(nItem, 0);
+  out.subtreeSeen.assign(nItem, 0);
+  for (uint i = 1; i < n; i++) {
+    const uint v = vertex[i];
+    out.inTree[v] = 1;
+    if (itemSeen[v])
+      out.subtreeSeen[v] = 1;
+  }
+  for (uint i = n; i-- > 1;) {
+    const uint v = vertex[i];
+    const uint p = vertex[idom[i]];
+    if (p < nItem)
+      out.subtreeSeen[p] += out.subtreeSeen[v];
+  }
+}
+
+// Appends every subgraph item below `v` in the dominator tree, `v` excluded.
+// Only tree edges are followed, so the walk costs the size of the subtree.
+void collectDominated(const Dominators& dom, uint v, std::span<const uint8_t> itemSeen,
+                      aw::vector<uint> &stack, aw::vector<uint> &out) noexcept {
+  stack.clear();
+  stack.push_back(v);
+  while (!stack.empty()) {
+    const uint x = stack.back();
+    stack.pop_back();
+    for (uint e = dom.childOffsets[x]; e < dom.childOffsets[x + 1]; e++) {
+      const uint y = dom.children[e];
+      stack.push_back(y);
+      if (itemSeen[y])
+        out.push_back(y);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The certificate LP
 // ---------------------------------------------------------------------------
 
@@ -478,6 +711,95 @@ bool componentIsDead(const CraftingGraph& graph, NodeId cutNode, const Component
 // ---------------------------------------------------------------------------
 // The generalized pass
 // ---------------------------------------------------------------------------
+// One round of it: the subgraph lookups plus the buffers and the counters every
+// candidate reuses. `stamp` is the candidate index, so the stamps clear
+// themselves as the enumeration advances.
+struct DirectedRun {
+  const CraftingGraph* graph = nullptr;
+  std::span<const uint8_t> recipeSeen;
+  std::span<const uint> consOffsets;
+  std::span<const uint> consTargets;
+  uint nItem = 0;
+  uint32_t stamp = 0;
+
+  aw::vector<uint32_t> itemStamp;    // nItem, marked with the island's items
+  aw::vector<uint32_t> recipeStamp;  // nRecipe, marked with the island's recipes
+  aw::vector<int32_t> itemPos;       // nItem, column position inside the LP
+  Component island;
+  aw::vector<double> y;
+  aw::vector<int64_t> scaled;
+  aw::vector<uint8_t>* drop = nullptr;
+
+  int64_t evaluated = 0;
+  int64_t dropped = 0;
+  int64_t skippedWide = 0;
+  int64_t skippedGates = 0;
+  int64_t skippedEscapes = 0;
+};
+
+// Builds G, the recipes that produce or consume an island item, checks that G
+// nets nothing outside the island but the escape, and certifies the island
+// dead. The island items must already be stamped. Returns true when G was
+// dropped.
+bool certifyIsland(DirectedRun& run, uint escape) noexcept {
+  const CraftingGraph& graph = *run.graph;
+  const uint nItem = run.nItem;
+  const uint32_t stamp = run.stamp;
+  Component& island = run.island;
+
+  // G = every recipe that produces or consumes an island item.
+  island.recipes.clear();
+  for (uint j : island.items) {
+    for (NodeId recipeNode : graph.i2r.targetsOf(j)) {
+      const uint r = recipeNode - nItem;
+      if (!run.recipeSeen[r] || run.recipeStamp[r] == stamp)
+        continue;
+      run.recipeStamp[r] = stamp;
+      island.recipes.push_back(r);
+    }
+    for (uint e = run.consOffsets[j]; e < run.consOffsets[j + 1]; e++) {
+      const uint r = run.consTargets[e];
+      if (run.recipeStamp[r] == stamp)
+        continue;
+      run.recipeStamp[r] = stamp;
+      island.recipes.push_back(r);
+    }
+  }
+  if (island.recipes.empty()) {
+    run.skippedGates++;
+    return false;
+  }
+  if (island.items.size() + island.recipes.size() > options.satellite.maxIslandNodes) {
+    run.skippedWide++;
+    return false;
+  }
+
+  // The closure guarantees this, but never drop G on a surprise: the only net
+  // output of G outside I may be the escape.
+  for (uint r : island.recipes) {
+    const NodeId produced = graph.output[r];
+    if (run.itemStamp[produced] == stamp || produced == escape)
+      continue;
+    if (columnCoefficient(graph, r, produced) > 0) {
+      run.skippedEscapes++;
+      return false;
+    }
+  }
+
+  for (size_t i = 0; i < island.items.size(); i++)
+    run.itemPos[island.items[i]] = (int32_t) i;
+  run.evaluated++;
+  const bool dead = componentIsDead(graph, escape, island, run.itemPos, run.y, run.scaled);
+  for (NodeId item : island.items)
+    run.itemPos[item] = -1;
+  if (!dead)
+    return false;
+  for (uint r : island.recipes)
+    (*run.drop)[r] = 1;
+  run.dropped++;
+  return true;
+}
+
 // The island does not have to be separated on its inputs. Pick an escape item A
 // and let I be the largest set of items that cannot reach the target (or a
 // stocked item) without passing through A. Every recipe touching I goes into G;
@@ -494,7 +816,9 @@ bool componentIsDead(const CraftingGraph& graph, NodeId cutNode, const Component
 //
 // The escape is enumerated over the subgraph's items. The candidate order puts
 // items inside a nontrivial cycle first, because that is where the interesting
-// escapes live; running out of budget only means an escape is not tried.
+// escapes live; running out of budget only means an escape is not tried. Each
+// island is read off the dominator tree, so a candidate costs its own subtree
+// and never a walk of the whole subgraph.
 bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> itemSeen,
                  std::span<const uint8_t> recipeSeen, std::span<const Amount> inventory,
                  aw::vector<uint8_t> &drop,
@@ -584,24 +908,35 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
     if (itemSeen[j] && !cycleItem[j] && j != target)
       candidates.push_back_unchecked(j);
 
-  aw::vector<uint32_t> visited(nItem, UINT32_MAX);
-  aw::vector<uint32_t> itemStamp(nItem, UINT32_MAX);
-  aw::vector<uint32_t> recipeStamp(graph.nRecipe, UINT32_MAX);
-  aw::vector<uint> queue;
-  // Each item enters the reverse BFS at most once per candidate.
-  queue.reserve(nItem);
-  aw::vector<int32_t> itemPos(nItem, -1);
-  Component island;
-  aw::vector<double> y;
-  aw::vector<int64_t> scaled;
+  // Every escape's island is a subtree of this tree, so it is built once here
+  // instead of once per candidate.
+  const DepGraph depGraph{depOffsets, depTargets, required, nItem};
+  Dominators dom;
+  computeDominators(depGraph, itemSeen, dom);
 
-  const uint nSeen = (uint) std::count(itemSeen.begin(), itemSeen.end(), (uint8_t) 1);
+  // The items of the subgraph no required item can reach at all. Usually empty,
+  // because the subgraph is built from what the target needs. They lie in every
+  // island except their own escape's, so an escape outside the dominator tree
+  // still has this island: that is the dead branch the lemma also covers.
+  aw::vector<uint> unreached;
+  unreached.reserve(nItem);
+  for (uint j = 0; j < nItem; j++)
+    if (itemSeen[j] && !dom.inTree[j])
+      unreached.push_back(j);
+
+  DirectedRun run;
+  run.graph = &graph;
+  run.recipeSeen = recipeSeen;
+  run.consOffsets = consOffsets;
+  run.consTargets = consTargets;
+  run.nItem = nItem;
+  run.itemStamp.assign(nItem, UINT32_MAX);
+  run.recipeStamp.assign(graph.nRecipe, UINT32_MAX);
+  run.itemPos.assign(nItem, -1);
+  run.drop = &drop;
+  aw::vector<uint> subtreeStack;
+
   bool any = false;
-  int64_t evaluated = 0;
-  int64_t dropped = 0;
-  int64_t skippedWide = 0;
-  int64_t skippedGates = 0;
-  int64_t skippedEscapes = 0;
 
   for (uint32_t candidate = 0; candidate < candidates.size(); candidate++) {
     const uint escape = candidates[candidate];
@@ -609,107 +944,45 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() >
             options.satellite.maxSeconds)
       break;
+    run.stamp = candidate;
 
-    // Reverse BFS from the required items, never entering the escape.
-    queue.clear();
-    for (uint j : required) {
-      if (j == escape)
-        continue;
-      visited[j] = candidate;
-      queue.push_back_unchecked(j);
-    }
-    for (size_t q = 0; q < queue.size(); q++) {
-      const uint x = queue[q];
-      for (uint e = depOffsets[x]; e < depOffsets[x + 1]; e++) {
-        const uint j = depTargets[e];
-        if (j == escape || visited[j] == candidate)
-          continue;
-        visited[j] = candidate;
-        queue.push_back_unchecked(j);
-      }
-    }
-
-    // I = seen items the walk could not reach, minus the escape itself.
-    if (queue.size() + 1 >= nSeen)
+    // I = the items this escape dominates, plus the ones nothing required can
+    // reach. An escape outside the tree dominates nothing, so its island is
+    // then just the unreached set without itself.
+    const uint unreachedSize = (uint) unreached.size();
+    const uint islandSize = dom.inTree[escape]
+                                ? unreachedSize + dom.subtreeSeen[escape] - 1
+                                : unreachedSize - 1;
+    if (islandSize == 0)
       continue;  // empty island
-    const uint islandSize = nSeen - queue.size() - 1;
     if (islandSize > options.satellite.maxIslandNodes) {
-      skippedWide++;
+      run.skippedWide++;
       continue;
     }
 
-    island.items.clear();
-    for (uint j = 0; j < nItem; j++) {
-      if (!itemSeen[j] || j == escape || visited[j] == candidate)
-        continue;
-      island.items.push_back(j);
-      itemStamp[j] = candidate;
-    }
+    run.island.items.clear();
+    for (uint j : unreached)
+      if (j != escape)
+        run.island.items.push_back(j);
+    if (dom.inTree[escape])
+      collectDominated(dom, escape, itemSeen, subtreeStack, run.island.items);
+    // The walk this replaced collected the island by scanning item indices, and
+    // which LP point comes back may depend on the order. Keep that order.
+    std::sort(run.island.items.begin(), run.island.items.end());
+    for (NodeId item : run.island.items)
+      run.itemStamp[item] = candidate;
 
-    // G = every recipe that produces or consumes an island item.
-    island.recipes.clear();
-    for (uint j : island.items) {
-      for (NodeId recipeNode : graph.i2r.targetsOf(j)) {
-        const uint r = recipeNode - nItem;
-        if (!recipeSeen[r] || recipeStamp[r] == candidate)
-          continue;
-        recipeStamp[r] = candidate;
-        island.recipes.push_back(r);
-      }
-      for (uint e = consOffsets[j]; e < consOffsets[j + 1]; e++) {
-        const uint r = consTargets[e];
-        if (recipeStamp[r] == candidate)
-          continue;
-        recipeStamp[r] = candidate;
-        island.recipes.push_back(r);
-      }
-    }
-    if (island.recipes.empty()) {
-      skippedGates++;
-      continue;
-    }
-    if (island.items.size() + island.recipes.size() > options.satellite.maxIslandNodes) {
-      skippedWide++;
-      continue;
-    }
-
-    // The closure guarantees this, but never drop G on a surprise: the only net
-    // output of G outside I may be the escape.
-    bool closed = true;
-    for (uint r : island.recipes) {
-      const NodeId produced = graph.output[r];
-      if (itemStamp[produced] == candidate || produced == escape)
-        continue;
-      if (columnCoefficient(graph, r, produced) > 0) {
-        closed = false;
-        break;
-      }
-    }
-    if (!closed) {
-      skippedEscapes++;
-      continue;
-    }
-
-    for (size_t i = 0; i < island.items.size(); i++)
-      itemPos[island.items[i]] = (int32_t) i;
-    evaluated++;
-    if (componentIsDead(graph, escape, island, itemPos, y, scaled)) {
-      for (uint r : island.recipes)
-        drop[r] = 1;
+    if (certifyIsland(run, escape))
       any = true;
-      dropped++;
-    }
-    for (NodeId item : island.items)
-      itemPos[item] = -1;
   }
 
   if (verbose)
     std::fprintf(stderr,
                  "[satellite/directed] evaluated=%lld dropped=%lld (wide=%lld gates=%lld "
                  "escapes=%lld candidates=%lld) time=%.4f s\n",
-                 (long long) evaluated, (long long) dropped, (long long) skippedWide,
-                 (long long) skippedGates, (long long) skippedEscapes,
-                 (long long) candidates.size(),
+                 (long long) run.evaluated, (long long) run.dropped,
+                 (long long) run.skippedWide, (long long) run.skippedGates,
+                 (long long) run.skippedEscapes, (long long) candidates.size(),
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
                      .count());
   return any;

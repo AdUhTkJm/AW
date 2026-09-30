@@ -1224,8 +1224,8 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   ReachQuery query(output, workstations, inventory);
   query.walk();
   query.prunePackCertificates();
-  query.pruneSatellites();
   query.pruneSeedUnreachable();
+  query.pruneSatellites();
 
   aw::vector<MutableRecipe> built = collectSurvivingRecipes(query.recipeSeen);
 
