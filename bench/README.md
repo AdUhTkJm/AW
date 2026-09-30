@@ -122,14 +122,33 @@ for every engine.
 ### 3.3 Inventory groups
 
 All three come from the same manifest, so every engine sees byte-identical stock.
-Workstations are **all available** everywhere (AW gets handles `1..nReal`; the baselines
-have no workstation notion, so all recipes are usable).
+Workstations are **all available** everywhere by default (AW gets handles
+`1..nReal`; the baselines have no workstation notion, so all recipes are usable).
 
 | group | contents |
 |---|---|
 | `none` | nothing stocked. Not automatically infeasible: some recipes consume nothing. |
 | `leaves` | every recipe-free leaf gets 1 000 000 — "raw materials are unconstrained". |
 | `random20` | 20 % of real items, drawn by `random.Random("<seed>:random20")`, each with a log-uniform amount in `[1, 10^6]`. |
+
+#### Workstation availability (`--ws-percent`)
+
+Every AW tool (`aw_bench`, `aw_scc`, `awr_inspect`) can run on a realistic
+subset instead of all workstations. With `--ws-percent <0..100>`:
+
+1. A station whose resource location (second column of the `.names.tsv`, the
+   `--names` table, default the one next to the `.awr`) starts with
+   `minecraft:` is always on.
+2. Let `M` be the number of remaining, non-vanilla items that appear as a
+   workstation at least once. A uniformly drawn subset of exactly
+   `round(p * M)` of them is kept.
+
+The total is `V + round(p * M)` where `V` is the always-on vanilla count, which
+exceeds `p` of all workstation items by about `(1 - p) * V`. The draw is a fixed
+splitmix64 stream seeded by `--ws-seed` (default `20260101`), so a dataset plus
+percentage pins down one subset across every tool and run. `--ws-percent 100`
+(the default) is the historical all-on setting, and `awr_inspect`'s explicit
+`--ws <handle,...>` overrides the percentage.
 
 ### 3.4 Configurations
 

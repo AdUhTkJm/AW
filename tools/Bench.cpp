@@ -28,6 +28,8 @@
 #include "aw/plan/Plan.h"
 #include "aw/plan/Solver.h"
 
+#include "WorkstationSample.h"
+
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -327,10 +329,16 @@ void usage() {
                "                [--time-limit 40] [--gap 0.01] [--workers 16]\n"
                "                [--pack-seconds 60] [--satellite-seconds 2]\n"
                "                [--names <path>] [--quiet] [--preprocess-only]\n"
+               "                [--ws-percent 0..100] [--ws-seed <n>]\n"
                "\n"
                "--preprocess-only registers the graph and writes the config header and the\n"
                "registration row, then exits without running a single query. Use it to refresh\n"
                "the preprocessing half of an existing JSONL without paying for plan_ms again.\n"
+               "\n"
+               "--ws-percent samples that percentage of the non-vanilla workstation pool; every\n"
+               "`minecraft:` station stays on, so the total slightly exceeds the percentage.\n"
+               "--names defaults to the `.names.tsv` next to the .awr and --ws-seed to\n"
+               "20260101, so the subset is reproducible across tools.\n"
                "\n"
                "stages (cumulative): none seed direct recipe substitution tag pack satellite\n");
 }
@@ -351,6 +359,8 @@ int main(int argc, char **argv) {
   bool flash = false;
   bool quiet = false;
   bool preprocessOnly = false;
+  bool sampleWorkstations = false;
+  uint64_t wsSeed = awtools::kDefaultWorkstationSeed;
   int warmup = 1;
   int repeats = 1;
   long long workers = 16;
@@ -358,6 +368,7 @@ int main(int argc, char **argv) {
   double gap = 0.01;
   double packSeconds = 60.0;
   double satelliteSeconds = 2.0;
+  double wsFraction = 1.0;
 
   for (int i = 1; i < argc; i++) {
     const std::string arg = argv[i];
@@ -405,6 +416,21 @@ int main(int argc, char **argv) {
     else if (arg == "--workers") { std::string v; next(v); long long p = 0; if (!parseI64(v, p) || p < 0) return EXIT_FAILURE; workers = p; }
     else if (arg == "--pack-seconds") { std::string v; next(v); if (!parseDouble(v, packSeconds)) return EXIT_FAILURE; }
     else if (arg == "--satellite-seconds") { std::string v; next(v); if (!parseDouble(v, satelliteSeconds)) return EXIT_FAILURE; }
+    else if (arg == "--ws-percent") {
+      std::string v; next(v);
+      double percent = 0.0;
+      if (!parseDouble(v, percent) || percent < 0.0 || percent > 100.0) {
+        std::fprintf(stderr, "--ws-percent must be between 0 and 100\n");
+        return EXIT_FAILURE;
+      }
+      wsFraction = percent / 100.0;
+      sampleWorkstations = percent < 100.0;
+    } else if (arg == "--ws-seed") {
+      std::string v; next(v);
+      long long parsed = 0;
+      if (!parseI64(v, parsed) || parsed < 0) { std::fprintf(stderr, "bad --ws-seed\n"); return EXIT_FAILURE; }
+      wsSeed = (uint64_t) parsed;
+    }
     else if (arg == "--quiet") quiet = true;
     else if (arg == "--preprocess-only") preprocessOnly = true;
     else if (arg == "-h" || arg == "--help") { usage(); return EXIT_SUCCESS; }
@@ -531,6 +557,34 @@ int main(int argc, char **argv) {
   }
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
 
+  // Workstation availability. The default is every real handle, the historical
+  // worst case (and equivalent to "every workstation on", since a recipe with
+  // an empty workstation set is unreachable either way). --ws-percent keeps
+  // all vanilla stations and samples the remaining pool from the names table.
+  awtools::WorkstationSample wsSample;
+  aw::vector<aw::Handle> stations;
+  if (sampleWorkstations) {
+    const std::string tablePath =
+        namesPath.empty() ? awtools::defaultNamesPath(awrPath) : namesPath;
+    aw::vector<std::string> resources;
+    if (!awtools::loadResourceLocations(tablePath, graph.nReal, resources)) {
+      std::fprintf(stderr, "cannot read name table %s (needed for --ws-percent)\n",
+                   tablePath.c_str());
+      return EXIT_FAILURE;
+    }
+    wsSample = awtools::sampleWorkstations(graph, resources, wsFraction, wsSeed);
+    stations = wsSample.stations;
+    if (!quiet)
+      std::fprintf(stderr,
+                   "workstations: %.1f%% -> %u vanilla + %u/%u non-vanilla = %u stations\n",
+                   wsFraction * 100.0, wsSample.vanilla, wsSample.sampled,
+                   wsSample.nonVanilla, wsSample.total);
+  } else {
+    stations.reserve(graph.nReal);
+    for (aw::Handle handle = 1; handle <= graph.nReal; handle++)
+      stations.push_back_unchecked(handle);
+  }
+
   std::ofstream out(outPath);
   if (!out) {
     std::fprintf(stderr, "cannot write %s\n", outPath.c_str());
@@ -554,6 +608,13 @@ int main(int argc, char **argv) {
         .real("satellite_seconds", satelliteSeconds)
         .real("parse_ms", parseMs)
         .str("preprocess_scope", "engine")
+        .boolean("ws_sampled", sampleWorkstations)
+        .real("ws_percent", wsFraction * 100.0)
+        .num("ws_seed", (long long) wsSeed)
+        .num("ws_vanilla", (long long) wsSample.vanilla)
+        .num("ws_nonvanilla", (long long) wsSample.nonVanilla)
+        .num("ws_sampled_count", (long long) wsSample.sampled)
+        .num("ws_total", (long long) wsSample.total)
         .boolean("preprocess_only", preprocessOnly);
     std::string stageNames;
     for (size_t k = 0; k < stages.size(); k++) {
@@ -631,12 +692,7 @@ int main(int argc, char **argv) {
   solverOptions.numWorkers = (int) workers;
   solverOptions.flash = flash;
 
-  // All workstations available: every real item handle is allowed, which is the
-  // worst case for the pruning and the only setting the workstation-less Java
-  // baselines can be compared against.
-  aw::vector<aw::Handle> stations;
-  stations.reserve(graph.nReal);
-  for (aw::Handle handle = 1; handle <= graph.nReal; handle++) stations.push_back_unchecked(handle);
+  // Workstation availability was resolved above, before the config header.
 
   const size_t missingCap = 12;
   long long rows = 0;

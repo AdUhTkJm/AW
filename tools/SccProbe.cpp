@@ -15,9 +15,12 @@
 // is the canonicalized-but-unpruned graph and `all` is the shipped default.
 //
 // Output is TSV on stdout, one row per (stage, target), plus `#` comment rows
-// for the registration summary. Empty inventory and every workstation available
-// are the defaults: that is the smallest subgraph the query-time guards can
-// produce, so a large SCC there is the strongest possible statement.
+// for the registration summary. Empty inventory is the default: that is the
+// smallest subgraph the query-time guards can produce, so a large SCC there is
+// the strongest possible statement. Every workstation is available by default,
+// which is the historical worst case; `--ws-percent` instead keeps all vanilla
+// (`minecraft:`) stations and samples the non-vanilla pool (see
+// WorkstationSample.h and bench/README.md).
 //
 // Note that -fno-exceptions is enabled for this file, as for the other tools.
 
@@ -29,6 +32,8 @@
 
 #include "aw/plan/Options.h"
 #include "aw/plan/CraftingGraph.h"
+
+#include "WorkstationSample.h"
 
 namespace {
 
@@ -445,7 +450,12 @@ void usage() {
                "--plan is the path prefix of a bench plan manifest; "
                "<prefix>.targets.tsv supplies\n"
                "the handles. stages: none seed direct recipe substitution tag pack "
-               "satellite all\n");
+               "satellite all\n"
+               "\n"
+               "--ws-percent <0..100> samples that percentage of the non-vanilla\n"
+               "workstation pool (all `minecraft:` stations stay on); --names points at the\n"
+               "`.names.tsv` table, defaulting to the one next to the .awr. --ws-seed sets\n"
+               "the draw seed (default 20260101).\n");
 }
 
 }  // namespace
@@ -456,9 +466,13 @@ int main(int argc, char **argv) {
   std::string stagesArg;
   std::string stockArg;
   std::string outPath;
+  std::string namesPath;
   bool nonoptimal = true;
   bool quiet = false;
   bool decomposeMode = false;
+  bool sampleWorkstations = false;
+  double wsFraction = 1.0;
+  uint64_t wsSeed = awtools::kDefaultWorkstationSeed;
   double packSeconds = 60.0;
   double satelliteSeconds = 0.05;
 
@@ -481,7 +495,23 @@ int main(int argc, char **argv) {
       next(stockArg);
     else if (arg == "--out")
       next(outPath);
-    else if (arg == "--nonoptimal") {
+    else if (arg == "--names")
+      next(namesPath);
+    else if (arg == "--ws-percent") {
+      std::string value;
+      next(value);
+      const double percent = std::strtod(value.c_str(), nullptr);
+      if (!(percent >= 0.0 && percent <= 100.0)) {
+        std::fprintf(stderr, "--ws-percent must be between 0 and 100\n");
+        return EXIT_FAILURE;
+      }
+      wsFraction = percent / 100.0;
+      sampleWorkstations = percent < 100.0;
+    } else if (arg == "--ws-seed") {
+      std::string value;
+      next(value);
+      wsSeed = std::strtoull(value.c_str(), nullptr, 10);
+    } else if (arg == "--nonoptimal") {
       std::string value;
       next(value);
       nonoptimal = value != "0";
@@ -573,6 +603,29 @@ int main(int argc, char **argv) {
   }
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
 
+  // Every workstation available by default. With --ws-percent, keep every
+  // vanilla (`minecraft:`) station and sample the rest from the names table.
+  // The inventory is either a bench stock group (a `<prefix>.stock.<group>.tsv`
+  // sidecar) or a path to a handle/amount TSV; by default it is empty.
+  awtools::WorkstationSample sample;
+  aw::vector<Handle> stations;
+  if (sampleWorkstations) {
+    const std::string tablePath =
+        namesPath.empty() ? awtools::defaultNamesPath(awrPath) : namesPath;
+    aw::vector<std::string> resources;
+    if (!awtools::loadResourceLocations(tablePath, graph.nReal, resources)) {
+      std::fprintf(stderr, "cannot read name table %s (needed for --ws-percent)\n",
+                   tablePath.c_str());
+      return EXIT_FAILURE;
+    }
+    sample = awtools::sampleWorkstations(graph, resources, wsFraction, wsSeed);
+    stations = sample.stations;
+  } else {
+    stations.reserve(graph.nReal);
+    for (Handle handle = 1; handle <= graph.nReal; handle++)
+      stations.push_back_unchecked(handle);
+  }
+
   std::FILE *out = stdout;
   if (!outPath.empty()) {
     out = std::fopen(outPath.c_str(), "w");
@@ -607,6 +660,15 @@ int main(int argc, char **argv) {
                  graph.nItem, graph.nRecipe, graph.nReal, tagEdges, tagDominated,
                  recipeDominated, directDominated, substituted, packDominated,
                  (int) nonoptimal);
+    if (sampleWorkstations) {
+      std::fprintf(out, "# workstations\t%.1f\t%u\t%u\t%u\t%u\t%llu\n", wsFraction * 100.0,
+                   sample.vanilla, sample.nonVanilla, sample.sampled, sample.total,
+                   (unsigned long long) wsSeed);
+      std::fprintf(stderr,
+                   "workstations: %.1f%% -> %u vanilla + %u/%u non-vanilla = %u stations\n",
+                   wsFraction * 100.0, sample.vanilla, sample.sampled, sample.nonVanilla,
+                   sample.total);
+    }
   }
 
   std::fprintf(out,
@@ -621,13 +683,6 @@ int main(int argc, char **argv) {
                  "fringe_leaf_items\tfringe_tag_recipes\tbig_tag_recipes");
   std::fprintf(out, "\n");
 
-  // Every workstation available. The inventory is either a bench stock group
-  // (a `<prefix>.stock.<group>.tsv` sidecar) or a path to a handle/amount TSV;
-  // by default it is empty.
-  aw::vector<Handle> stations;
-  stations.reserve(graph.nReal);
-  for (Handle handle = 1; handle <= graph.nReal; handle++)
-    stations.push_back_unchecked(handle);
   aw::vector<Amount> inventory = aw::vector<Amount>::zeroes(graph.nItem);
   if (!stockArg.empty()) {
     aw::vector<std::pair<Handle, Amount>> stock;

@@ -21,6 +21,8 @@
 #include "aw/plan/Profiler.h"
 #include "aw/plan/Status.h"
 
+#include "WorkstationSample.h"
+
 namespace {
 
 #define fail(msg, ...) { std::cerr << (msg) << "\n"; return __VA_ARGS__; }
@@ -893,6 +895,9 @@ int main(int argc, char** argv) {
   bool doTree = false;
   bool doPlan = false;
   bool dumpWorkstation = false;
+  bool wsSampleRequested = false;
+  double wsFraction = 1.0;
+  uint64_t wsSeed = awtools::kDefaultWorkstationSeed;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -1017,8 +1022,28 @@ int main(int argc, char** argv) {
         std::cerr << "--ws needs a comma-separated list of resource handles\n";
         return EXIT_FAILURE;
       }
+    } else if (arg == "--ws-percent") {
+      if (i + 1 >= argc) {
+        std::cerr << "--ws-percent needs a value in [0, 100]\n";
+        return EXIT_FAILURE;
+      }
+      const double percent = std::strtod(argv[++i], nullptr);
+      if (!(percent >= 0.0 && percent <= 100.0)) {
+        std::cerr << "--ws-percent needs a value in [0, 100]\n";
+        return EXIT_FAILURE;
+      }
+      wsFraction = percent / 100.0;
+      wsSampleRequested = percent < 100.0;
+    } else if (arg == "--ws-seed") {
+      uint64_t seed = 0;
+      if (i + 1 >= argc || !parseU64(argv[++i], seed)) {
+        std::cerr << "--ws-seed needs a non-negative integer\n";
+        return EXIT_FAILURE;
+      }
+      wsSeed = seed;
     } else if (arg == "-h" || arg == "--help") {
       std::cout << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
+                   "                   [--ws-percent <0..100>] [--ws-seed <n>]\n"
                    "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                    "                   [--no-pack-prune]\n"
                    "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
@@ -1039,6 +1064,7 @@ int main(int argc, char** argv) {
 
   if (path.empty()) {
     std::cerr << "usage: awr_inspect [--check] [--dump] [--reach <handle>] [--ws <handle,...>]\n"
+                 "                   [--ws-percent <0..100>] [--ws-seed <n>]\n"
                  "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                  "                   [--no-pack-prune]\n"
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
@@ -1132,6 +1158,48 @@ int main(int argc, char** argv) {
 
   std::cout << "parsed " << bytes.size() << " bytes from " << path << '\n';
   printSummary(graph);
+
+  // Workstation availability for --tree / --reach / --plan. An explicit --ws
+  // list wins; otherwise --ws-percent samples the non-vanilla pool (keeping
+  // every `minecraft:` station on); the default is every real handle.
+  awtools::WorkstationSample wsSample;
+  bool wsSampled = false;
+  aw::vector<aw::Handle> sampledStations;
+  aw::vector<aw::Handle> allHandles;
+  if (wsSampleRequested && workstations.empty()) {
+    const std::string tablePath = namesPath.empty() ? defaultNamesPath(path) : namesPath;
+    aw::vector<std::string> resources;
+    if (!awtools::loadResourceLocations(tablePath, graph.nReal, resources)) {
+      std::cerr << "cannot read name table " << tablePath << " (needed for --ws-percent)\n";
+      return EXIT_FAILURE;
+    }
+    wsSample = awtools::sampleWorkstations(graph, resources, wsFraction, wsSeed);
+    sampledStations = wsSample.stations;
+    wsSampled = true;
+    std::cout << "workstations: " << wsFraction * 100.0 << "% -> " << wsSample.vanilla
+              << " vanilla + " << wsSample.sampled << "/" << wsSample.nonVanilla
+              << " non-vanilla = " << wsSample.total << " stations\n";
+  } else if (wsSampleRequested) {
+    std::cerr << "note: --ws-percent ignored because --ws was given\n";
+  }
+  if (!wsSampled && workstations.empty()) {
+    allHandles.reserve(graph.nReal);
+    for (aw::Handle h = 1; h <= graph.nReal; h++)
+      allHandles.push_back_unchecked(h);
+  }
+  // The set every mode falls back to: an explicit --ws list, then the
+  // percentage draw, then every real handle.
+  const aw::vector<aw::Handle> &engineStations =
+      !workstations.empty() ? workstations
+                            : (wsSampled ? sampledStations : allHandles);
+  auto stationLabel = [&]() -> std::string {
+    if (!workstations.empty())
+      return std::to_string(workstations.size()) + " workstations";
+    if (wsSampled)
+      return std::to_string(sampledStations.size()) + " sampled workstations";
+    return "all workstations";
+  };
+
   if (doTree) {
     NameTable names;
     const std::string tablePath = namesPath.empty() ? defaultNamesPath(path) : namesPath;
@@ -1154,27 +1222,22 @@ int main(int argc, char** argv) {
       return EXIT_FAILURE;
     }
 
-    // "All workstations present": allow every real resource as a station.
-    aw::vector<aw::Handle> all;
-    all.reserve(graph.nReal);
-    for (aw::Handle h = 1; h <= graph.nReal; ++h)
-      all.push_back_unchecked(h);
-
-    const aw::Subgraph sub = aw::reachableSubgraph(target, all);
+    // "All workstations present" by default; --ws-percent narrows the set.
+    const aw::Subgraph sub = aw::reachableSubgraph(target, engineStations);
     if (sub.graph.nItem == 0) {
       std::cerr << "no subgraph reachable from " << treeArg << '\n';
       return EXIT_FAILURE;
     }
-    std::cout << "subgraph from " << itemLabel(graph, names, target - 1)
-              << " (all workstations):\n";
+    std::cout << "subgraph from " << itemLabel(graph, names, target - 1) << " ("
+              << stationLabel() << "):\n";
     dumpSubgraph(sub, graph, names, dumpWorkstation);
   }
   if (doReach) {
-    aw::Subgraph sub = aw::reachableSubgraph(reach, workstations);
+    aw::Subgraph sub = aw::reachableSubgraph(reach, engineStations);
     if (sub.graph.nItem == 0) {
       std::cout << "reachable from handle " << reach << ": invalid output handle\n";
     } else {
-      std::cout << "reachable from handle " << reach << " with " << workstations.size()
+      std::cout << "reachable from handle " << reach << " with " << engineStations.size()
             << " workstation(s):\n";
       std::cout << "  item nodes : " << sub.graph.nItem << '\n';
       std::cout << "  recipes    : " << sub.graph.nRecipe << '\n';
@@ -1200,13 +1263,8 @@ int main(int argc, char** argv) {
       return EXIT_FAILURE;
     }
 
-    aw::vector<aw::Handle> stations = workstations;
-    const bool allStations = stations.empty();
-    if (allStations) {
-      stations.reserve(graph.nReal);
-      for (aw::Handle h = 1; h <= graph.nReal; ++h)
-        stations.push_back_unchecked(h);
-    }
+    const bool allStations = workstations.empty() && !wsSampled;
+    const aw::vector<aw::Handle> &stations = engineStations;
 
     // Inventory is given per handle and stored per source item node. It is built
     // before the reachability pass so the dominated tag edges can consult it.
@@ -1243,7 +1301,8 @@ int main(int argc, char** argv) {
 
     std::cout << "plan for " << itemLabel(graph, names, target - 1) << " x" << planAmount;
     std::cout << (allStations ? " (all workstations)"
-                              : " (" + std::to_string(stations.size()) + " workstations)");
+                              : " (" + std::to_string(stations.size()) +
+                                    (wsSampled ? " sampled workstations)" : " workstations)"));
     std::cout << ":\n";
     std::cout << "  subgraph: " << sub.graph.nItem << " items, " << sub.graph.nRecipe
               << " recipes\n";
