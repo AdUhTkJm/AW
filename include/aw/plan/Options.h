@@ -213,15 +213,23 @@ struct Options {
   // -------------------------------------------------------------------------
 
   // Substitution budgets. The pass compares every pair of an item's recipes and
-  // asks the cost relation about the pairs that could cover a deficit, so both
-  // the query count and the memo it fills are bounded. Running out only leaves
-  // recipes unpruned. A collapse also produces a stock guard: a real input is a
-  // single item, but a tag expands into its members, and a catch-all tag is
-  // left alone rather than recorded as a per-recipe guard list.
+  // asks the cost relation about the pairs that could cover a deficit. Running
+  // out only leaves recipes unpruned. A collapse also produces a stock guard: a
+  // real input is a single item, but a tag expands into its members, and a
+  // catch-all tag is left alone rather than recorded as a per-recipe guard list.
+  //
+  // The cost relation is solved one witness at a time by an upward closure, so
+  // maxSubstitutionCostWork counts closure steps and maxCostMemo bounds the
+  // total number of true pairs kept. The true side of the relation is tiny (a
+  // few thousand pairs on the large packs) while the false bulk is huge, which
+  // is why the closure only ever visits the true side.
   uint64_t maxSubstitutionWork = 64'000'000;
   uint64_t maxSubstitutionCostWork = 256'000'000;
   uint32_t maxSubstitutionDepth = 4;
+  // Longest derivation chain the cost relation accepts, taking one qualified
+  // input per recipe.
   uint32_t maxCostDepth = 16;
+  // Cap on the total true pairs cached across every witness row.
   size_t maxCostMemo = 1'000'000;
   size_t maxSubstitutionGuardItems = 256;
   size_t maxSubstitutionGuardTotal = 1'000'000;

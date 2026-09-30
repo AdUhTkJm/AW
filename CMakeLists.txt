@@ -61,13 +61,6 @@ if(NOT AW_JSON_INCLUDE_DIR)
 endif()
 message(STATUS "Using nlohmann/json from ${AW_JSON_INCLUDE_DIR}")
 
-find_path(AW_DENSE_MAP_DIR ankerl/unordered_dense.h
-   HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ankerl")
-if(NOT AW_DENSE_MAP_DIR)
-   message(FATAL_ERROR "ankerl/unordered_dense.h not found.")
-endif()
-message(STATUS "Using ankerl/unordered_dense from ${AW_DENSE_MAP_DIR}")
-
 add_library(aw_crafting STATIC
    src/plan/CraftingGraph.cpp
    src/plan/CpSatSolver.cpp
@@ -85,7 +78,6 @@ add_library(aw_crafting STATIC
 )
 target_include_directories(aw_crafting PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(aw_crafting PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_include_directories(aw_crafting PRIVATE "${AW_DENSE_MAP_DIR}") # For substitution prune.
 target_include_directories(aw_crafting PRIVATE "${AW_JSON_INCLUDE_DIR}") # For option loader.
 target_compile_features(aw_crafting PUBLIC cxx_std_20)
 target_link_libraries(aw_crafting PUBLIC ortools::ortools)
