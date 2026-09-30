@@ -76,6 +76,15 @@ void computeTagPruning(CraftingGraph &graph) noexcept;
 void computePackPruning(CraftingGraph& graph) noexcept;
 void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) noexcept;
 
+// Query-time re-pruning of a reachable subgraph. Runs the composite, direct and
+// (optionally) pack passes on the workstation-free subgraph and returns one byte
+// per subgraph recipe, 1 meaning "drop". `sourceInventory` is indexed by source
+// item node, exactly as `planCrafting` receives it; the subgraph's remapping is
+// undone through `sub.itemOrigin` for the stock guards. Nothing happens unless
+// `options.reprune.enabled` is set.
+aw::vector<uint8_t> repruneSubgraph(const Subgraph &sub,
+                                    std::span<const Amount> sourceInventory) noexcept;
+
 }  // namespace aw
 
 #endif

@@ -64,6 +64,32 @@ struct PackPruneOptions {
   double maxSeconds = 60.0;
 };
 
+// Query-time re-pruning of the reachable subgraph. Off by default; it is an
+// experiment.
+//
+// The registration-time dominance passes run on the whole graph, where the
+// workstation and stock guards cannot be resolved. By the time reachability has
+// finished, the subgraph holds only recipes the query can actually run, so the
+// cheap passes can be run again on it: the composite and direct passes no
+// longer need a workstation guard (a dominator that is present is runnable), and
+// a single-member tag inlined just before them removes the pseudo-node the
+// composite pass could not see through. Only recipes with a real output are
+// dropped here; the tag edges keep their own passes.
+struct SubgraphRepruneOptions {
+  bool enabled = false;
+
+  // Re-run the pack certificates on the subgraph too.
+  bool pack = true;
+
+  // Use the exact relation instead of the nonoptimal relaxation. Exact is the
+  // safe default; the relaxation was only argued for one application on the
+  // whole graph, see Prune.cpp.
+  bool exact = true;
+
+  // Wall-clock budget for the pack pass on the subgraph. <= 0 means no limit.
+  double packSeconds = 0.3;
+};
+
 // Budget for the satellite-elimination pass (docs/algorithm.typ, "孤岛消除").
 //
 // The pass runs inside reachableSubgraph, where the target and the inventory
@@ -131,10 +157,19 @@ struct Options {
   // Where single-use tag inlining runs. Read at registration time.
   TagInlineMode tagInlining = TagInlineMode::OFF;
 
+  // The single-member half of the inliner, see inlineSingleUseTagsCore. On by
+  // default; it is a plain substitution and never grows the recipe list, but it
+  // is separable because the many-member half has a very different cost.
+  bool inlineSingleMemberTags = true;
+
   // Pack and satellite budgets. Their `enabled` field is the switch for the
   // corresponding pass.
   PackPruneOptions pack;
   SatellitePruneOptions satellite;
+
+  // Query-time re-pruning of the reachable subgraph. Read by
+  // `reachableSubgraph` on every query, so it can be flipped at any time.
+  SubgraphRepruneOptions reprune;
 
   // -------------------------------------------------------------------------
   // Tag-pruning budgets.

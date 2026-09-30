@@ -227,9 +227,10 @@ void applyStage(const Stage &stage) {
 
 // Everything the registration-time passes read. Must run before
 // `registerCraftingGraph`.
-void configureForRegistration(bool nonoptimal, double packSeconds, double satelliteSeconds) {
+void configureForRegistration(bool nonoptimal, aw::TagInlineMode inlineMode,
+                              double packSeconds, double satelliteSeconds) {
   aw::options.nonoptimal = nonoptimal;
-  aw::options.tagInlining = aw::TagInlineMode::OFF;
+  aw::options.tagInlining = inlineMode;
   // Pack certificates are always computed; the stage only chooses whether the
   // query applies them, because the query gate is this same flag.
   aw::options.pack.enabled = true;
@@ -324,6 +325,9 @@ void usage() {
   std::fprintf(stderr,
                "usage: aw_bench --dataset <name> --awr <path> --plan <prefix> --config <name> --out <jsonl>\n"
                "                [--nonoptimal 0|1] [--flash 0|1] [--stage <profile>[:<label>]]...\n"
+               "                [--inline-tags off|pre|post|both]\n"
+               "                [--reprune 0|1] [--reprune-exact 0|1] [--reprune-pack 0|1]\n"
+               "                [--reprune-pack-seconds <s>]\n"
                "                [--amounts 1,100000] [--groups none,leaves,random20]\n"
                "                [--warmup N] [--repeats R]\n"
                "                [--time-limit 40] [--gap 0.01] [--workers 16]\n"
@@ -343,6 +347,16 @@ void usage() {
                "stages (cumulative): none seed direct recipe substitution tag pack satellite\n");
 }
 
+// Parse the --inline-tags value. Returns false on an unknown spelling.
+bool parseInlineMode(const std::string &text, aw::TagInlineMode &out) {
+  if (text == "off") out = aw::TagInlineMode::OFF;
+  else if (text == "pre") out = aw::TagInlineMode::PRE_PRUNE;
+  else if (text == "post") out = aw::TagInlineMode::QUERY_TIME;
+  else if (text == "both") out = aw::TagInlineMode::BOTH;
+  else return false;
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -360,6 +374,12 @@ int main(int argc, char **argv) {
   bool quiet = false;
   bool preprocessOnly = false;
   bool sampleWorkstations = false;
+  aw::TagInlineMode inlineMode = aw::TagInlineMode::OFF;
+  bool singleMemberInline = true;
+  bool reprune = false;
+  bool repruneExact = true;
+  bool reprunePack = true;
+  double reprunePackSeconds = 0.3;
   uint64_t wsSeed = awtools::kDefaultWorkstationSeed;
   int warmup = 1;
   int repeats = 1;
@@ -416,7 +436,29 @@ int main(int argc, char **argv) {
     else if (arg == "--workers") { std::string v; next(v); long long p = 0; if (!parseI64(v, p) || p < 0) return EXIT_FAILURE; workers = p; }
     else if (arg == "--pack-seconds") { std::string v; next(v); if (!parseDouble(v, packSeconds)) return EXIT_FAILURE; }
     else if (arg == "--satellite-seconds") { std::string v; next(v); if (!parseDouble(v, satelliteSeconds)) return EXIT_FAILURE; }
-    else if (arg == "--ws-percent") {
+    else if (arg == "--inline-tags") {
+      std::string value;
+      next(value);
+      if (!parseInlineMode(value, inlineMode)) {
+        std::fprintf(stderr, "--inline-tags needs off, pre, post or both\n");
+        return EXIT_FAILURE;
+      }
+    } else if (arg == "--single-member-inline") {
+      std::string value; next(value);
+      singleMemberInline = value != "0";
+    } else if (arg == "--reprune") {
+      std::string value; next(value);
+      reprune = value != "0";
+    } else if (arg == "--reprune-exact") {
+      std::string value; next(value);
+      repruneExact = value != "0";
+    } else if (arg == "--reprune-pack") {
+      std::string value; next(value);
+      reprunePack = value != "0";
+    } else if (arg == "--reprune-pack-seconds") {
+      std::string value; next(value);
+      if (!parseDouble(value, reprunePackSeconds)) return EXIT_FAILURE;
+    } else if (arg == "--ws-percent") {
       std::string v; next(v);
       double percent = 0.0;
       if (!parseDouble(v, percent) || percent < 0.0 || percent > 100.0) {
@@ -547,7 +589,8 @@ int main(int argc, char **argv) {
       namesPath.empty() ? std::map<aw::Handle, std::string>() : loadNames(namesPath);
   const double parseMs = sinceMs(parseStart);
 
-  configureForRegistration(nonoptimal, packSeconds, satelliteSeconds);
+  aw::options.inlineSingleMemberTags = singleMemberInline;
+  configureForRegistration(nonoptimal, inlineMode, packSeconds, satelliteSeconds);
   const auto registerStart = Clock::now();
   aw::registerCraftingGraph(bytes);
   const double registerMs = sinceMs(registerStart);
@@ -585,6 +628,13 @@ int main(int argc, char **argv) {
       stations.push_back_unchecked(handle);
   }
 
+  // Query-time re-pruning. Read by reachableSubgraph per query, so it is
+  // installed once here and every stage/group query below sees it.
+  aw::options.reprune.enabled = reprune;
+  aw::options.reprune.exact = repruneExact;
+  aw::options.reprune.pack = reprunePack;
+  aw::options.reprune.packSeconds = reprunePackSeconds;
+
   std::ofstream out(outPath);
   if (!out) {
     std::fprintf(stderr, "cannot write %s\n", outPath.c_str());
@@ -616,6 +666,16 @@ int main(int argc, char **argv) {
         .num("ws_sampled_count", (long long) wsSample.sampled)
         .num("ws_total", (long long) wsSample.total)
         .boolean("preprocess_only", preprocessOnly);
+    const char *inlineText = inlineMode == aw::TagInlineMode::PRE_PRUNE ? "pre"
+                             : inlineMode == aw::TagInlineMode::QUERY_TIME ? "post"
+                             : inlineMode == aw::TagInlineMode::BOTH       ? "both"
+                                                                           : "off";
+    json.str("inline_tags", inlineText)
+        .boolean("single_member_inline", singleMemberInline)
+        .boolean("reprune", reprune)
+        .boolean("reprune_exact", repruneExact)
+        .boolean("reprune_pack", reprunePack)
+        .real("reprune_pack_seconds", reprunePackSeconds);
     std::string stageNames;
     for (size_t k = 0; k < stages.size(); k++) {
       if (k != 0) stageNames += ",";

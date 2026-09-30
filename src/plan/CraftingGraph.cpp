@@ -340,16 +340,25 @@ void canonicalizeRecipes() noexcept {
 // ---------------------------------------------------------------------------
 // Single-use tag inlining
 // ---------------------------------------------------------------------------
-// See TagInlineMode in the header. A tag T with member edges `T <- m1 .. T <-
-// mn` and exactly one real consumer `R: a <- T, ...` that consumes T once at
-// amount 1 is replaced by the n real recipes `a <- m1, ...`: the tag node, its
-// n member edges and R disappear, and n recipes take their place. The recipe
-// count therefore drops by exactly one per inlined tag.
+// See TagInlineMode in the header. Two shapes are unfolded:
 //
-// The transform is a fixpoint, but it cannot cascade into a product of member
-// sets: the n copies of R are consumers of every *other* tag R used, so those
-// tags stop being single-use and are never expanded. Each inlining strictly
-// decreases the recipe count, so the loop terminates.
+//   * Many members, one consumer. A tag T with member edges `T <- m1 .. T <-
+//     mn` and exactly one real consumer `R: a <- T, ...` that consumes T once
+//     at amount 1 is replaced by the n real recipes `a <- m1, ...`: the tag
+//     node, its n member edges and R disappear, and n recipes take their
+//     place. The recipe count therefore drops by exactly one per inlined tag.
+//
+//   * One member, any consumers. A tag T with a single surviving member m is
+//     exactly m, so every consumer can spend m directly: replacing each `T`
+//     input by `m` preserves the amount, and the tag node and its one member
+//     edge disappear. This is the shape pruning leaves behind when every other
+//     member edge was marked dominated (or was dropped by reachability), and
+//     it is the one that lets the consumer count stay arbitrary.
+//
+// The transform is a fixpoint, but the many-member branch cannot cascade into a
+// product of member sets: the n copies of R are consumers of every *other* tag
+// R used, so those tags stop being single-use and are never expanded. Each
+// inlining strictly decreases the recipe count, so the loop terminates.
 
 struct MutableRecipe {
   NodeId out = 0;
@@ -368,7 +377,7 @@ struct MutableRecipe {
 // members whose stock the player can still spend.
 template <typename Allowed>
 bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
-                             uint nItem, Allowed allowed) {
+                             uint nItem, bool singleMemberRule, Allowed allowed) {
   if (nItem <= nReal || recipes.empty())
     return false;
 
@@ -397,72 +406,149 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
     members[rec.out].push_back(rec.inputs[0]);
   }
 
-  // The consumer side of a tag: the number of input slots that name it, the
-  // (single) recipe that owns the slot and the amount it consumes.
-  aw::vector<uint32_t> consumerCount(nItem, 0);
-  aw::vector<uint32_t> consumerRecipe(nItem, 0);
-  aw::vector<Amount> consumerAmount(nItem, 0);
-  bool changed = false;
-
-  while (true) {
-    std::fill(consumerCount.begin(), consumerCount.end(), 0);
+  // The consumer side of a tag: the real recipes that name it, grouped by tag.
+  // A recipe lists each tag at most once, so a row's length is the tag's
+  // consumer count. The relation is built once: neither rule can make a tag
+  // newly eligible. The many-member rule only raises other tags' counts (its
+  // copies keep the same inputs), and the single-member rule only replaces a
+  // tag input by a real one, so the eligible set only shrinks and one sweep is
+  // the whole fixpoint.
+  aw::vector<uint> consOffsets(nItem + 1, 0);
+  for (const MutableRecipe &rec : recipes) {
+    if (rec.out >= nReal)
+      continue;
+    for (NodeId j : rec.inputs)
+      if (j >= nReal)
+        consOffsets[j + 1]++;
+  }
+  for (NodeId t = 0; t < nItem; t++)
+    consOffsets[t + 1] += consOffsets[t];
+  aw::vector<uint32_t> consRecipes(consOffsets.back());
+  {
+    aw::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
     for (uint i = 0; i < recipes.size(); i++) {
-      const MutableRecipe& rec = recipes[i];
+      const MutableRecipe &rec = recipes[i];
       if (rec.out >= nReal)
         continue;
-      for (size_t k = 0; k < rec.inputs.size(); k++) {
-        const NodeId j = rec.inputs[k];
-        if (j < nReal)
+      for (NodeId j : rec.inputs)
+        if (j >= nReal)
+          consRecipes[cursor[j]++] = i;
+    }
+  }
+  const auto consumersOf = [&](NodeId t) noexcept {
+    return std::span<const uint32_t>(consRecipes.data() + consOffsets[t],
+                                     consOffsets[t + 1] - consOffsets[t]);
+  };
+
+  // Recipe ids stay stable: both rules only mark, and the rewritten list is
+  // built in one pass at the end.
+  aw::vector<uint8_t> deleted(recipes.size(), 0);
+  aw::vector<uint8_t> claimedConsumer(recipes.size(), 0);
+  aw::vector<uint32_t> expansionTag(recipes.size(), UINT32_MAX);
+  aw::vector<uint8_t> tagDeleted(nItem, 0);
+  bool changed = false;
+
+  // Rule 1: a tag with a single surviving member is that member, so every
+  // consumer can spend it directly, keeping the amount. Substituting in place
+  // cannot invalidate any other tag, so all of them are applied in one sweep.
+  if (singleMemberRule) {
+    for (NodeId t = nReal; t < nItem; t++) {
+      if (!simpleTag[t] || members[t].size() != 1)
+        continue;
+      const auto consumers = consumersOf(t);
+      if (consumers.empty())
+        continue;
+      const NodeId m = members[t][0];
+      for (uint32_t consumer : consumers) {
+        MutableRecipe &rec = recipes[consumer];
+        const auto it = std::lower_bound(rec.inputs.begin(), rec.inputs.end(), t);
+        if (it == rec.inputs.end() || *it != t)
           continue;
-        consumerCount[j]++;
-        consumerRecipe[j] = i;
-        consumerAmount[j] = rec.amounts[k];
+        const size_t slot = (size_t) (it - rec.inputs.begin());
+        const Amount amount = rec.amounts[slot];
+        rec.inputs.erase(rec.inputs.begin() + slot);
+        rec.amounts.erase(rec.amounts.begin() + slot);
+        const auto at = std::lower_bound(rec.inputs.begin(), rec.inputs.end(), m);
+        const size_t pos = (size_t) (at - rec.inputs.begin());
+        if (pos < rec.inputs.size() && rec.inputs[pos] == m) {
+          rec.amounts[pos] += amount;
+        } else {
+          rec.inputs.insert(rec.inputs.begin() + pos, m);
+          rec.amounts.insert(rec.amounts.begin() + pos, amount);
+        }
       }
+      tagDeleted[t] = 1;
+      changed = true;
     }
+  }
 
-    uint32_t chosen = UINT32_MAX;
-    for (uint t = nReal; t < nItem; t++) {
-      if (simpleTag[t] && !members[t].empty() && consumerCount[t] == 1 &&
-          consumerAmount[t] == 1) {
-        chosen = t;
-        break;
-      }
-    }
-    if (chosen == UINT32_MAX)
-      break;
+  // Rule 2: a many-member tag with one consumer, consumed once at amount 1, is
+  // expanded into one copy of that consumer per member. Two eligible tags that
+  // share the consumer cannot both be expanded -- the first copy set turns the
+  // other into a multi-consumer tag -- so at most one tag is claimed per
+  // consumer recipe.
+  for (NodeId t = nReal; t < nItem; t++) {
+    if (!simpleTag[t] || members[t].size() < 2)
+      continue;
+    const auto consumers = consumersOf(t);
+    if (consumers.size() != 1)
+      continue;
+    const uint32_t consumer = consumers[0];
+    if (claimedConsumer[consumer])
+      continue;
+    const MutableRecipe &rec = recipes[consumer];
+    const auto it = std::lower_bound(rec.inputs.begin(), rec.inputs.end(), t);
+    if (it == rec.inputs.end() || *it != t)
+      continue;
+    if (rec.amounts[(size_t) (it - rec.inputs.begin())] != 1)
+      continue;
+    claimedConsumer[consumer] = 1;
+    expansionTag[consumer] = t;
+    tagDeleted[t] = 1;
+  }
 
-    const uint t = chosen;
-    const uint32_t consumer = consumerRecipe[t];
-    const aw::vector<NodeId> ms = members[t];
+  bool anyExpansion = false;
+  for (uint i = 0; i < recipes.size() && !anyExpansion; i++)
+    anyExpansion = claimedConsumer[i] != 0;
+  if (!changed && !anyExpansion)
+    return false;
 
+  // Drop every member edge of an inlined tag.
+  for (uint i = 0; i < recipes.size(); i++) {
+    const NodeId out = recipes[i].out;
+    if (out >= nReal && tagDeleted[out])
+      deleted[i] = 1;
+  }
+
+  // The survivors, then one copy of each claimed consumer per member.
+  aw::vector<MutableRecipe> next;
+  next.reserve(recipes.size());
+  for (uint i = 0; i < recipes.size(); i++) {
+    if (deleted[i] || claimedConsumer[i])
+      continue;
+    next.push_back(std::move(recipes[i]));
+  }
+  for (uint i = 0; i < recipes.size(); i++) {
+    if (!claimedConsumer[i])
+      continue;
+    const NodeId t = expansionTag[i];
     // The consumer without its tag input. Inputs are strictly ascending, so
-    // this keeps them ordered.
+    // dropping the one slot keeps them ordered.
     aw::vector<NodeId> newInputs;
     aw::vector<Amount> newAmounts;
-    newInputs.reserve(recipes[consumer].inputs.size());
-    newAmounts.reserve(recipes[consumer].inputs.size());
-    for (size_t k = 0; k < recipes[consumer].inputs.size(); k++) {
-      if (recipes[consumer].inputs[k] == t)
+    newInputs.reserve(recipes[i].inputs.size());
+    newAmounts.reserve(recipes[i].inputs.size());
+    for (size_t k = 0; k < recipes[i].inputs.size(); k++) {
+      if (recipes[i].inputs[k] == t)
         continue;
-      newInputs.push_back_unchecked(recipes[consumer].inputs[k]);
-      newAmounts.push_back_unchecked(recipes[consumer].amounts[k]);
+      newInputs.push_back_unchecked(recipes[i].inputs[k]);
+      newAmounts.push_back_unchecked(recipes[i].amounts[k]);
     }
-
-    // Drop the consumer and every member edge of the tag, then add a copy of
-    // the consumer per member. recipes[consumer] is skipped rather than moved,
-    // so it is still readable while the copies are built.
-    aw::vector<MutableRecipe> next;
-    next.reserve(recipes.size() - 1);
-    for (uint i = 0; i < recipes.size(); i++) {
-      if (i == consumer || recipes[i].out == t)
-        continue;
-      next.push_back(std::move(recipes[i]));
-    }
-    for (NodeId m : ms) {
+    for (NodeId m : members[t]) {
       MutableRecipe copy;
-      copy.out = recipes[consumer].out;
-      copy.outAmt = recipes[consumer].outAmt;
-      copy.ws = recipes[consumer].ws;
+      copy.out = recipes[i].out;
+      copy.outAmt = recipes[i].outAmt;
+      copy.ws = recipes[i].ws;
       copy.inputs = newInputs;
       copy.amounts = newAmounts;
       const auto it = std::lower_bound(copy.inputs.begin(), copy.inputs.end(), m);
@@ -475,9 +561,9 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
       }
       next.push_back(std::move(copy));
     }
-    recipes.swap(next);
-    changed = true;
   }
+  recipes.swap(next);
+  changed = true;
   return changed;
 }
 
@@ -689,6 +775,7 @@ void inlineSingleUseTags(CraftingGraph& graph) noexcept {
   aw::vector<MutableRecipe> recipes;
   extractRecipes(graph, recipes);
   if (!inlineSingleUseTagsCore(recipes, graph.nReal, graph.nItem,
+                               options.inlineSingleMemberTags,
                                [](uint) { return true; }))
     return;
   rebuildFromRecipes(graph, recipes);
@@ -1237,8 +1324,33 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   // the registration-time flattening has.
   if (options.tagInlining == TagInlineMode::QUERY_TIME ||
       options.tagInlining == TagInlineMode::BOTH) {
-    inlineSingleUseTagsCore(built, graph.nReal, graph.nItem, [](uint) { return true; });
+    inlineSingleUseTagsCore(built, graph.nReal, graph.nItem,
+                            options.inlineSingleMemberTags, [](uint) { return true; });
     dropUnusedItems(query.itemSeen, output, built);
+  }
+
+  // Query-time re-pruning. The passes are written against a whole crafting
+  // graph, so the live subgraph is assembled once as a probe, the newly
+  // dominated recipes are found, and the survivors are assembled again. This
+  // runs after the inliner so the composite relation sees real inputs where a
+  // tag used to be.
+  if (options.reprune.enabled) {
+    const Subgraph probe = assembleSubgraph(query.itemSeen, built);
+    const aw::vector<uint8_t> drop = aw::detail::repruneSubgraph(probe, inventory);
+    size_t kept = 0;
+    bool any = false;
+    for (size_t i = 0; i < built.size(); i++) {
+      if (i < drop.size() && drop[i]) {
+        any = true;
+        continue;
+      }
+      if (kept != i)
+        built[kept] = std::move(built[i]);
+      kept++;
+    }
+    built.resize(kept);
+    if (any)
+      dropUnusedItems(query.itemSeen, output, built);
   }
 
   return assembleSubgraph(query.itemSeen, built);

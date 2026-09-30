@@ -757,4 +757,90 @@ void prune(CraftingGraph &graph) noexcept {
 #endif
 }
 
+namespace detail {
+
+// Query-time re-pruning. See Prune.h for the contract. The subgraph's base
+// graph is copied into a throwaway CraftingGraph because the passes are written
+// against the full graph struct; only the base fields are read and only the
+// pruning vectors are written, so the copy is the whole cost.
+aw::vector<uint8_t> repruneSubgraph(const Subgraph &sub,
+                                    std::span<const Amount> sourceInventory) noexcept {
+  const uint nRecipe = sub.graph.nRecipe;
+  aw::vector<uint8_t> drop(nRecipe, 0);
+  if (!options.reprune.enabled || nRecipe == 0)
+    return drop;
+
+  CraftingGraph g;
+  static_cast<BaseCraftingGraph &>(g) = sub.graph;
+  // No workstations: every recipe that survived the walk is runnable with the
+  // query's station set, so a dominator present in the subgraph is available by
+  // construction and the composite/direct passes need no guard for it. An
+  // explicitly empty CSR keeps `targetsOf` well defined for the unknown ones.
+  g.workstations.offsets.assign(nRecipe + 1, 0);
+  // The registration-time marks are not part of the subgraph, so the pass sees
+  // a clean slate. Sizing them to nRecipe lets the pack pass skip the recipes
+  // the other two just certified.
+  g.tagEdgeDominated.assign(nRecipe, 0);
+
+  const bool savedNonoptimal = options.nonoptimal;
+  const bool savedPack = options.pack.enabled;
+  const double savedPackSeconds = options.pack.maxSeconds;
+  options.nonoptimal = !options.reprune.exact;
+  options.pack.enabled = options.reprune.pack;
+  if (options.reprune.pack && options.reprune.packSeconds > 0.0)
+    options.pack.maxSeconds = options.reprune.packSeconds;
+
+  RecipeVectors vec(g);
+  computeRecipePruning(g, vec);
+  computeDirectDominancePruning(g, vec);
+  computeDeadnodePruning(g);
+  computePackPruning(g);
+
+  options.nonoptimal = savedNonoptimal;
+  options.pack.enabled = savedPack;
+  options.pack.maxSeconds = savedPackSeconds;
+
+  // Stock of a subgraph item, read through the remapping.
+  const auto held = [&](NodeId subItem) noexcept -> Amount {
+    if (subItem >= sub.itemOrigin.size())
+      return 0;
+    const NodeId source = sub.itemOrigin[subItem];
+    return source < sourceInventory.size() ? sourceInventory[source] : 0;
+  };
+
+  for (uint r = 0; r < nRecipe; r++) {
+    // Tag edges are the tag passes' business, and the query-time inliner has
+    // already removed the reducible ones. Leaving them also keeps a tag
+    // satisfiable if a pack certificate would otherwise have removed its last
+    // member edge.
+    if (g.output[r] >= g.nReal)
+      continue;
+
+    bool dropRecipe = false;
+    // Composite: only when the witness input really has no stock, exactly as
+    // the walk gates the registration-time mark.
+    if (g.recipeDominated[r] && held(g.recipeGuardInput[r]) == 0)
+      dropRecipe = true;
+    // Direct: the dominator is present, so no further gate.
+    if (g.recipeDirectDominated[r])
+      dropRecipe = true;
+    // Pack: keep it when any of the certificate's zero-stock items is stocked.
+    if (!dropRecipe && g.packDominated[r]) {
+      bool clear = true;
+      for (NodeId item : g.packCertificates[r].zeroStock) {
+        if (held(item) > 0) {
+          clear = false;
+          break;
+        }
+      }
+      if (clear)
+        dropRecipe = true;
+    }
+    drop[r] = dropRecipe ? 1 : 0;
+  }
+  return drop;
+}
+
+}  // namespace detail
+
 }  // namespace aw
