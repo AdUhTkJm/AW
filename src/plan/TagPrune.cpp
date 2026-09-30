@@ -4,7 +4,7 @@
 // another member w cost-dominates m -- every way of crafting m either consumes
 // at least as much w, or is replaceable by a recipe of w -- the edge `T <- m`
 // is never part of an optimal plan, so it is marked dominated here and the
-// query-time subgraph drops it. See docs/algorithm.typ, "基于支配的剪枝".
+// query-time subgraph drops it. See docs/algorithm.typ.
 //
 // The pass computes the greatest fixpoint of a candidate relation over pairs
 // (x, w), read "x is dominated by w", where x is a real item or a simple tag
@@ -37,12 +37,6 @@ void prefixSum(aw::vector<uint> &v) noexcept {
     v[i + 1] += v[i];
 }
 
-template<class T>
-void dedup(aw::vector<T> &v) noexcept {
-  std::sort(v.begin(), v.end());
-  v.erase(std::unique(v.begin(), v.end()), v.end());
-}
-
 void intersect(const aw::vector<NodeId> &a, const aw::vector<NodeId> &b,
                      aw::vector<NodeId> &out) noexcept {
   out.clear();
@@ -61,45 +55,20 @@ void intersect(const aw::vector<NodeId> &a, const aw::vector<NodeId> &b,
   }
 }
 
-// Merges the (unsorted, possibly duplicated) `cand` into the sorted-unique
-// `dst`, keeping `dst` sorted, and returns the entries that were not already in
-// it. The closure below inserts one frontier at a time, so appending a sorted
-// batch beats probing a hash table and matches the sort/unique style of the
-// rest of the pass. A row holds first components only -- its witness is the row
-// index -- so T is always NodeId here.
-template<class T>
-aw::vector<T> mergeNewSorted(aw::vector<T> &dst,
-                             aw::vector<T> &cand) noexcept {
-  dedup<T>(cand);
-  aw::vector<T> added;
-  if (cand.empty())
-    return added;
-  // Every new entry comes from `cand`, so size the result up front.
-  added.reserve(cand.size());
-
-  aw::vector<T> merged;
-  merged.reserve(dst.size() + cand.size());
+// Merges two ascending, internally unique runs into `out`. The item ids of a
+// witness row all sit below nReal and its tag ids all at or above it, so the
+// two halves of a row never overlap and the merge needs no duplicate handling.
+void mergeDisjoint(const aw::vector<NodeId> &a, const aw::vector<NodeId> &b,
+                   aw::vector<NodeId> &out) noexcept {
+  out.clear();
+  out.reserve(a.size() + b.size());
   size_t i = 0, j = 0;
-  while (i < dst.size() && j < cand.size()) {
-    if (dst[i] < cand[j]) {
-      merged.push_back_unchecked(dst[i++]);
-    } else if (cand[j] < dst[i]) {
-      added.push_back_unchecked(cand[j]);
-      merged.push_back_unchecked(cand[j++]);
-    } else {
-      merged.push_back_unchecked(dst[i]);
-      i++;
-      j++;
-    }
-  }
-  while (i < dst.size())
-    merged.push_back_unchecked(dst[i++]);
-  while (j < cand.size()) {
-    added.push_back_unchecked(cand[j]);
-    merged.push_back_unchecked(cand[j++]);
-  }
-  dst.swap(merged);
-  return added;
+  while (i < a.size() && j < b.size())
+    out.push_back_unchecked(a[i] < b[j] ? a[i++] : b[j++]);
+  while (i < a.size())
+    out.push_back_unchecked(a[i++]);
+  while (j < b.size())
+    out.push_back_unchecked(b[j++]);
 }
 
 // State of one tag-pruning pass over the crafting graph. run() calls the
@@ -169,6 +138,10 @@ struct TagPruner {
   aw::vector<uint8_t> rowAlive;
   aw::vector<NodeId> candRow;
 
+  // Scratch bitmap over the item id universe, one bit per item, always left
+  // clear. sortIds() uses it to sort and dedup a batch without comparisons.
+  aw::vector<uint64_t> idBits;             // ceil(nItem / 64)
+
   // The alive co-member edges of every tag, packed as a bit matrix so that the
   // SCC stage never needs a discarded row: bit (a, b) of tag t is set when
   // alive(members[t][a], members[t][b]). tagAdjBits is [tagAdjOffsets[t],
@@ -203,6 +176,13 @@ struct TagPruner {
   void computeUnitOutputs() noexcept;
   void allocateTagAdjacency() noexcept;
   void seedWitnessPairs() noexcept;
+  // Replaces `v` with its ascending, duplicate-free contents.
+  void sortIds(aw::vector<NodeId> &v) noexcept;
+  // Merges the (unsorted, possibly duplicated) `cand` into the sorted-unique
+  // `dst`, keeping `dst` sorted, and returns the entries that were not already
+  // in it.
+  aw::vector<NodeId> mergeNewSorted(aw::vector<NodeId> &dst,
+                                    aw::vector<NodeId> &cand) noexcept;
   // Builds the pair set for witness w; false when the row has no seeds.
   bool seedRow(NodeId w) noexcept;
   // Expands that row to its closure; nonoptimal mode only.
@@ -230,6 +210,7 @@ void TagPruner::run() noexcept {
   if (nItem == 0 || nReal == 0 || nRecipe == 0)
     return;
 
+  idBits.assign((nItem + 63) / 64, 0);
   findSimpleTags();
   budgetTagUniverse();
   buildMemberIndex();
@@ -247,6 +228,78 @@ void TagPruner::run() noexcept {
     recordRowScc(w);
   }
   pruneDominatedEdges();
+}
+
+// Optimized from std::sort + std::unique.
+// Use a bitset when v is large, to avoid O(n log n).
+void TagPruner::sortIds(aw::vector<NodeId> &v) noexcept {
+  const size_t n = v.size();
+  if (n < 2)
+    return;
+  if (n < 64 || n * 8 < idBits.size()) {
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+    return;
+  }
+
+  // Bucket sorting, set bit `x` to 1.
+  for (NodeId x : v)
+    idBits[x >> 6] |= 1ULL << (x & 63);
+
+  // Scan through 1's and extract the elements.
+  uint out = 0;
+  for (uint word = 0; word < idBits.size(); word++) {
+    uint64_t bits = idBits[word];
+    if (bits == 0)
+      continue;
+    idBits[word] = 0;
+    do {
+      v[out++] = (NodeId) (word * 64 + std::countr_zero(bits));
+      bits &= bits - 1;
+    } while (bits != 0);
+  }
+  v.resize(out);
+}
+
+// Merges the (unsorted, possibly duplicated) `cand` into the sorted-unique
+// `dst`, keeping `dst` sorted, and returns the entries that were not already in
+// it. A row holds first components only -- its witness is the row index -- so
+// the ids are always plain NodeIds. Turning the batch into a sorted run first
+// and then merging it linearly is what lets the closure expand one frontier at
+// a time: whatever `dst` already held is dropped here, so the returned frontier
+// is exactly the new pairs of that round.
+aw::vector<NodeId> TagPruner::mergeNewSorted(aw::vector<NodeId> &dst,
+                                             aw::vector<NodeId> &cand) noexcept {
+  sortIds(cand);
+  aw::vector<NodeId> added;
+  if (cand.empty())
+    return added;
+  // Every new entry comes from `cand`, so size the result up front.
+  added.reserve(cand.size());
+
+  aw::vector<NodeId> merged;
+  merged.reserve(dst.size() + cand.size());
+  size_t i = 0, j = 0;
+  while (i < dst.size() && j < cand.size()) {
+    if (dst[i] < cand[j]) {
+      merged.push_back_unchecked(dst[i++]);
+    } else if (cand[j] < dst[i]) {
+      added.push_back_unchecked(cand[j]);
+      merged.push_back_unchecked(cand[j++]);
+    } else {
+      merged.push_back_unchecked(dst[i]);
+      i++;
+      j++;
+    }
+  }
+  while (i < dst.size())
+    merged.push_back_unchecked(dst[i++]);
+  while (j < cand.size()) {
+    added.push_back_unchecked(cand[j]);
+    merged.push_back_unchecked(cand[j++]);
+  }
+  dst.swap(merged);
+  return added;
 }
 
 // ---- Simple tags and their members ------------------------------------
@@ -270,7 +323,7 @@ void TagPruner::findSimpleTags() noexcept {
       ms.push_back_unchecked(inputs[0]);
     }
 
-    dedup<NodeId>(ms);
+    sortIds(ms);
     allowedTags[t] = 1;
     members[t] = std::move(ms);
   }
@@ -381,50 +434,23 @@ void TagPruner::computeQualifiedInputs() noexcept {
         }
       }
     }
-    dedup<NodeId>(qualReal[m]);
-    dedup<NodeId>(qualTags[m]);
+    sortIds(qualReal[m]);
+    sortIds(qualTags[m]);
   }
 }
 
-// ---- Batching guard ----------------------------------------------------
-// Dropping `T <- m` is only safe when the plan can give up the m it consumes.
-// Every justification below is a per-execution swap, which stops being
-// equivalent once a producer of m emits several units at a time: a plan that
-// runs `m x8 <- w x8` to satisfy some other consumer of m gets 7 units of m
-// for free, and it spends one of them on `T <- m`. Deleting that edge then
-// has to make the 7 units (and the one spent) up with a real w craft while
-// the batch keeps running, so the optimum rises even though every recipe of
-// m does consume w at an equal rate.
-//
-// Real witness in the ATM10 graph: `enderio:fused_quartz_d_black x3` costs 26
-// real steps with tag pruning off and 27 with it, because
-// `#12695 <- fused_quartz_d_black` is dropped while the batch
-// `fused_quartz_d_black x8 <- black_dye + #12695 x8` still runs for the
-// target's three units. `minecraft:stick x7` (3 vs 4) is the same effect on
-// the column-cover branch, through `#12650 <- demonic_wooden_stairs` and
-// `demonic_wooden_stairs x4 <- demonic_planks x6`.
-//
-// Requiring every producer of m to emit exactly one unit restores the
-// per-execution argument: freeing k units of m demand then removes exactly k
-// producer executions, and each of them consumed at least one unit of the
-// dominator (or was covered by a single dominator execution), which pays for
-// the k new `T <- w` edges. A member that does not qualify is simply kept, so
-// the guard can only ever prune less.
-//
-// Nonoptimal mode skips the guard, so a batched member can be marked
-// dominated: dropping its tag edge then relies on "m is a better co-member
-// than w" even though a plan may have to keep a batch running. Skipping the
-// guard also means the scan below is not needed.
+// On optimal mode, we can prune only if it's 1:1.
 void TagPruner::computeUnitOutputs() noexcept {
   if (nonoptimal)
     return;
   unitOutput.assign(nItem, 1);
-  for (NodeId m = 0; m < nReal; m++)
+  for (NodeId m = 0; m < nReal; m++) {
     for (NodeId recipeNode : graph.i2r.targetsOf(m))
       if (graph.outputAmt[recipeNode - nItem] != 1) {
         unitOutput[m] = 0;
         break;
       }
+  }
 }
 
 // ---- The universe of candidate pairs ----------------------------------
@@ -480,7 +506,7 @@ void TagPruner::seedWitnessPairs() noexcept {
           scratch.insert(scratch.end(), members[j].begin(), members[j].end());
         }
       }
-      dedup<NodeId>(scratch);
+      sortIds(scratch);
       if (first) {
         acc.swap(scratch);
         first = false;
@@ -526,7 +552,7 @@ bool TagPruner::seedRow(NodeId w) noexcept {
   }
   if (rowItems.empty())
     return false;
-  dedup<NodeId>(rowItems);
+  sortIds(rowItems);
 
   candRow.clear();
   for (NodeId m : rowItems)
@@ -536,16 +562,14 @@ bool TagPruner::seedRow(NodeId w) noexcept {
         continue;
       candRow.push_back(j);
     }
-  mergeNewSorted<NodeId>(rowTags, candRow);
+  mergeNewSorted(rowTags, candRow);
 
   if (nonoptimal)
     rowClosure(w);
 
-  rowX.clear();
-  rowX.reserve(rowItems.size() + rowTags.size());
-  rowX.insert(rowX.end(), rowItems.begin(), rowItems.end());
-  rowX.insert(rowX.end(), rowTags.begin(), rowTags.end());
-  dedup<NodeId>(rowX);
+  // Every item id sits below nReal and every tag id at or above it, so the row
+  // is the two sorted runs merged back to back.
+  mergeDisjoint(rowItems, rowTags, rowX);
   return true;
 }
 
@@ -569,7 +593,7 @@ void TagPruner::rowClosure(NodeId w) noexcept {
           break;
         candRow.push_back(j);
       }
-    const aw::vector<NodeId> newTags = mergeNewSorted<NodeId>(rowTags, candRow);
+    const aw::vector<NodeId> newTags = mergeNewSorted(rowTags, candRow);
     total += newTags.size();
 
     candRow.clear();
@@ -594,7 +618,7 @@ void TagPruner::rowClosure(NodeId w) noexcept {
         candRow.push_back(j);
       }
     const aw::vector<NodeId> newItems =
-        mergeNewSorted<NodeId>(rowItems, candRow);
+        mergeNewSorted(rowItems, candRow);
     total += newItems.size();
     frontierItems = newItems;
     frontierTags = newTags;
