@@ -60,7 +60,7 @@ struct HandleSpans {
   uint32_t variantEnd;
 };
 
-inline constexpr uint32_t kChineseAbsent = 0xFFFFFFFFu;
+inline constexpr uint32_t CHINESE_ABSENT = 0xFFFFFFFFu;
 
 struct SearchIndex {
   std::vector<TokenRef> idTokens;

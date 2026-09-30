@@ -4,12 +4,12 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <iostream>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
+#include <sstream> // IWYU pragma: keep
+#include <fstream> // IWYU pragma: keep
 
 #include "aw/search/TextIndex.h"
 

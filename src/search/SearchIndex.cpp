@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -37,11 +36,11 @@ enum FieldRank : uint8_t {
 // The variants of one handle are capped: a name with many polyphonic characters
 // would otherwise explode combinatorially. Weight-ordered generation keeps the
 // readings a human is most likely to have meant inside the cap.
-constexpr uint32_t kMaxVariants = 8;
-constexpr uint32_t kMaxReadings = 8;
+constexpr uint32_t MAX_VARIANTS = 8;
+constexpr uint32_t MAX_READINGS = 8;
 
 struct ReadingList {
-  std::string_view items[kMaxReadings];
+  std::string_view items[MAX_READINGS];
   uint8_t count = 0;
 };
 
@@ -143,7 +142,7 @@ void collectReadings(uint32_t codepoint, ReadingList &out) noexcept {
   out.count = 0;
   if (const pinyin::PinyinEntry *entry = pinyin::find(codepoint)) {
     pinyin::forEachReading(*entry, [&out](std::string_view reading) {
-      if (out.count < kMaxReadings)
+      if (out.count < MAX_READINGS)
         out.items[out.count++] = reading;
     });
   }
@@ -176,7 +175,7 @@ void appendVariant(const std::vector<ReadingList> &chars, const std::vector<uint
 // before two, which is the more likely intent when the cap is hit.
 void emitCombos(size_t position, uint32_t remaining, const std::vector<ReadingList> &chars,
                 std::vector<uint8_t> &combo, SearchIndex &index, uint32_t &emitted) {
-  if (emitted >= kMaxVariants)
+  if (emitted >= MAX_VARIANTS)
     return;
   if (position == chars.size()) {
     if (remaining == 0) {
@@ -193,7 +192,7 @@ void emitCombos(size_t position, uint32_t remaining, const std::vector<ReadingLi
   for (uint8_t reading = 1; reading < count; reading++) {
     combo[position] = reading;
     emitCombos(position + 1, remaining - 1, chars, combo, index, emitted);
-    if (emitted >= kMaxVariants)
+    if (emitted >= MAX_VARIANTS)
       return;
   }
   combo[position] = 0;
@@ -212,7 +211,7 @@ void buildPinyin(std::string_view chinese, SearchIndex &index, std::vector<Readi
   }
   combo.assign(chars.size(), 0);
   uint32_t emitted = 0;
-  for (uint32_t weight = 0; (size_t) weight <= chars.size() && emitted < kMaxVariants; weight++)
+  for (uint32_t weight = 0; (size_t) weight <= chars.size() && emitted < MAX_VARIANTS; weight++)
     emitCombos(0, weight, chars, combo, index, emitted);
 }
 
@@ -321,7 +320,7 @@ bool matchSparseSubstring(const TextIndex &text, const std::vector<TokenRef> &to
 // Direct Chinese search: contiguous bytes, so 暗铁 does not match 暗影铁锭.
 bool matchChineseRaw(const TextIndex &text, uint32_t offset,
                      const std::vector<std::string_view> &query, FieldMatch &out) noexcept {
-  if (offset == kChineseAbsent)
+  if (offset == CHINESE_ABSENT)
     return false;
   const std::string_view name(text.arena.data() + offset);
   size_t cursor = 0;
@@ -467,31 +466,32 @@ bool matchHandle(const TextIndex &text, uint32_t handle,
 
 void buildSearchIndex(const TextIndex &text) {
   SearchIndex index;
-  if (!text.empty()) {
-    index.empty = false;
-    index.handles.resize(text.handleCount + 1);
-    std::vector<ReadingList> chars;
-    std::vector<uint8_t> combo;
-    for (uint32_t handle = 1; handle <= text.handleCount; handle++) {
-      HandleSpans &spans = index.handles[handle];
+  if (!text.empty())
+    return;
+  
+  index.empty = false;
+  index.handles.resize(text.handleCount + 1);
+  std::vector<ReadingList> chars;
+  std::vector<uint8_t> combo;
+  for (uint32_t handle = 1; handle <= text.handleCount; handle++) {
+    HandleSpans &spans = index.handles[handle];
 
-      const std::string_view id = text.text(handle, RESOURCE_ID);
-      spans.idBegin = (uint32_t) index.idTokens.size();
-      addTokens(id, arenaOffset(text, id), index.idTokens);
-      spans.idEnd = (uint32_t) index.idTokens.size();
+    const std::string_view id = text.text(handle, RESOURCE_ID);
+    spans.idBegin = (uint32_t) index.idTokens.size();
+    addTokens(id, arenaOffset(text, id), index.idTokens);
+    spans.idEnd = (uint32_t) index.idTokens.size();
 
-      const std::string_view english = text.text(handle, ENGLISH_NAME);
-      spans.enBegin = (uint32_t) index.enTokens.size();
-      addTokens(english, arenaOffset(text, english), index.enTokens);
-      spans.enEnd = (uint32_t) index.enTokens.size();
+    const std::string_view english = text.text(handle, ENGLISH_NAME);
+    spans.enBegin = (uint32_t) index.enTokens.size();
+    addTokens(english, arenaOffset(text, english), index.enTokens);
+    spans.enEnd = (uint32_t) index.enTokens.size();
 
-      const std::string_view chinese = text.text(handle, CHINESE_NAME);
-      spans.chineseOffset = chinese.empty() ? kChineseAbsent : arenaOffset(text, chinese);
+    const std::string_view chinese = text.text(handle, CHINESE_NAME);
+    spans.chineseOffset = chinese.empty() ? CHINESE_ABSENT : arenaOffset(text, chinese);
 
-      spans.variantBegin = (uint32_t) index.variants.size();
-      buildPinyin(chinese, index, chars, combo);
-      spans.variantEnd = (uint32_t) index.variants.size();
-    }
+    spans.variantBegin = (uint32_t) index.variants.size();
+    buildPinyin(chinese, index, chars, combo);
+    spans.variantEnd = (uint32_t) index.variants.size();
   }
   gIndex = std::move(index);
 }

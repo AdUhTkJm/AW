@@ -19,6 +19,7 @@
 #include "aw/plan/Options.h"
 #include "aw/plan/Plan.h"
 #include "aw/plan/Profiler.h"
+#include "aw/plan/Status.h"
 
 namespace {
 
@@ -1273,7 +1274,7 @@ int main(int argc, char** argv) {
               << ", branches=" << plan.numBranches
               << ", fixed=" << plan.fixedColumns << '\n';
 
-    if (plan.status == aw::PlanStatus::OK) {
+    if (plan.status == aw::PlanStatus::OK || plan.status == aw::PlanStatus::CYCLE_UNFULFILLED) {
       int64_t totalExec = 0;
       int64_t realExec = 0;
       for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
