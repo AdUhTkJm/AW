@@ -3,8 +3,8 @@
 // Builds an acyclic view of the reachable recipe graph by running a DFS from
 // the target and cutting every recipe that would close a cycle (an input that
 // is still on the DFS stack), then resolves each item once in reverse
-// post-order: deduct stock, fire one producing recipe for the remaining
-// deficit, and push the inputs' demand down the order.
+// post-order: deduct stock, choose producing recipes for the remaining deficit,
+// and push the inputs' demand down the order.
 //
 // This mirrors the shape of Thunderbolt's `buildDag` + `linearPass`: it is
 // O(V + E) and quantity-independent, and it returns a real firing vector
@@ -14,15 +14,30 @@
 // balance `planCrafting` hands the solver, so it can never be a false
 // positive.
 //
+// Two mechanisms are ported from Thunderbolt's recent planner updates:
+//
+//   * The capacity-reserved sweep (`capacitySweep`) replaces "one best recipe
+//     per deficit" with a global reservation. A route only fires while the
+//     inputs it needs still have capacity (`stock + producible`), so a single
+//     lossy conversion can no longer multiply demand by orders of magnitude
+//     across a long chain; the sweep declines instead.
+//   * The ranked cut (`RankedCut.h`) rebuilds the cycle cut from an
+//     order-independent hyperedge-Kahn order. The plain DFS cut depends on
+//     arrival order and can drop every producer of a needed cycle member.
+//
 // The caller uses the result as the whole answer in flash mode, or as the
 // CP-SAT objective cap plus solution hint in the other modes.
 
 #include "aw/plan/Plan.h"
-#include "aw/utils/Int128.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <span>
+#include <utility>
+
+#include "aw/utils/Helpers.h"
+#include "aw/utils/Int128.h"
+#include "RankedCut.h"
 
 namespace aw {
 namespace {
@@ -31,7 +46,19 @@ int64_t ceilDiv(int64_t numerator, int64_t denominator) {
   return numerator / denominator + (numerator % denominator != 0 ? 1 : 0);
 }
 
-// Producer-selection order. The DAG is shared; only this ranking changes.
+// Saturating arithmetic for the optimistic capacity bound.
+// Everything is non-negative.
+int64_t satAdd(int64_t lhs, int64_t rhs) noexcept {
+  int64_t result = 0;
+  return addOverflow(lhs, rhs, result) ? INT64_MAX : result;
+}
+
+int64_t satMul(int64_t lhs, int64_t rhs) noexcept {
+  int64_t result = 0;
+  return mulOverflow(lhs, rhs, result) ? INT64_MAX : result;
+}
+
+// Producer-selection tie-break. The DAG is shared; only this ranking changes.
 enum class Strategy : uint8_t {
   // Fewest executions: prefer the largest output batch.
   LargestBatch = 0,
@@ -63,19 +90,23 @@ bool better(const BaseCraftingGraph &g, Strategy strategy, uint32_t lhs, uint32_
 struct AcyclicView {
   aw::vector<uint32_t> post;
   aw::vector<uint8_t> usable;
+
+  AcyclicView(const BaseCraftingGraph &g, NodeId target, const ReachableView *reach, const RankOrder *rank) noexcept;
 };
 
 // DFS from `target`, cutting every recipe that would close a cycle (an input
-// that is still on the DFS stack). The stack is kept as three parallel
-// PodVectors because PodVector only holds integral types.
-AcyclicView buildAcyclicView(const BaseCraftingGraph &g, NodeId target) noexcept {
+// that is still on the DFS stack) and, when a ranked cut is supplied, every
+// recipe whose SCC-internal inputs are not ranked strictly earlier. The stack
+// is kept as three parallel PodVectors because PodVector only holds integral
+// types.
+AcyclicView::AcyclicView(const BaseCraftingGraph &g, NodeId target,
+                             const ReachableView *reach, const RankOrder *rank) noexcept {
   const uint32_t nItem = g.nItem;
   const uint32_t nRecipe = g.nRecipe;
-  AcyclicView view;
-  view.usable = aw::vector<uint8_t>::zeroes(nRecipe);
-  view.post.reserve(nItem);
+  usable = aw::vector<uint8_t>::zeroes(nRecipe);
+  post.reserve(nItem);
 
-  aw::vector<uint8_t> color = aw::vector<uint8_t>::zeroes(nItem); // 0 white, 1 gray, 2 black
+  aw::vector<uint8_t> color = aw::vector<uint8_t>::zeroes(nItem);  // 0 white, 1 gray, 2 black
   aw::vector<uint32_t> stackItem;
   aw::vector<uint32_t> stackRecipe;
   aw::vector<uint32_t> stackInput;
@@ -91,7 +122,7 @@ AcyclicView buildAcyclicView(const BaseCraftingGraph &g, NodeId target) noexcept
     const auto producers = g.i2r.targetsOf(item);
     if (stackRecipe.back() >= producers.size()) {
       color[item] = 2;
-      view.post.push_back(item);
+      post.push_back(item);
       stackItem.pop_back();
       stackRecipe.pop_back();
       stackInput.pop_back();
@@ -99,6 +130,14 @@ AcyclicView buildAcyclicView(const BaseCraftingGraph &g, NodeId target) noexcept
     }
     const uint32_t recipe = producers[stackRecipe.back()] - nItem;
     const auto inputs = g.r2i.targetsOf(recipe);
+    // The ranked cut is applied before the back-edge test: dropping a recipe
+    // also drops its children from the DFS frontier, so the traversal (and not
+    // just the retained set) changes, exactly as in Thunderbolt's frameFor.
+    if (reach != nullptr && cutByRank(*reach, *rank, item, inputs)) {
+      stackRecipe.back()++;
+      stackInput.back() = 0;
+      continue;
+    }
     bool closesCycle = false;
     for (NodeId input : inputs)
       if (color[input] == 1) {
@@ -120,21 +159,19 @@ AcyclicView buildAcyclicView(const BaseCraftingGraph &g, NodeId target) noexcept
       }
       continue;
     }
-    view.usable[recipe] = 1;
+    usable[recipe] = 1;
     stackRecipe.back()++;
     stackInput.back() = 0;
   }
-  return view;
 }
 
 // Which items can bottom out in stock under the retained routes? Optimistic:
 // quantities are ignored, so this only guides producer choice.
-template <typename StockOf>
 aw::vector<uint8_t> computeObtainable(const BaseCraftingGraph &g, const AcyclicView &view,
-                                      const StockOf &stockOf) noexcept {
+                                      std::span<const Amount> stock) noexcept {
   aw::vector<uint8_t> obtainable = aw::vector<uint8_t>::zeroes(g.nItem);
   for (uint32_t item : view.post) {
-    if (stockOf(item) > 0) {
+    if (stock[item] > 0) {
       obtainable[item] = 1;
       continue;
     }
@@ -154,24 +191,177 @@ aw::vector<uint8_t> computeObtainable(const BaseCraftingGraph &g, const AcyclicV
   return obtainable;
 }
 
+// How much of a recipe's output can be made from the optimistic capacity left
+// in its inputs. INT64_MAX means "unbounded", which only an input-free recipe
+// reaches.
+int64_t producibleVia(const BaseCraftingGraph &g, uint32_t recipe,
+                      std::span<const int64_t> cap) noexcept {
+  const auto inputs = g.r2i.targetsOf(recipe);
+  const auto weights = g.r2i.weightsOf(recipe);
+  int64_t firings = INT64_MAX;
+  for (size_t k = 0; k < inputs.size(); k++) {
+    const int64_t weight = weights[k];
+    if (weight <= 0)
+      continue;
+    const int64_t possible = cap[inputs[k]] / weight;
+    if (possible < firings)
+      firings = possible;
+    if (firings == 0)
+      return 0;
+  }
+  if (firings == INT64_MAX)
+    return INT64_MAX;
+  return satMul(firings, g.outputAmt[recipe]);
+}
+
+// cap[x] = stock[x] + the most any single producer could make once its own
+// inputs are already capped. This ignores sharing between producers, so it is
+// an upper bound used only for reservation and ordering, never as a proof.
+aw::vector<int64_t> capacityFromOrder(const BaseCraftingGraph &g, const AcyclicView &view,
+                                      std::span<const Amount> stock) noexcept {
+  aw::vector<int64_t> cap = aw::vector<int64_t>::zeroes(g.nItem);
+  for (uint32_t item : view.post) {  // leaf-first
+    int64_t best = 0;
+    for (NodeId producerNode : g.i2r.targetsOf(item)) {
+      const uint32_t recipe = producerNode - g.nItem;
+      if (!view.usable[recipe])
+        continue;
+      const int64_t amount = producibleVia(g, recipe, cap);
+      if (amount > best)
+        best = amount;
+    }
+    cap[item] = satAdd(stock[item], best);
+  }
+  return cap;
+}
+
+// Remaining capacity of a recipe: the same combination as `producibleVia`, but
+// against `cap - need`, so `need` doubles as the global reservation.
+int64_t capRemainingVia(const BaseCraftingGraph &g, std::span<const int64_t> cap,
+                        std::span<const int64_t> need, uint32_t recipe) noexcept {
+  const auto inputs = g.r2i.targetsOf(recipe);
+  const auto weights = g.r2i.weightsOf(recipe);
+  int64_t firings = INT64_MAX;
+  for (size_t k = 0; k < inputs.size(); k++) {
+    const int64_t weight = weights[k];
+    if (weight <= 0)
+      continue;
+    const int64_t remaining = cap[inputs[k]] - need[inputs[k]];
+    const int64_t possible = remaining > 0 ? remaining / weight : 0;
+    if (possible < firings)
+      firings = possible;
+    if (firings == 0)
+      return 0;
+  }
+  if (firings == INT64_MAX)
+    return INT64_MAX;
+  return satMul(firings, g.outputAmt[recipe]);
+}
+
+// A candidate route during one item's allocation, with the capacity score it
+// was ordered by.
+struct Route {
+  uint32_t recipe;
+  int64_t capacity;
+};
+
+// The fixed inputs of one demand sweep, bundled so both sweep shapes stay
+// within the argument budget and share one stock snapshot.
+struct SweepContext {
+  const BaseCraftingGraph &g;
+  const AcyclicView &view;
+  std::span<const Amount> stock;
+  NodeId target;
+  Amount amount;
+};
+
+// One demand sweep in reverse post-order under `strategy`: deduct stock, then
+// resolve the remaining deficit by splitting it across the producers that still
+// have capacity. Returns the firing vector, or an empty vector when some demand
+// could not be covered (Policy A: no capacity means decline, never inflate).
+aw::vector<int64_t> capacitySweep(const SweepContext &ctx, Strategy strategy) noexcept {
+  const BaseCraftingGraph &g = ctx.g;
+  const AcyclicView &view = ctx.view;
+  const std::span<const Amount> stock = ctx.stock;
+  const aw::vector<int64_t> cap = capacityFromOrder(g, view, stock);
+  aw::vector<int64_t> need = aw::vector<int64_t>::zeroes(g.nItem);
+  aw::vector<int64_t> exec = aw::vector<int64_t>::zeroes(g.nRecipe);
+  need[ctx.target] = ctx.amount;
+  aw::vector<Route> routes;
+
+  for (size_t index = view.post.size(); index-- > 0;) {
+    const uint32_t item = view.post[index];
+    int64_t deficit = need[item];
+    if (deficit <= 0)
+      continue;
+    deficit -= stock[item];
+    if (deficit <= 0)
+      continue;
+
+    routes.clear();
+    for (NodeId producerNode : g.i2r.targetsOf(item)) {
+      const uint32_t recipe = producerNode - g.nItem;
+      if (!view.usable[recipe] || g.outputAmt[recipe] <= 0)
+        continue;
+      routes.push_back(Route{recipe, capRemainingVia(g, cap, need, recipe)});
+    }
+    // Most remaining capacity first. Splitting a deficit only where capacity
+    // exists is what keeps a lossy route from exploding the demand downstream.
+    std::sort(routes.begin(), routes.end(), [&](const Route &lhs, const Route &rhs) {
+      if (lhs.capacity != rhs.capacity)
+        return lhs.capacity > rhs.capacity;
+      return better(g, strategy, rhs.recipe, lhs.recipe);
+    });
+
+    for (const Route &route : routes) {
+      if (deficit <= 0)
+        break;
+      const int64_t available = capRemainingVia(g, cap, need, route.recipe);
+      if (available <= 0)
+        continue;
+      const int64_t batch = g.outputAmt[route.recipe];
+      const int64_t make = std::min(deficit, available);
+      const int64_t times = ceilDiv(make, batch);
+      // A clamped total is not a plan: decline rather than hand back a
+      // saturated firing vector the balance check cannot judge.
+      if (exec[route.recipe] > INT64_MAX - times)
+        return {};
+      exec[route.recipe] += times;
+      const auto inputs = g.r2i.targetsOf(route.recipe);
+      const auto weights = g.r2i.weightsOf(route.recipe);
+      for (size_t k = 0; k < inputs.size(); k++) {
+        const int64_t additional = satMul(weights[k], times);
+        if (need[inputs[k]] > INT64_MAX - additional)
+          return {};
+        need[inputs[k]] += additional;
+      }
+      deficit -= std::min(deficit, satMul(times, batch));
+    }
+    if (deficit > 0)
+      return {};
+  }
+  return exec;
+}
+
 // One demand sweep in reverse post-order under `strategy`: deduct stock, fire
 // one producing recipe for the remaining deficit, and push the inputs' demand
 // down the order. Returns the firing vector, or an empty vector on failure.
-// A success always fires at least one recipe (the target has no stock and a
-// positive demand), so an empty vector unambiguously means failure.
-template <typename StockOf>
-aw::vector<int64_t> demandSweep(const BaseCraftingGraph &g, const AcyclicView &view,
-                                const aw::vector<uint8_t> &obtainable, const StockOf &stockOf,
-                                Strategy strategy, NodeId target, Amount amount) noexcept {
+// Kept as the fallback the ranked cut and capacity sweep are compared against.
+aw::vector<int64_t> demandSweep(const SweepContext &ctx,
+                                const aw::vector<uint8_t> &obtainable,
+                                Strategy strategy) noexcept {
+  const BaseCraftingGraph &g = ctx.g;
+  const AcyclicView &view = ctx.view;
+  const std::span<const Amount> stock = ctx.stock;
   const uint32_t nItem = g.nItem;
   aw::vector<int64_t> need = aw::vector<int64_t>::zeroes(nItem);
   aw::vector<int64_t> exec = aw::vector<int64_t>::zeroes(g.nRecipe);
-  need[target] = amount;
+  need[ctx.target] = ctx.amount;
   bool failed = false;
 
   for (size_t index = view.post.size(); index-- > 0 && !failed;) {
     const uint32_t item = view.post[index];
-    const int64_t deficit = need[item] - stockOf(item);
+    const int64_t deficit = need[item] - stock[item];
     if (deficit <= 0)
       continue;
 
@@ -228,9 +418,8 @@ aw::vector<int64_t> demandSweep(const BaseCraftingGraph &g, const AcyclicView &v
 
 // Verify the exact balance the solver will be handed: `exec` must cover the
 // requested amount of `target` plus every other item's stock deficit.
-template <typename StockOf>
 bool satisfiesBalance(const BaseCraftingGraph &g, const aw::vector<int64_t> &exec,
-                      const StockOf &stockOf, NodeId target, Amount amount) noexcept {
+                      std::span<const Amount> stock, NodeId target, Amount amount) noexcept {
   const uint32_t nItem = g.nItem;
   aw::vector<aw::int128> balance(nItem, 0);
   for (uint32_t recipe = 0; recipe < g.nRecipe; recipe++) {
@@ -244,12 +433,44 @@ bool satisfiesBalance(const BaseCraftingGraph &g, const aw::vector<int64_t> &exe
       balance[inputs[k]] -= (aw::int128) weights[k] * times;
   }
   for (uint32_t item = 0; item < nItem; item++) {
-    const aw::int128 required = item == target ? (aw::int128) amount : -(aw::int128) stockOf(item);
+    const aw::int128 required = item == target ? (aw::int128) amount : -(aw::int128) stock[item];
     if (balance[item] < required)
       return false;
   }
   return true;
 }
+
+// The solver's objective, as a hint on search direction.
+aw::int128 executionCost(const BaseCraftingGraph &g, std::span<const int64_t> exec) noexcept {
+  aw::int128 cost = 0;
+  for (uint32_t recipe = 0; recipe < g.nRecipe; recipe++)
+    if (g.output[recipe] < g.nReal)
+      cost += exec[recipe];
+  return cost;
+}
+
+// The cheapest balance-checked plan seen so far. Every candidate is a complete
+// firing vector over the same subgraph, so their costs are comparable even when
+// they come from different acyclic views.
+struct BestPlan {
+  aw::vector<int64_t> exec;
+  aw::int128 cost = 0;
+  bool found = false;
+
+  void consider(const BaseCraftingGraph &g, aw::vector<int64_t> &&candidate,
+                std::span<const Amount> stock, NodeId target, Amount amount) {
+    if (candidate.empty())
+      return;
+    if (!satisfiesBalance(g, candidate, stock, target, amount))
+      return;
+    const aw::int128 candidateCost = executionCost(g, candidate);
+    if (found && candidateCost >= cost)
+      return;
+    exec = std::move(candidate);
+    cost = candidateCost;
+    found = true;
+  }
+};
 
 }  // namespace
 
@@ -262,24 +483,48 @@ aw::vector<int64_t> greedyDagPlan(const Subgraph &sub, NodeId target, Amount amo
   // Inventory for one subgraph item. The target's stock is deliberately not
   // subtracted: `rhs[target] = amount`, exactly as in planCrafting, so a valid
   // plan must still produce `amount` new units.
-  const auto stockOf = [&](NodeId item) -> Amount {
+  aw::vector<Amount> stock(g.nItem, 0);
+  for (uint32_t item = 0; item < g.nItem; item++) {
     if (item == target)
-      return 0;
+      continue;
     const NodeId source = sub.itemOrigin[item];
-    return source < invSrc.size() ? invSrc[source] : 0;
-  };
-
-  const AcyclicView view = buildAcyclicView(g, target);
-  const aw::vector<uint8_t> obtainable = computeObtainable(g, view, stockOf);
-
-  const Strategy strategies[] = {Strategy::LargestBatch, Strategy::LeastInputMass};
-  for (Strategy strategy : strategies) {
-    aw::vector<int64_t> exec =
-        demandSweep(g, view, obtainable, stockOf, strategy, target, amount);
-    if (!exec.empty() && satisfiesBalance(g, exec, stockOf, target, amount))
-      return exec;
+    stock[item] = source < invSrc.size() ? invSrc[source] : 0;
   }
-  return {};
+  const std::span<const Amount> stockSpan(stock.data(), stock.size());
+
+  // Evaluate every plain-view pass and keep the cheapest balance-checked plan.
+  // The capacity-reserved sweep is what stops a lossy conversion from
+  // multiplying demand, while the two plain sweeps can be cheaper when the
+  // reservation over-commits; taking the minimum keeps both properties.
+  // Flash mode returns this plan directly, so cost is not cosmetic here.
+  const AcyclicView plain(g, target, nullptr, nullptr);
+  const aw::vector<uint8_t> plainObtainable = computeObtainable(g, plain, stockSpan);
+  const SweepContext plainSweep{g, plain, stockSpan, target, amount};
+  BestPlan best;
+  best.consider(g, capacitySweep(plainSweep, Strategy::LargestBatch), stockSpan, target, amount);
+  best.consider(g, demandSweep(plainSweep, plainObtainable, Strategy::LargestBatch), stockSpan,
+                target, amount);
+  best.consider(g, demandSweep(plainSweep, plainObtainable, Strategy::LeastInputMass), stockSpan,
+                target, amount);
+
+  // The plain DFS can drop every producer of a needed cycle member. Rebuild the
+  // cut from an order-independent ranking and retry only when the plain view
+  // found nothing: ranked plans keep coverage, not cost.
+  if (!best.found) {
+    const ReachableView reachable = analyzeReachable(g, target);
+    const bool stockSeededModes[] = {true, false};
+    for (bool stockSeeded : stockSeededModes) {
+      const RankOrder order = rankProducible(g, reachable, stockSpan, stockSeeded);
+      const AcyclicView ranked(g, target, &reachable, &order);
+      const SweepContext rankedSweep{g, ranked, stockSpan, target, amount};
+      best.consider(g, capacitySweep(rankedSweep, Strategy::LargestBatch), stockSpan, target,
+                    amount);
+      const aw::vector<uint8_t> obtainable = computeObtainable(g, ranked, stockSpan);
+      best.consider(g, demandSweep(rankedSweep, obtainable, Strategy::LargestBatch), stockSpan,
+                    target, amount);
+    }
+  }
+  return std::move(best.exec);
 }
 
 }  // namespace aw

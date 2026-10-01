@@ -2,7 +2,7 @@
 //
 // The Java side calls static native methods:
 //
-//   package io.aduhtkjm.appliedwheelchair.natives;
+//   package io.aduhtkjm.appliedworktable.natives;
 //   public final class CraftingGraphKernel {
 //     public static native void registerCraftingGraph(byte[] blob);
 //     public static native int  status();
@@ -47,11 +47,11 @@
 #include "search/SearchJni.h"
 
 #ifndef AW_JNI_CLASS_NAME
-#define AW_JNI_CLASS_NAME "io/aduhtkjm/appliedwheelchair/natives/CraftingGraphKernel"
+#define AW_JNI_CLASS_NAME "io/aduhtkjm/appliedworktable/natives/CraftingGraphKernel"
 #endif
 
 #ifndef AW_JNI_SEARCH_CLASS_NAME
-#define AW_JNI_SEARCH_CLASS_NAME "io/aduhtkjm/appliedwheelchair/natives/SearchKernel"
+#define AW_JNI_SEARCH_CLASS_NAME "io/aduhtkjm/appliedworktable/natives/SearchKernel"
 #endif
 
 namespace {

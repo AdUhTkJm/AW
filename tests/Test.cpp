@@ -175,6 +175,80 @@ aw::vector<std::byte> buildPlanLeafSample() {
   return w.out;
 }
 
+// Delta-debugged from the NAST corpus, the same graph Thunderbolt keeps as
+// `ProducibilityRankedOrientationTest`:
+//
+//   sophisticatedstorage:blasting_upgrade x1, no stock.
+//
+// Every item is producible from the single input-free recipe 19557 (item 9809),
+// yet the plain DFS cycle cut drops every producer of some needed cycle member.
+// The ranks are exercised by first failing on the DFS view, so this graph only
+// plans when the order-independent cut keeps a producible direction. Recipe
+// numbers are the corpus recipe ids; handles without a block are raw leaves.
+// Workstation handle 1 is the only one the test makes available.
+aw::vector<std::byte> buildRankedOrientationSample() {
+  AwrWriter w;
+  w.header(12199, 25);
+  w.item(1072, 1);
+  w.recipe(1, {1}, {{5754, 5}, {9768, 1}, {9798, 3}});            // 1760
+  w.item(1077, 1);
+  w.recipe(1, {1}, {{1078, 1}});                                  // 1772
+  w.item(1078, 1);
+  w.recipe(1, {1}, {{11625, 100}, {11704, 20}});                  // 1778
+  w.item(2224, 2);
+  w.recipe(1, {1}, {{11624, 1000}, {11713, 1000}});               // 4212
+  w.recipe(1, {1}, {{4614, 1}});                                  // 4213
+  w.item(2229, 1);
+  w.recipe(3, {1}, {{11704, 1}});                                 // 4230
+  w.item(4614, 1);
+  w.recipe(1, {1}, {{12158, 8}});                                 // 10063
+  w.item(5754, 2);
+  w.recipe(1, {1}, {{9325, 1}});                                  // 12619
+  w.recipe(5, {1}, {{11625, 100}, {11704, 20}});                  // 12623
+  w.item(5906, 1);
+  w.recipe(4, {1}, {{11704, 1}});                                 // 12847
+  w.item(5907, 1);
+  w.recipe(1, {1}, {{5911, 2}});                                  // 12848
+  w.item(5911, 1);
+  w.recipe(24, {1}, {{5906, 3}});                                 // 12873
+  w.item(8990, 2);
+  w.recipe(1, {1}, {{4359, 1}});                                  // 18274
+  w.recipe(8, {1}, {{11625, 100}, {11704, 20}});                  // 18275
+  w.item(9314, 1);
+  w.recipe(1, {1}, {{11704, 1}});                                 // 18770
+  w.item(9317, 1);
+  w.recipe(1, {1}, {{7378, 1}, {9314, 4}});                       // 18778
+  w.item(9768, 1);
+  w.recipe(1, {1}, {{4614, 1}, {5754, 3}, {8990, 4}, {10834, 1}});  // 19482
+  w.item(9798, 1);
+  w.recipe(1, {1}, {{2224, 1}});                                  // 19542
+  w.item(9809, 1);
+  w.recipe(1, {1}, {});                                          // 19557, input-free
+  w.item(10834, 1);
+  w.recipe(1, {1}, {{5754, 4}, {12098, 5}});                      // 21464
+  w.item(11624, 2);
+  w.recipe(250, {1}, {{1077, 1}});                                // 23041
+  w.recipe(250, {1}, {{6559, 1}});                                // 23042
+  w.item(11625, 1);
+  w.recipe(250, {1}, {{11713, 1000}, {12199, 1}});                // 23056
+  w.item(11675, 1);
+  w.recipe(1000, {1}, {{11713, 1000}});                           // 23209
+  w.item(11704, 1);
+  w.recipe(1000, {1}, {{11675, 1000}});                           // 23348
+  w.item(11713, 2);
+  w.recipe(8000, {1}, {{3418, 2}, {3431, 2}, {6458, 1}, {8079, 2}, {9317, 1},
+                       {11629, 8000}});                           // 23371
+  w.recipe(250, {1}, {{9809, 1}});                                // 23380
+  w.item(12098, 2);
+  w.recipe(1, {1}, {{4349, 1}});                                  // 25547
+  w.recipe(1, {1}, {{5907, 1}});                                  // 25548
+  w.item(12158, 1);
+  w.recipe(1, {1}, {{2224, 1}});                                  // 27653
+  w.item(12199, 1);
+  w.recipe(1, {1}, {{2229, 1}});                                  // 27930
+  return w.out;
+}
+
 // A two-item cycle whose entry recipe eats two units of the shared seed while
 // only one is in stock. The balance admits r0:2 / r1:1, but neither recipe is
 // enabled, so the plan is unrealizable. A check that only asks whether the SCC
@@ -3093,6 +3167,44 @@ void testGreedyDag() {
     expect(aw::greedyDagPlan(sub, target, 4, {}).empty(), "greedy declines a missing leaf");
     expect(aw::planCrafting(sub, target, 4, {}).status == aw::PlanStatus::INFEASIBLE,
            "planner still reports the missing leaf");
+  }
+
+  // The DFS back-edge cut depends on arrival order and can drop every producer
+  // of a needed cycle member. This graph is the NAST regression Thunderbolt
+  // keeps for its ranked orientation: the plain cut finds nothing, and only the
+  // order-independent cut keeps a producible direction. Workstation 1 is the
+  // only one the query makes available.
+  aw::registerCraftingGraph(buildRankedOrientationSample());
+  expect(aw::getCraftingError() == nullptr, "ranked orientation sample parses");
+  {
+    const bool savedSeed = aw::options.seedPruning;
+    const bool savedDirect = aw::options.directPruning;
+    const bool savedRecipe = aw::options.recipePruning;
+    const bool savedSubstitution = aw::options.substitutionPruning;
+    const bool savedTag = aw::options.tagPruning;
+    const bool savedPack = aw::options.pack.enabled;
+    const bool savedSatellite = aw::options.satellite.enabled;
+    aw::options.seedPruning = false;
+    aw::options.directPruning = false;
+    aw::options.recipePruning = false;
+    aw::options.substitutionPruning = false;
+    aw::options.tagPruning = false;
+    aw::options.pack.enabled = false;
+    aw::options.satellite.enabled = false;
+    const aw::Handle all[] = {1};
+    const aw::Subgraph sub = aw::reachableSubgraph(1072, all);
+    const aw::NodeId target = sub.translate(1072 - 1);
+    const aw::vector<int64_t> exec = aw::greedyDagPlan(sub, target, 1, {});
+    expect(!exec.empty(), "ranked cut finds a plan the DFS cut alone loses");
+    if (!exec.empty())
+      expect(greedyBalances(sub, target, 1, {}, exec), "ranked cut plan balances");
+    aw::options.seedPruning = savedSeed;
+    aw::options.directPruning = savedDirect;
+    aw::options.recipePruning = savedRecipe;
+    aw::options.substitutionPruning = savedSubstitution;
+    aw::options.tagPruning = savedTag;
+    aw::options.pack.enabled = savedPack;
+    aw::options.satellite.enabled = savedSatellite;
   }
 }
 

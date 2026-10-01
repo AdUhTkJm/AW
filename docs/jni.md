@@ -6,7 +6,7 @@ binary blob for the graph and the plan, and JSON for the options. It also
 carries a small item-name search index; see `search.md` for that endpoint.
 
 The Java counterpart lives in
-`src/main/java/io/aduhtkjm/appliedwheelchair/natives/`. The untracked
+`src/main/java/io/aduhtkjm/appliedworktable/natives/`. The untracked
 `java-ref/CraftingGraphKernel.java` here is the reference copy of the method
 signatures.
 
