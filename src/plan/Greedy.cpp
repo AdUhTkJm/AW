@@ -443,9 +443,11 @@ bool satisfiesBalance(const BaseCraftingGraph &g, const aw::vector<int64_t> &exe
 // The solver's objective, as a hint on search direction.
 aw::int128 executionCost(const BaseCraftingGraph &g, std::span<const int64_t> exec) noexcept {
   aw::int128 cost = 0;
-  for (uint32_t recipe = 0; recipe < g.nRecipe; recipe++)
-    if (g.output[recipe] < g.nReal)
-      cost += exec[recipe];
+  // The real recipes are a prefix of the recipe list, so the first synthetic
+  // tag edge ends the sum. Tag edges are not charged a step. See the ordering
+  // note on BaseCraftingGraph::output.
+  for (uint32_t recipe = 0; recipe < g.nRecipe && g.output[recipe] < g.nReal; recipe++)
+    cost += exec[recipe];
   return cost;
 }
 

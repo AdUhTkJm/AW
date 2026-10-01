@@ -409,11 +409,11 @@ void TagPruner::buildMemberIndex() noexcept {
 }
 
 void TagPruner::buildConsumerIndex() noexcept {
+  // Only a real recipe can be a consumer, and real recipes are a prefix of the
+  // recipe list, so both passes stop at the first tag edge. See the ordering
+  // note on BaseCraftingGraph::output.
   tagConsumerOffsets.assign(nItem, 0);
-  for (uint r = 0; r < nRecipe; r++) {
-    if (graph.output[r] >= nReal)
-      continue;
-    
+  for (uint r = 0; r < nRecipe && graph.output[r] < nReal; r++) {
     for (NodeId j : graph.r2i.targetsOf(r)) {
       if (j >= nReal && allowedTags[j])
         tagConsumerOffsets[j]++;
@@ -423,9 +423,7 @@ void TagPruner::buildConsumerIndex() noexcept {
   tagConsumerTargets.resize(tagConsumerOffsets.back());
   aw::vector<uint> cursor(tagConsumerOffsets.begin(),
                           tagConsumerOffsets.end() - 1);
-  for (uint r = 0; r < nRecipe; r++) {
-    if (graph.output[r] >= nReal)
-      continue;
+  for (uint r = 0; r < nRecipe && graph.output[r] < nReal; r++) {
     const NodeId m = graph.output[r];
     for (NodeId j : graph.r2i.targetsOf(r))
       if (j >= nReal && allowedTags[j])

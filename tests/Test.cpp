@@ -2250,6 +2250,69 @@ void testTagInlining() {
   aw::registerCraftingGraph(buildGlassSample());
 }
 
+// `output` must stay non-decreasing over the recipe ids: the real recipes are a
+// prefix and the synthetic tag edges a suffix, which is what lets every
+// real-recipe loop stop at the first tag edge. The inliner used to break that
+// by appending its expansion copies at the end of the list, which put recipes
+// with a small output last.
+void testOutputOrdering() {
+  std::cout << "[Test] recipe output ordering\n";
+
+  // Item 1 <- rA (x1, workstation [1], input pseudo-3 x1). The pseudo's members
+  // are item 1 and item 2, and rB makes item 2 out of nothing, so the walk
+  // reaches everything. Expanding rA duplicates output item 1, which has to
+  // stay ahead of rB's output item 2.
+  AwrWriter w;
+  w.header(2, 3);
+  w.item(1, 1);
+  w.recipe(1, {1}, {{3, 1}});
+  w.item(2, 1);
+  w.recipe(1, {1}, {});
+  w.item(3, 2);
+  w.recipe(1, {}, {{1, 1}});
+  w.recipe(1, {}, {{2, 1}});
+  const aw::vector<std::byte> bytes = w.out;
+
+  const auto ascending = [](const aw::BaseCraftingGraph &g) {
+    for (uint32_t r = 1; r < g.nRecipe; r++)
+      if (g.output[r] < g.output[r - 1])
+        return false;
+    return true;
+  };
+
+  // Keep every pruning pass out of the way: the point is the inliner's own
+  // recipe list, not the pruning that may hide an expansion.
+  const bool savedTag = aw::options.tagPruning;
+  const bool savedRecipe = aw::options.recipePruning;
+  const bool savedDirect = aw::options.directPruning;
+  const bool savedSubstitution = aw::options.substitutionPruning;
+  const bool savedPack = aw::options.pack.enabled;
+  aw::options.tagPruning = false;
+  aw::options.recipePruning = false;
+  aw::options.directPruning = false;
+  aw::options.substitutionPruning = false;
+  aw::options.pack.enabled = false;
+
+  const aw::Handle all[] = {1, 2, 3};
+  for (aw::TagInlineMode mode : {aw::TagInlineMode::OFF, aw::TagInlineMode::PRE_PRUNE,
+                                 aw::TagInlineMode::QUERY_TIME, aw::TagInlineMode::BOTH}) {
+    aw::options.tagInlining = mode;
+    aw::registerCraftingGraph(bytes);
+    expect(aw::getCraftingError() == nullptr, "ordering sample parses");
+    expect(ascending(aw::getCraftingGraph()), "the registered graph keeps outputs ascending");
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+    expect(sub.graph.nRecipe != 0, "the ordering sample stays reachable");
+    expect(ascending(sub.graph), "the subgraph keeps outputs ascending");
+  }
+
+  aw::options.tagPruning = savedTag;
+  aw::options.recipePruning = savedRecipe;
+  aw::options.directPruning = savedDirect;
+  aw::options.substitutionPruning = savedSubstitution;
+  aw::options.pack.enabled = savedPack;
+  aw::options.tagInlining = aw::TagInlineMode::OFF;
+}
+
 void testFreeTagObjective() {
   std::cout << "[Test] tag conversions are free\n";
 
@@ -3482,6 +3545,7 @@ int main() {
   testTagBatchingGuard();
   testNonoptimal();
   testTagInlining();
+  testOutputOrdering();
   testFreeTagObjective();
   testRecipePruning();
   testRecipePruningWorkstations();

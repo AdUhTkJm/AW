@@ -520,17 +520,21 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
       deleted[i] = 1;
   }
 
-  // The survivors, then one copy of each claimed consumer per member.
+  // The survivors, each claimed consumer replaced in place by one copy per
+  // member. Expanding where the consumer sat -- rather than appending every
+  // copy at the end -- keeps the list ordered by output: the input list is
+  // ascending, the survivors keep their order, and a copy inherits its
+  // consumer's output. Registration and the ordering note on
+  // BaseCraftingGraph::output depend on that regularity.
   aw::vector<MutableRecipe> next;
   next.reserve(recipes.size());
   for (uint i = 0; i < recipes.size(); i++) {
-    if (deleted[i] || claimedConsumer[i])
+    if (deleted[i])
       continue;
-    next.push_back(std::move(recipes[i]));
-  }
-  for (uint i = 0; i < recipes.size(); i++) {
-    if (!claimedConsumer[i])
+    if (!claimedConsumer[i]) {
+      next.push_back(std::move(recipes[i]));
       continue;
+    }
     const NodeId t = expansionTag[i];
     // The consumer without its tag input. Inputs are strictly ascending, so
     // dropping the one slot keeps them ordered.

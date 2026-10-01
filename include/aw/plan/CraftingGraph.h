@@ -63,6 +63,14 @@ struct BaseCraftingGraph {
   SparseGraph i2r;
   SparseGraph r2i;
 
+  // Output item node per recipe. Non-decreasing: the decoder emits recipes in
+  // ascending output-handle order, and every path that rewrites the recipe list
+  // (canonicalizeRecipes, rebuildFromRecipes, inlineSingleUseTagsCore,
+  // assembleSubgraph) preserves or restores that order instead of sorting, so
+  // the real recipes (output < nReal) are a prefix and the synthetic tag edges
+  // a suffix. A loop that only handles real recipes may therefore `break` at
+  // the first recipe with `output[r] >= nReal`, and one that only handles tag
+  // edges may start at that boundary.
   aw::vector<NodeId> output;
   aw::vector<Amount> outputAmt;
 

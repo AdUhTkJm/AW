@@ -160,11 +160,11 @@ void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput)
     tagEligible[t] = ok;
   }
 
-  // Recipes per amount-qualified input. Skip tags.
+  // Recipes per amount-qualified input. Skip tags: only real recipes can be
+  // replaced, and they are a prefix of the recipe list, so both passes stop at
+  // the first tag edge. See the ordering note on BaseCraftingGraph::output.
   qualOffsets.assign(g.nItem, 0);
-  for (uint r = 0; r < g.nRecipe; r++) {
-    if (g.output[r] >= g.nReal)
-      continue;
+  for (uint r = 0; r < g.nRecipe && g.output[r] < g.nReal; r++) {
     const Amount out = g.outputAmt[r];
     const auto inputs = g.r2i.targetsOf(r);
     const auto weights = g.r2i.weightsOf(r);
@@ -176,9 +176,7 @@ void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput)
   prefixSum(qualOffsets);
   qualRecipes.resize(qualOffsets.back());
   aw::vector<uint32_t> cursor(qualOffsets.begin(), qualOffsets.end() - 1);
-  for (uint r = 0; r < g.nRecipe; r++) {
-    if (g.output[r] >= g.nReal)
-      continue;
+  for (uint r = 0; r < g.nRecipe && g.output[r] < g.nReal; r++) {
     const Amount out = g.outputAmt[r];
     const auto inputs = g.r2i.targetsOf(r);
     const auto weights = g.r2i.weightsOf(r);

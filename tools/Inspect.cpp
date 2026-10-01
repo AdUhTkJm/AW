@@ -473,8 +473,9 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
       }
     }
     auto kept = aw::vector<uint8_t>::zeroes(graph.nItem);
-    for (size_t r = 0; r < graph.nRecipe; ++r)
-      if (graph.output[r] < graph.nReal && !graph.recipeDominated[r])
+    // Real recipes are a prefix, so the scan stops at the first tag edge.
+    for (size_t r = 0; r < graph.nRecipe && graph.output[r] < graph.nReal; ++r)
+      if (!graph.recipeDominated[r])
         kept[graph.output[r]] = 1;
     for (size_t item = 0; item < graph.nReal; ++item) {
       if (!graph.i2r.targetsOf(item).empty() && !kept[item]) {
@@ -513,9 +514,8 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
     // PodVector does not value-initialize, unlike the std::vector this replaced.
     auto kept = aw::vector<uint8_t>::zeroes(graph.nItem);
     auto keptEither = aw::vector<uint8_t>::zeroes(graph.nItem);
-    for (size_t r = 0; r < graph.nRecipe; ++r) {
-      if (graph.output[r] >= graph.nReal)
-        continue;
+    // Real recipes are a prefix, so the scan stops at the first tag edge.
+    for (size_t r = 0; r < graph.nRecipe && graph.output[r] < graph.nReal; ++r) {
       if (!graph.recipeDirectDominated[r])
         kept[graph.output[r]] = 1;
       if (!graph.recipeDirectDominated[r] && !graph.recipeDominated[r] &&
@@ -679,9 +679,10 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
     }
   }
 
-  for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
-    if (graph.output[recipe] >= graph.nReal)
-      continue;  // Synthetic; it needs no workstation.
+  // Synthetic tag edges need no workstation, and they are a suffix of the
+  // recipe list, so the check stops at the first one.
+  for (size_t recipe = 0; recipe < graph.nRecipe && graph.output[recipe] < graph.nReal;
+       ++recipe) {
     if (graph.workstations.targetsOf(recipe).empty())
       report("a recipe that outputs a real resource has no workstation");
   }
@@ -690,6 +691,14 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
     graph.outputAmt.size() != graph.nRecipe) {
     report("output/outputAmt size does not match the recipe count");
     return problems;
+  }
+  // The real recipes must be a prefix of the recipe list: that order is what
+  // lets the passes stop at the first tag edge. See BaseCraftingGraph::output.
+  for (size_t r = 1; r < graph.output.size(); ++r) {
+    if (graph.output[r] < graph.output[r - 1]) {
+      report("output is not non-decreasing over the recipe ids");
+      break;
+    }
   }
   if (graph.i2r.numEdges() != graph.nRecipe) {
     report("i2r must contain exactly one edge per recipe");
@@ -816,8 +825,9 @@ void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
   }
 
   size_t noWorkstation = 0;
-  for (uint32_t r = 0; r < graph.nRecipe; ++r) {
-    if (graph.output[r] < graph.nReal && graph.workstations.targetsOf(r).empty())
+  // Real recipes are a prefix, so the scan stops at the first tag edge.
+  for (uint32_t r = 0; r < graph.nRecipe && graph.output[r] < graph.nReal; ++r) {
+    if (graph.workstations.targetsOf(r).empty())
       noWorkstation++;
   }
 

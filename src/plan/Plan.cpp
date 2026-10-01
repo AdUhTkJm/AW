@@ -146,9 +146,12 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
   // node; those are exactly the synthetic member edges. Everything else costs
   // one crafting step. See include/aw/Solver.h for how the solver keeps the
   // free columns bounded without an equality.
-  aw::vector<int64_t> objective(n);
-  for (uint32_t r = 0; r < n; r++)
-    objective[r] = g.output[r] < g.nReal ? 1 : 0;
+  //
+  // The real recipes are a prefix, so the rest of the vector stays at its
+  // default zero cost. See the ordering note on BaseCraftingGraph::output.
+  aw::vector<int64_t> objective = aw::vector<int64_t>::zeroes(n);
+  for (uint32_t r = 0; r < n && g.output[r] < g.nReal; r++)
+    objective[r] = 1;
 
   // Greedy DAG pre-pass. It is cheap (O(V + E)) and either returns a
   // balance-checked plan or nothing, so it is always run before the solver.

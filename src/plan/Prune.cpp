@@ -572,14 +572,13 @@ aw::vector<uint8_t> repruneSubgraph(const Subgraph &sub,
     return source < sourceInventory.size() ? sourceInventory[source] : 0;
   };
 
-  for (uint r = 0; r < nRecipe; r++) {
-    // Tag edges are the tag passes' business, and the query-time inliner has
-    // already removed the reducible ones. Leaving them also keeps a tag
-    // satisfiable if a pack certificate would otherwise have removed its last
-    // member edge.
-    if (g.output[r] >= g.nReal)
-      continue;
-
+  // Only real recipes can be dropped, and they are a prefix of the recipe list,
+  // so the loop stops at the first tag edge and leaves `drop` zeroed for the
+  // tag edges. Tag edges are the tag passes' business, and the query-time
+  // inliner has already removed the reducible ones. Leaving them also keeps a
+  // tag satisfiable if a pack certificate would otherwise have removed its last
+  // member edge. See the ordering note on BaseCraftingGraph::output.
+  for (uint r = 0; r < nRecipe && g.output[r] < g.nReal; r++) {
     bool dropRecipe = false;
     // Composite: only when the witness input really has no stock, exactly as
     // the walk gates the registration-time mark.
