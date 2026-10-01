@@ -35,8 +35,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CONFIG_ORDER = ["aw-optimal", "aw-nonopt", "aw-flash", "tb-v2", "tb-cpsat", "ae2vm", "ae2vm-cold"]
-STAGE_ORDER = ["optimal", "none", "seed", "direct", "recipe", "substitution", "tag",
-               "pack", "satellite", "-"]
+STAGE_ORDER = ["optimal", "none", "dead_node", "seed", "direct", "recipe", "substitution", "tag",
+               "pack", "satellite"]
 STOCK_ORDER = ["none", "leaves", "random20"]
 
 # Statuses that mean "the engine produced a usable answer".

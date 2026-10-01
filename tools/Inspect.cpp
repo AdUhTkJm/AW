@@ -929,6 +929,9 @@ int main(int argc, char** argv) {
       // Return the first feasible plan instead of a cheap one. Solver-side, so
       // it is orthogonal to the pruning flags above.
       solverOptions.flash = true;
+    } else if (arg == "--no-cycle-retries") {
+      // Turn off the post-rejection re-solves, for measuring their cost.
+      solverOptions.maxCycleRetries = 0;
     } else if (arg == "--satellite-seconds") {
       if (i + 1 >= argc || !parseDouble(argv[++i], satelliteSeconds)) {
         std::cerr << "--satellite-seconds needs a number of seconds\n";
@@ -1047,7 +1050,7 @@ int main(int argc, char** argv) {
                    "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                    "                   [--no-pack-prune]\n"
                    "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
-                   "                   [--no-seed-prune] [--optimal] [--flash]\n"
+                   "                   [--no-seed-prune] [--optimal] [--flash] [--no-cycle-retries]\n"
                    "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                    "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
@@ -1068,7 +1071,7 @@ int main(int argc, char** argv) {
                  "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                  "                   [--no-pack-prune]\n"
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
-                 "                   [--no-seed-prune] [--optimal] [--flash]\n"
+                 "                   [--no-seed-prune] [--optimal] [--flash] [--no-cycle-retries]\n"
                  "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                  "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"

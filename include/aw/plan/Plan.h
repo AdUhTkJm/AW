@@ -58,8 +58,20 @@ PlanResult planCrafting(const Subgraph& sub, NodeId target, Amount amount,
 // not that no other plan exists, so callers report it as unproven rather than
 // infeasible (see PlanStatus::CYCLE_UNFULFILLED). `invSrc` is indexed like
 // `planCrafting`'s stock: by source item node.
+//
+// When it returns false and `witness` is not null, it is filled with one
+// blocker per remaining recipe of the deadlocked component: a recipe and the
+// input it could not afford. That is what `planCrafting` turns into startup
+// barriers.
+struct FireabilityWitness {
+  aw::vector<uint32_t> recipe;  // subgraph recipe on the deadlocked component
+  aw::vector<NodeId> item;      // input of that recipe, in subgraph item ids
+  aw::vector<Amount> need;      // amount of `item` the recipe consumes at once
+};
+
 bool planIsFireable(const Subgraph& sub, std::span<const Amount> invSrc,
-                    std::span<const int64_t> exec) noexcept;
+                    std::span<const int64_t> exec,
+                    FireabilityWitness* witness = nullptr) noexcept;
 
 // Greedy DAG pre-pass used by `planCrafting`, and exposed for testing.
 //

@@ -333,6 +333,74 @@ aw::vector<int64_t> columnDomains(const Matrix &A, const RowMajor &rows,
   return domain;
 }
 
+// Everything the startup-barrier pass needs, so the helper stays under the
+// argument limit.
+struct BarrierContext {
+  sat::CpModelBuilder &model;
+  const Matrix &A;
+  const RowMajor &rows;
+  std::span<const int64_t> b;
+  std::span<const int64_t> stock;  // empty: derive from b
+  absl::Span<const sat::IntVar> variables;
+  const aw::vector<int64_t> &domain;
+  const aw::vector<Options::Barrier> &barriers;
+};
+
+// Adds the cuts described on Options::Barrier. A row whose capacity overflows
+// int64 is skipped; the model stays valid either way.
+void addStartupBarriers(const BarrierContext &ctx) {
+  // One activation bit per column a barrier names, created on first use.
+  aw::vector<sat::BoolVar> active(ctx.A.cols);
+  aw::vector<uint8_t> haveActive(ctx.A.cols, 0);
+  const auto activation = [&](uint32_t r) {
+    if (!haveActive[r]) {
+      active[r] = ctx.model.NewBoolVar();
+      // x_r >= 1 forces the bit; a zero bit pins the column to zero.
+      ctx.model.AddLessOrEqual(sat::LinearExpr(ctx.variables[r]),
+                               ctx.domain[r] * sat::LinearExpr(active[r]));
+      haveActive[r] = 1;
+    }
+    return active[r];
+  };
+
+  for (const Options::Barrier &barrier : ctx.barriers) {
+    const uint32_t i = barrier.row;
+    const uint32_t r = barrier.column;
+    if (i >= ctx.A.rows || r >= ctx.A.cols || barrier.need <= 0)
+      continue;
+
+    // `gain` is the row's positive net output excluding column r: an amplifier
+    // produces in the same row it eats, but its own output cannot pay for its
+    // own first firing.
+    sat::LinearExpr gain;
+    uint64_t capacity = 0;
+    bool overflow = false;
+    for (uint32_t k = ctx.rows.start[i]; k < ctx.rows.start[i + 1]; k++) {
+      const int64_t value = ctx.rows.value[k];
+      if (value <= 0 || ctx.rows.column[k] == r)
+        continue;
+      gain += sat::LinearExpr::Term(ctx.variables[ctx.rows.column[k]], value);
+      capacity = satAdd(capacity,
+                        satMul((uint64_t) value, (uint64_t) ctx.domain[ctx.rows.column[k]]));
+      if (capacity > (uint64_t) INT64_MAX / 2) {
+        overflow = true;
+        break;
+      }
+    }
+    if (overflow)
+      continue;
+
+    int64_t stock = 0;
+    if (!ctx.stock.empty() && i < ctx.stock.size())
+      stock = ctx.stock[i] > 0 ? ctx.stock[i] : 0;
+    else if (ctx.b[i] < 0)
+      stock = (int64_t) magnitude(ctx.b[i]);
+
+    // need * [x_r >= 1] - gain <= stock.
+    ctx.model.AddLessOrEqual(sat::LinearExpr::Term(activation(r), barrier.need) - gain, stock);
+  }
+}
+
 // One solve with x in [0, domain[r]], x_r <= upper[r] (when given) and
 // sum(c_r x_r) <= cap. `ceiling` is the fallback domain for zero-cost columns.
 // `timeLimitSeconds` <= 0 means no limit.
@@ -376,6 +444,11 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
       table.AddTuple(absl::Span<const int64_t>(point.data(), point.size()));
     }
   }
+
+  if (!options.barriers.empty())
+    addStartupBarriers(BarrierContext{model, A, rows, b, options.stock,
+                                      absl::Span<const sat::IntVar>(variables), domain,
+                                      options.barriers});
 
   aw::vector<sat::IntVar> terms;
   aw::vector<int64_t> coefficients;
@@ -599,7 +672,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   // bound: a feasible answer gives an incumbent tight enough for the reduced
   // costs to fix columns, while an infeasible answer proves the integrality
   // gap is too wide to bother. See docs/algorithm.typ.
-  if (!options.flash && options.noGoods.empty() &&
+  if (!options.flash && options.noGoods.empty() && options.barriers.empty() &&
       envDouble("AW_RC_GAP", options.reducedCostGap) > 0.0 && lp.ok &&
       std::isfinite(lp.value) && lp.value >= 0.0 && A.cols > 0) {
     const int64_t probeCap = std::clamp<int64_t>(

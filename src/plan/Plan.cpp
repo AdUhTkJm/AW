@@ -157,6 +157,23 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
   // hint.
   aw::vector<int64_t> greedy = greedyDagPlan(sub, target, amount, invSrc);
   solver::Options solveOptions = options;
+
+  // Startup barriers, added lazily after a rejected plan, so an ordinary
+  // feasible call pays nothing for the experiment. See Options::Barrier.
+  aw::vector<int64_t> stockPerRow;
+  const auto installBarriers = [&]() {
+    if (!stockPerRow.empty())
+      return;
+    // `rhs` only carries stock for the non-target rows and hides the target's
+    // behind the request, so read it from the caller's inventory instead.
+    stockPerRow.resize(m, 0);
+    for (uint32_t i = 0; i < m; i++) {
+      const NodeId source = sub.itemOrigin[i];
+      stockPerRow[i] = source < invSrc.size() ? (int64_t) invSrc[source] : 0;
+    }
+    solveOptions.stock = std::span<const int64_t>(stockPerRow.data(), stockPerRow.size());
+  };
+
   bool greedyUsable = false;
   aw::int128 greedyCost = 0;
   if (!greedy.empty()) {
@@ -230,14 +247,40 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
     result.exec = solved.x;
     // The solver's balance is a net condition; refuse a plan that cannot be
     // turned into a firing sequence. See planIsFireable and PlanStatus.
+    FireabilityWitness witness;
     if (planIsFireable(sub, invSrc,
-                      std::span<const int64_t>(result.exec.data(), result.exec.size())))
+                      std::span<const int64_t>(result.exec.data(), result.exec.size()),
+                      &witness))
       return result;
 
     result.status = PlanStatus::CYCLE_UNFULFILLED;
     result.provenOptimal = false;
     if (retry >= solveOptions.maxCycleRetries)
       return result;
+
+    // Record one startup barrier per blocked recipe: a sound cut that makes the
+    // re-solve pay that recipe's seed. The exact no-good still goes in, so
+    // progress is guaranteed even when the cut does not by itself exclude the
+    // rejected vector.
+    bool addedCut = false;
+    for (size_t k = 0; k < witness.recipe.size(); k++) {
+      const uint32_t column = witness.recipe[k];
+      const uint32_t row = witness.item[k];
+      bool seen = false;
+      for (const solver::Options::Barrier &old : solveOptions.barriers)
+        if (old.row == row && old.column == column) {
+          seen = true;
+          break;
+        }
+      if (seen)
+        continue;
+      solveOptions.barriers.push_back(
+          solver::Options::Barrier{row, column, (int64_t) witness.need[k]});
+      addedCut = true;
+    }
+    if (addedCut)
+      installBarriers();
+
     // The rejected plan stays in `result.exec`, so a caller still sees what was
     // refused. Drop the warm start: it points at the vector just forbidden.
     solveOptions.noGoods.push_back(solved.x);

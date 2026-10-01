@@ -237,24 +237,38 @@ int64_t maxBatch(uint32_t chosen, int64_t remaining, const RecipeDeltas &deltas,
   return batch < 1 ? 1 : batch;
 }
 
+// Everything one firing pass needs. `witness`, when set, collects the blockers
+// of the first deadlock instead of just reporting it.
+struct FireInput {
+  const Subgraph &sub;
+  std::span<const Amount> invSrc;
+  std::span<const int64_t> exec;
+  const RecipeDeltas &deltas;
+  const aw::vector<int32_t> &comp;
+  uint32_t nComp;
+  FireabilityWitness *witness = nullptr;
+};
+
 // Fire every SCC in dependency order with the batched greedy from the file
 // header. False means a group deadlocked or the batch budget ran out.
-bool fireComponents(const Subgraph &sub, std::span<const Amount> invSrc,
-                    std::span<const int64_t> exec, const RecipeDeltas &deltas,
-                    const aw::vector<int32_t> &comp, uint32_t nComp) noexcept {
+bool fireComponents(const FireInput &in) noexcept {
+  const Subgraph &sub = in.sub;
+  const RecipeDeltas &deltas = in.deltas;
+  const aw::vector<int32_t> &comp = in.comp;
+  const uint32_t nComp = in.nComp;
   const BaseCraftingGraph &g = sub.graph;
   const uint32_t n = g.nRecipe;
   const uint32_t m = g.nItem;
 
   aw::vector<aw::vector<uint32_t>> compRecipes(nComp);
   for (uint32_t r = 0; r < n; r++)
-    if (exec[r] > 0)
+    if (in.exec[r] > 0)
       compRecipes[comp[r]].push_back(r);
 
   aw::vector<Amount> avail(m, 0);
   for (uint32_t item = 0; item < m; item++) {
     const NodeId source = sub.itemOrigin[item];
-    avail[item] = source < invSrc.size() ? invSrc[source] : 0;
+    avail[item] = source < in.invSrc.size() ? in.invSrc[source] : 0;
   }
 
   aw::vector<int64_t> remaining(n, 0);
@@ -264,7 +278,7 @@ bool fireComponents(const Subgraph &sub, std::span<const Amount> invSrc,
     if (recipes.empty())
       continue;
     for (uint32_t r : recipes)
-      remaining[r] = exec[r];
+      remaining[r] = in.exec[r];
 
     while (true) {
       bool anyLeft;
@@ -273,8 +287,26 @@ bool fireComponents(const Subgraph &sub, std::span<const Amount> invSrc,
         break;
       // Every remaining recipe needs more than the stock and the already-fired
       // output can supply: this group is a deadlock.
-      if (chosen == UINT32_MAX)
+      if (chosen == UINT32_MAX) {
+        if (in.witness != nullptr) {
+          for (uint32_t r : recipes) {
+            if (remaining[r] <= 0)
+              continue;
+            // One blocker is enough to describe the recipe: the first input it
+            // is short of.
+            for (uint e = deltas.offsets[r]; e < deltas.offsets[r + 1]; e++) {
+              const DeltaEntry &d = deltas.entries[e];
+              if (d.consume > 0 && avail[d.item] < d.consume) {
+                in.witness->recipe.push_back(r);
+                in.witness->item.push_back(d.item);
+                in.witness->need.push_back(d.consume);
+                break;
+              }
+            }
+          }
+        }
         return false;
+      }
 
       const int64_t batch = maxBatch(chosen, remaining[chosen], deltas, avail);
       for (uint e = deltas.offsets[chosen]; e < deltas.offsets[chosen + 1]; e++)
@@ -291,7 +323,7 @@ bool fireComponents(const Subgraph &sub, std::span<const Amount> invSrc,
 }  // namespace
 
 bool planIsFireable(const Subgraph &sub, std::span<const Amount> invSrc,
-                    std::span<const int64_t> exec) noexcept {
+                    std::span<const int64_t> exec, FireabilityWitness *witness) noexcept {
   const BaseCraftingGraph &g = sub.graph;
   const uint32_t n = g.nRecipe;
   if (exec.size() != n || n == 0)
@@ -311,7 +343,7 @@ bool planIsFireable(const Subgraph &sub, std::span<const Amount> invSrc,
   if (nComp == 0)
     return true;
 
-  return fireComponents(sub, invSrc, exec, deltas, comp, nComp);
+  return fireComponents(FireInput{sub, invSrc, exec, deltas, comp, nComp, witness});
 }
 
 }  // namespace aw

@@ -192,6 +192,35 @@ aw::vector<std::byte> buildSeedQuantitySample() {
   return w.out;
 }
 
+// A self-consuming amplifier with a separate seed route, and the stock to pay
+// for it. `A x3 <- A x1, L2 x1` is net positive, so the balance accepts two
+// amplifications and no seed for four A, which is the cheapest plan and cannot
+// fire. The startup barrier
+//
+//   c(r,i) * [x_r >= 1] <= stock_i + sum_{k != r, net > 0} net_k * x_k
+//
+// turns that into `[x_r >= 1] <= [seed used]`, so the plan is gone before the
+// solver returns it. The no-good retry finds the seeded runner-up too, just
+// more slowly.
+//
+//   handle 1 (L)  leaf, 10 in stock
+//   handle 2 (A)  <- r0 (x3, ws [1], input A x1, L2 x1)  amplifier
+//                 <- r1 (x1, ws [1], input L x1)         seed
+//   handle 3 (L2) leaf, 1000 in stock
+//   handle 4 (T)  <- r2 (x1, ws [1], input A x4)         target
+aw::vector<std::byte> buildStartupBarrierSample() {
+  AwrWriter w;
+  w.header(4, 4);
+  w.item(1, 0);
+  w.item(2, 2);
+  w.recipe(3, {1}, {{2, 1}, {3, 1}});
+  w.recipe(1, {1}, {{1, 1}});
+  w.item(3, 0);
+  w.item(4, 1);
+  w.recipe(1, {1}, {{2, 4}});
+  return w.out;
+}
+
 // A two-item recycle cycle next to a seed route. `A x5 <- B x1` with
 // `B x2 <- A x1` is net positive, so the balance accepts one execution of each
 // for four A, and that is the cheapest plan; nothing can fire from an empty
@@ -1274,6 +1303,37 @@ void testFireability() {
     }
     expect(total == 4, "the retried plan is the seeded runner-up");
     expect(seed > 0, "the retried plan draws the seed from stock");
+  }
+
+  // The startup barriers, on a self-consuming amplifier. The blocked recipe is
+  // cut after the first rejection, so the unseeded cost-3 plan is replaced by
+  // the seeded cost-4 one. Without the retry the rejection still comes back.
+  aw::registerCraftingGraph(buildStartupBarrierSample());
+  expect(aw::getCraftingError() == nullptr, "startup barrier sample parses");
+  {
+    const aw::Handle stations[] = {1};
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    aw::vector<aw::Amount> inventory(graph.nItem, 0);
+    inventory[0] = 10;     // handle 1 (L)
+    inventory[2] = 1000;   // handle 3 (L2)
+    const aw::Subgraph sub = aw::reachableSubgraph(4, stations, inventory);
+    const aw::NodeId target = sub.translate(3);  // handle 4 (T)
+    expect(target != UINT32_MAX, "the barrier target is in the subgraph");
+    expect(sub.graph.nRecipe == 3, "the barrier sample keeps every route");
+
+    aw::solver::Options off;
+    off.maxCycleRetries = 0;
+    const aw::PlanResult rejected = aw::planCrafting(sub, target, 1, inventory, off);
+    expect(rejected.status == aw::PlanStatus::CYCLE_UNFULFILLED,
+           "the unseeded amplifier plan is rejected without barriers");
+
+    const aw::PlanResult retried = aw::planCrafting(sub, target, 1, inventory);
+    expect(retried.status == aw::PlanStatus::OK,
+           "the barrier cut plus no-good finds the seeded plan");
+    int64_t total = 0;
+    for (uint32_t r = 0; r < sub.graph.nRecipe; r++)
+      total += retried.exec[r];
+    expect(total == 4, "the retried plan is the seeded runner-up");
   }
 }
 

@@ -118,6 +118,42 @@ struct Options {
   // How many extra solves a caller may run after rejecting a plan. 0 turns the
   // retry off, which is the behaviour before no-goods existed.
   int maxCycleRetries = 3;
+
+  // Startup barriers, added lazily after a plan is rejected.
+  //
+  // The balance model can return a plan whose cycle has no seed: an
+  // "amplifier" that eats the item it makes is net positive, so the balance
+  // accepts it without ever having a unit to start from. The post-solve
+  // fireability check rejects that plan, and the no-good retry then has to look
+  // for another one. This is where `planCrafting` records what the check found
+  // blocked, so the re-solve also gets a cut that tells it to pay the seed.
+  //
+  // For a blocked (row i, column r): the first execution of r can only draw on
+  // the stock plus the net output of the *other* recipes, so
+  //
+  //   c(r,i) * [x_r >= 1] <= stock[i] + sum_{k != r, net_k > 0} net_k * x_k
+  //
+  // holds for every fireable plan, where `c(r,i)` is the *gross* input amount
+  // from the witness and `net` is the balance row. The right side ignores the
+  // other recipes' consumption, so it only over-estimates what could be
+  // available. Two details matter: the balance matrix stores net coefficients,
+  // so `c(r,i)` cannot be read back out of it (an amplifier's row entry is
+  // positive) and must come from the witness; and r must be left out of the
+  // sum, because its own output cannot pay for its own first firing. The
+  // activation bit expresses "r is used at all", forced by
+  // `x_r <= domain_r * [x_r >= 1]`. See docs/algorithm.typ, "no-good 重试".
+  struct Barrier {
+    uint32_t row = 0;
+    uint32_t column = 0;
+    int64_t need = 0;
+  };
+  aw::vector<Barrier> barriers;
+
+  // Physical stock per row, in the solver's row space. The barriers use it as
+  // the seed that stock contributes; an empty span means "derive from b"
+  // (max(0, -b[i])), which understates the target row and would make the cuts
+  // unsound there. `planCrafting` always fills it.
+  std::span<const int64_t> stock;
 };
 
 struct Result {

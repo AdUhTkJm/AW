@@ -293,7 +293,7 @@ def main():
                            "--dataset", dataset, "--awr", awr, "--plan", prefix,
                            "--config", config, "--out", fresh, "--names", names,
                            "--nonoptimal", "1",
-                           "--warmup", args.warmup, "--repeats", args.repeats,
+                           "--warmup", "0", "--repeats", args.repeats,
                            "--time-limit", args.time_limit, "--gap", args.gap,
                            "--workers", args.workers, "--pack-seconds", args.pack_seconds,
                            "--satellite-seconds", args.satellite_seconds] + preprocess_flags
@@ -312,7 +312,7 @@ def main():
                            "--dataset", dataset, "--awr", awr, "--plan", prefix,
                            "--config", config, "--out", target, "--names", names,
                            "--nonoptimal", "0", "--stage", "satellite:optimal",
-                           "--warmup", args.warmup, "--repeats", args.repeats,
+                           "--warmup", "0", "--repeats", args.repeats,
                            "--time-limit", args.time_limit, "--gap", args.gap,
                            "--workers", args.workers, "--pack-seconds", args.pack_seconds,
                            "--satellite-seconds", args.satellite_seconds] + preprocess_flags
@@ -331,7 +331,7 @@ def main():
                            "--dataset", dataset, "--awr", awr, "--plan", prefix,
                            "--config", config, "--out", target, "--names", names,
                            "--nonoptimal", "1", "--flash", "1", "--stage", "satellite",
-                           "--warmup", args.warmup, "--repeats", args.repeats,
+                           "--warmup", "0", "--repeats", args.repeats,
                            "--time-limit", args.time_limit, "--gap", args.gap,
                            "--workers", args.workers, "--pack-seconds", args.pack_seconds,
                            "--satellite-seconds", args.satellite_seconds] + preprocess_flags
