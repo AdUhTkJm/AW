@@ -309,16 +309,6 @@ aw::vector<int64_t> demandSweep(const SweepContext &ctx, const aw::vector<uint8_
         best = recipe;
     }
 
-    // When we can't do this, then find any usable producer.
-    if (best == UINT32_MAX) {
-      for (RecipeId recipe : g.producersOf(item)) {
-        if (!view.usable[recipe])
-          continue;
-        if (best == UINT32_MAX || better(g, strategy, best, recipe))
-          best = recipe;
-      }
-    }
-
     // No recipe available. Give up.
     if (best == UINT32_MAX)
       return {};
