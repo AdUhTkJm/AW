@@ -4,7 +4,7 @@ awr	/home/aduhtkjm/projects/aw/temp/recipes-atm.awr
 awr_sha256	f9b86268b28a237d12540da957c4861f47a64fe5019e893f87361cb1080de0ff
 names	/home/aduhtkjm/projects/aw/temp/recipes-atm.names.tsv
 seed	20260101
-targets	8
+targets	256
 big_scc_only	0
 amounts	1,100000
 groups	none,leaves,random20
@@ -22,5 +22,5 @@ n_tag_recipe	248508
 r2i_edges	528924
 ws_edges	1551705
 big_scc_items	61517
-targets_drawn	8
+targets_drawn	256
 random20_stocked	13024

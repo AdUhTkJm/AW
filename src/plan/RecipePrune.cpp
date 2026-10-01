@@ -5,8 +5,6 @@
 
 namespace aw::detail {
 
-FILE *f = fopen("temp/a.txt", "w");
-
 // NOTE: This is linked against other translation units.
 // We don't use it in this particular file, but we cannot delete it.
 bool leVector(std::span<const ItemId> ci, std::span<const Amount> cc,
@@ -172,6 +170,7 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
   aw::vector<ItemId> cItems;
   aw::vector<Amount> cCoeffs;
   aw::vector<uint32_t> candidates;
+  aw::vector<uint8_t> selfConsuming;
   aw::vector<uint> adjOffsets;
   aw::vector<uint32_t> adjTargets;
   aw::vector<int32_t> comp;
@@ -194,6 +193,23 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
     for (RecipeId r : siblings)
       recs.push_back_unchecked(r);
     const uint k = (uint) recs.size();
+
+    // A sibling that consumes X itself can only run once X is already
+    // available, so it is not a replacement for another producer of X:
+    // dropping that producer can cut the only grounded route to X and leave
+    // the sibling stranded behind a cycle. Such a sibling is never offered as
+    // a dominator (it can still be dominated by a grounded one). This is a
+    // cheap one-step guard; it does not catch longer cycles back to X.
+    selfConsuming.assign(k, 0);
+    for (uint j = 0; j < k; j++) {
+      const auto ins = graph.inputsOf(recs[j]);
+      const auto amts = graph.inputAmountsOf(recs[j]);
+      for (size_t a = 0; a < ins.size(); a++)
+        if (ins[a] == X && amts[a] > 0) {
+          selfConsuming[j] = 1;
+          break;
+        }
+    }
 
     adj.assign(k, {});
     guard.assign(k, UINT32_MAX);
@@ -223,7 +239,7 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
         // giving up on R.
         candidates.clear();
         for (uint j = 0; j < k; j++)
-          if (j != i)
+          if (j != i && !selfConsuming[j])
             candidates.push_back_unchecked(j);
 
         if (producers.empty()) {

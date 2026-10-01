@@ -4,7 +4,7 @@ awr	/home/aduhtkjm/projects/aw/temp/recipes-small.awr
 awr_sha256	6552eb0b44dd0fd51f868440d23f427c8bb87ccb563364dd84274985caa75484
 names	/home/aduhtkjm/projects/aw/temp/recipes-small.names.tsv
 seed	20260101
-targets	8
+targets	256
 big_scc_only	0
 amounts	1,100000
 groups	none,leaves,random20
@@ -22,5 +22,5 @@ n_tag_recipe	3102
 r2i_edges	9153
 ws_edges	18375
 big_scc_items	1027
-targets_drawn	8
+targets_drawn	256
 random20_stocked	452

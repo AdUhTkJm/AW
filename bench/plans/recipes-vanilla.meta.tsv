@@ -4,7 +4,7 @@ awr	/home/aduhtkjm/projects/aw/temp/recipes-vanilla.awr
 awr_sha256	8bd1e983507b136deb56302a66f586952547832644498483cbe1f756a3cb7c4b
 names	/home/aduhtkjm/projects/aw/temp/recipes-vanilla.names.tsv
 seed	20260101
-targets	8
+targets	256
 big_scc_only	0
 amounts	1,100000
 groups	none,leaves,random20
@@ -22,5 +22,5 @@ n_tag_recipe	998
 r2i_edges	2816
 ws_edges	1289
 big_scc_items	32
-targets_drawn	8
+targets_drawn	256
 random20_stocked	267

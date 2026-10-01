@@ -4,7 +4,7 @@ awr	/home/aduhtkjm/projects/aw/temp/recipes-nast.awr
 awr_sha256	5c6222b0005fdfc20c86e722cc207d06fbd6b51145bc720045ca9cd5b30de5b4
 names	/home/aduhtkjm/projects/aw/temp/recipes-nast.names.tsv
 seed	20260101
-targets	8
+targets	256
 big_scc_only	0
 amounts	1,100000
 groups	none,leaves,random20
@@ -22,5 +22,5 @@ n_tag_recipe	11398
 r2i_edges	57547
 ws_edges	215226
 big_scc_items	5356
-targets_drawn	8
+targets_drawn	256
 random20_stocked	2406
