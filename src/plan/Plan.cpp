@@ -93,8 +93,8 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
     // Push "produced(i) - consumed(i)".
     column.clear();
     column.push_back({g.output[r], g.outputAmt[r]});
-    const auto inputs = g.r2i.targetsOf(r);
-    const auto weights = g.r2i.weightsOf(r);
+    const auto inputs = g.inputsOf(r);
+    const auto weights = g.inputAmountsOf(r);
     for (size_t k = 0; k < inputs.size(); k++)
       column.push_back({inputs[k], -weights[k]});
 

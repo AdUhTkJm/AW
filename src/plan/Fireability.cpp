@@ -92,8 +92,8 @@ void aggregateRecipe(const BaseCraftingGraph &g, uint32_t r, aw::vector<Amount> 
   stamp[out] = (int32_t) r;
   acc[out] = g.outputAmt[r];
   touched.push_back(out);
-  const auto inputs = g.r2i.targetsOf(r);
-  const auto amounts = g.r2i.weightsOf(r);
+  const auto inputs = g.inputsOf(r);
+  const auto amounts = g.inputAmountsOf(r);
   for (size_t k = 0; k < inputs.size(); k++) {
     const NodeId item = inputs[k];
     if (stamp[item] != (int32_t) r) {
@@ -166,8 +166,8 @@ ProducerGraph buildProducerGraph(const BaseCraftingGraph &g,
   for (uint32_t r = 0; r < n; r++) {
     uint count = 0;
     if (exec[r] > 0) {
-      for (NodeId item : g.r2i.targetsOf(r)) {
-        for (NodeId producerNode : g.i2r.targetsOf(item)) {
+      for (NodeId item : g.inputsOf(r)) {
+        for (NodeId producerNode : g.producersOf(item)) {
           const uint32_t p = producerNode - g.nItem;
           if (exec[p] <= 0 || edgeStamp[p] == (int32_t) r)
             continue;
@@ -186,8 +186,8 @@ ProducerGraph buildProducerGraph(const BaseCraftingGraph &g,
   for (uint32_t r = 0; r < n; r++) {
     if (exec[r] <= 0)
       continue;
-    for (NodeId item : g.r2i.targetsOf(r)) {
-      for (NodeId producerNode : g.i2r.targetsOf(item)) {
+    for (NodeId item : g.inputsOf(r)) {
+      for (NodeId producerNode : g.producersOf(item)) {
         const uint32_t p = producerNode - g.nItem;
         if (exec[p] <= 0 || edgeStamp[p] == (int32_t) r)
           continue;

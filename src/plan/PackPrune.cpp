@@ -250,8 +250,8 @@ struct PackSearch {
     }
     netWrite(graph.output[p], next);
 
-    const auto inputs = graph.r2i.targetsOf(p);
-    const auto weights = graph.r2i.weightsOf(p);
+    const auto inputs = graph.inputsOf(p);
+    const auto weights = graph.inputAmountsOf(p);
     for (size_t k = 0; k < inputs.size(); k++) {
       int64_t scaled = 0;
       int64_t consumed = 0;
@@ -325,7 +325,7 @@ struct PackSearch {
     rateOffsets.assign(nItem + 1, 0);
     std::fill(unconsumed.begin(), unconsumed.end(), 1);
     for (uint r = 0; r < graph.nRecipe; r++)
-      for (NodeId input : graph.r2i.targetsOf(r))
+      for (NodeId input : graph.inputsOf(r))
         unconsumed[input] = 0;
 
     struct Raw {
@@ -337,7 +337,7 @@ struct PackSearch {
     aw::vector<Rate> rates;
 
     for (NodeId i = 0; i < nItem; i++) {
-      const auto producers = graph.i2r.targetsOf(i);
+      const auto producers = graph.producersOf(i);
       rates.clear();
 
       if (!producers.empty()) {
@@ -349,8 +349,8 @@ struct PackSearch {
           if (a <= 0)
             continue;
           usable++;
-          const auto inputs = graph.r2i.targetsOf(p);
-          const auto weights = graph.r2i.weightsOf(p);
+          const auto inputs = graph.inputsOf(p);
+          const auto weights = graph.inputAmountsOf(p);
           for (size_t k = 0; k < inputs.size(); k++)
             raw.push_back({inputs[k], p, weights[k]});
         }
@@ -438,7 +438,7 @@ struct PackSearch {
         const NodeId i = needList[k];
         if (need[i] <= 0)
           continue;
-        const auto producers = graph.i2r.targetsOf(i);
+        const auto producers = graph.producersOf(i);
         if (producers.size() != 1)
           continue;
         const uint32_t p = producers[0] - graph.nItem;
@@ -504,7 +504,7 @@ struct PackSearch {
   }
 
   bool branchable(NodeId i) const noexcept {
-    const auto producers = graph.i2r.targetsOf(i);
+    const auto producers = graph.producersOf(i);
     const uint32_t m = (uint32_t) producers.size();
     for (NodeId producerNode : producers) {
       const uint32_t p = producerNode - graph.nItem;
@@ -558,7 +558,7 @@ struct PackSearch {
     for (NodeId i : needList) {
       if (need[i] <= 0)
         continue;
-      const uint32_t m = (uint32_t) graph.i2r.targetsOf(i).size();
+      const uint32_t m = (uint32_t) graph.producersOf(i).size();
       if (m < 2 || m >= branchProducers)
         continue;
       if (!branchable(i))
@@ -574,7 +574,7 @@ struct PackSearch {
     if (!addG(branchItem))
       return;
     const int64_t demand = need[branchItem];
-    const auto producers = graph.i2r.targetsOf(branchItem);
+    const auto producers = graph.producersOf(branchItem);
     const uint32_t m = (uint32_t) producers.size();
 
     bool recorded = false;
@@ -645,8 +645,8 @@ struct PackSearch {
         return false;
       }
       netAdd(graph.output[r], produced);
-      const auto inputs = graph.r2i.targetsOf(r);
-      const auto weights = graph.r2i.weightsOf(r);
+      const auto inputs = graph.inputsOf(r);
+      const auto weights = graph.inputAmountsOf(r);
       for (size_t k = 0; k < inputs.size(); k++) {
         int64_t consumed = 0;
         if (mulOverflow(weights[k], count, consumed)) {

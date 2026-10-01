@@ -194,20 +194,20 @@ SccStats analyzeScc(const BaseCraftingGraph &g, aw::vector<int32_t> &comp) {
   // CSR over all bipartite arcs.
   aw::vector<uint32_t> offsets(n + 1, 0);
   for (uint32_t item = 0; item < nItem; item++)
-    offsets[item + 1] = (uint32_t) g.i2r.targetsOf(item).size();
+    offsets[item + 1] = (uint32_t) g.producersOf(item).size();
   for (uint32_t r = 0; r < nRecipe; r++)
-    offsets[nItem + r + 1] = (uint32_t) g.r2i.targetsOf(r).size();
+    offsets[nItem + r + 1] = (uint32_t) g.inputsOf(r).size();
   for (uint32_t v = 0; v < n; v++)
     offsets[v + 1] += offsets[v];
   aw::vector<uint32_t> arcs(offsets[n]);
   for (uint32_t item = 0; item < nItem; item++) {
     uint32_t cursor = offsets[item];
-    for (NodeId to : g.i2r.targetsOf(item))
+    for (NodeId to : g.producersOf(item))
       arcs[cursor++] = to;
   }
   for (uint32_t r = 0; r < nRecipe; r++) {
     uint32_t cursor = offsets[nItem + r];
-    for (NodeId to : g.r2i.targetsOf(r))
+    for (NodeId to : g.inputsOf(r))
       arcs[cursor++] = to;
   }
 
@@ -294,20 +294,20 @@ void buildArcs(const BaseCraftingGraph &g, aw::vector<uint32_t> &offsets,
   const uint32_t n = nItem + nRecipe;
   offsets.assign(n + 1, 0);
   for (uint32_t item = 0; item < nItem; item++)
-    offsets[item + 1] = (uint32_t) g.i2r.targetsOf(item).size();
+    offsets[item + 1] = (uint32_t) g.producersOf(item).size();
   for (uint32_t r = 0; r < nRecipe; r++)
-    offsets[nItem + r + 1] = (uint32_t) g.r2i.targetsOf(r).size();
+    offsets[nItem + r + 1] = (uint32_t) g.inputsOf(r).size();
   for (uint32_t v = 0; v < n; v++)
     offsets[v + 1] += offsets[v];
   arcs.resize(offsets[n]);
   for (uint32_t item = 0; item < nItem; item++) {
     uint32_t cursor = offsets[item];
-    for (NodeId to : g.i2r.targetsOf(item))
+    for (NodeId to : g.producersOf(item))
       arcs[cursor++] = to;
   }
   for (uint32_t r = 0; r < nRecipe; r++) {
     uint32_t cursor = offsets[nItem + r];
-    for (NodeId to : g.r2i.targetsOf(r))
+    for (NodeId to : g.inputsOf(r))
       arcs[cursor++] = to;
   }
 }
@@ -408,7 +408,7 @@ Decompose decompose(const BaseCraftingGraph &g, const aw::vector<int32_t> &comp,
       d.lowerItems++;
     else
       d.parallelItems++;
-    const size_t producers = g.i2r.targetsOf(item).size();
+    const size_t producers = g.producersOf(item).size();
     if (producers > 1)
       d.choiceItems++;
     if (producers == 0)

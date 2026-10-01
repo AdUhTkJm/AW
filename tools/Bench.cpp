@@ -272,8 +272,8 @@ aw::vector<MissingItem> deriveMissing(const aw::Subgraph &sub, aw::NodeId target
     const aw::int128 times = exec[r];
     if (times == 0) continue;
     balance[g.output[r]] += (aw::int128) g.outputAmt[r] * times;
-    const auto inputs = g.r2i.targetsOf(r);
-    const auto weights = g.r2i.weightsOf(r);
+    const auto inputs = g.inputsOf(r);
+    const auto weights = g.inputAmountsOf(r);
     for (size_t k = 0; k < inputs.size(); k++)
       balance[inputs[k]] -= (aw::int128) weights[k] * times;
   }
@@ -702,7 +702,7 @@ int main(int argc, char **argv) {
       if (r < graph.packDominated.size() && graph.packDominated[r]) ++packDominated;
     }
     for (uint32_t item = 0; item < graph.nItem; item++)
-      if (graph.i2r.targetsOf(item).size() > 1) ++multiRecipe;
+      if (graph.producersOf(item).size() > 1) ++multiRecipe;
 
     Json json;
     json.str("type", "registration")
@@ -835,7 +835,7 @@ int main(int argc, char **argv) {
 
             uint32_t multi = 0;
             for (uint32_t item = 0; item < sub.graph.nItem; item++)
-              if (sub.graph.i2r.targetsOf(item).size() > 1) multi++;
+              if (sub.graph.producersOf(item).size() > 1) multi++;
 
             Json json;
             json.str("type", "query")

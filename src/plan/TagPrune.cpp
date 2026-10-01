@@ -337,7 +337,7 @@ void TagPruner::findSimpleTags() noexcept {
   allowedTags.assign(nItem, 0);
   members.resize(nItem);
   for (NodeId t = nReal; t < nItem; t++) {
-    const auto recipes = graph.i2r.targetsOf(t);
+    const auto recipes = graph.producersOf(t);
     if (recipes.empty())
       continue;
 
@@ -345,7 +345,7 @@ void TagPruner::findSimpleTags() noexcept {
     ms.reserve(recipes.size());
     for (NodeId recipeNode : recipes) {
       const uint r = recipeNode - nItem;
-      const auto inputs = graph.r2i.targetsOf(r);
+      const auto inputs = graph.inputsOf(r);
       ms.push_back_unchecked(inputs[0]);
     }
 
@@ -356,7 +356,7 @@ void TagPruner::findSimpleTags() noexcept {
 
   producible.assign(nItem, 0);
   for (NodeId m = 0; m < nItem; m++)
-    if (!graph.i2r.targetsOf(m).empty())
+    if (!graph.producersOf(m).empty())
       producible[m] = 1;
 }
 
@@ -414,7 +414,7 @@ void TagPruner::buildConsumerIndex() noexcept {
   // note on BaseCraftingGraph::output.
   tagConsumerOffsets.assign(nItem, 0);
   for (uint r = 0; r < nRecipe && graph.output[r] < nReal; r++) {
-    for (NodeId j : graph.r2i.targetsOf(r)) {
+    for (NodeId j : graph.inputsOf(r)) {
       if (j >= nReal && allowedTags[j])
         tagConsumerOffsets[j]++;
     }
@@ -425,7 +425,7 @@ void TagPruner::buildConsumerIndex() noexcept {
                           tagConsumerOffsets.end() - 1);
   for (uint r = 0; r < nRecipe && graph.output[r] < nReal; r++) {
     const NodeId m = graph.output[r];
-    for (NodeId j : graph.r2i.targetsOf(r))
+    for (NodeId j : graph.inputsOf(r))
       if (j >= nReal && allowedTags[j])
         tagConsumerTargets[cursor[j]++] = m;
   }
@@ -440,8 +440,8 @@ void TagPruner::buildConsumerIndex() noexcept {
 void TagPruner::buildQualifiedInputs() noexcept {
   qualInputOffsets.assign(nRecipe, 0);
   for (uint r = 0; r < nRecipe; r++) {
-    const auto inputs = graph.r2i.targetsOf(r);
-    const auto weights = graph.r2i.weightsOf(r);
+    const auto inputs = graph.inputsOf(r);
+    const auto weights = graph.inputAmountsOf(r);
     const Amount out = graph.outputAmt[r];
     for (size_t k = 0; k < inputs.size(); k++)
       if (weights[k] >= out && (inputs[k] < nReal || allowedTags[inputs[k]]))
@@ -452,8 +452,8 @@ void TagPruner::buildQualifiedInputs() noexcept {
 
   aw::vector<uint> cursor(qualInputOffsets.begin(), qualInputOffsets.end() - 1);
   for (uint r = 0; r < nRecipe; r++) {
-    const auto inputs = graph.r2i.targetsOf(r);
-    const auto weights = graph.r2i.weightsOf(r);
+    const auto inputs = graph.inputsOf(r);
+    const auto weights = graph.inputAmountsOf(r);
     const Amount out = graph.outputAmt[r];
     for (size_t k = 0; k < inputs.size(); k++) {
       const NodeId j = inputs[k];
@@ -471,7 +471,7 @@ void TagPruner::computeQualifiedInputs() noexcept {
   qualReal.resize(nReal);
   qualTags.resize(nReal);
   for (NodeId m = 0; m < nReal; m++) {
-    for (NodeId recipeNode : graph.i2r.targetsOf(m)) {
+    for (NodeId recipeNode : graph.producersOf(m)) {
       const uint r = recipeNode - nItem;
       for (uint e = qualInputOffsets[r]; e < qualInputOffsets[r + 1]; e++) {
         const NodeId j = qualInputItems[e];
@@ -495,7 +495,7 @@ void TagPruner::computeUnitOutputs() noexcept {
     return;
   unitOutput.assign(nItem, 1);
   for (NodeId m = 0; m < nReal; m++) {
-    for (NodeId recipeNode : graph.i2r.targetsOf(m))
+    for (NodeId recipeNode : graph.producersOf(m))
       if (graph.outputAmt[recipeNode - nItem] != 1) {
         unitOutput[m] = 0;
         break;
@@ -534,7 +534,7 @@ void TagPruner::seedWitnessPairs() noexcept {
   aw::vector<NodeId> acc, next, scratch;
   uint64_t witnessPairs = 0;
   for (NodeId m = 0; m < nReal && witnessPairs < options.maxWitnessPairs; m++) {
-    const auto recipes = graph.i2r.targetsOf(m);
+    const auto recipes = graph.producersOf(m);
     if (recipes.empty())
       continue;
 
@@ -716,13 +716,13 @@ bool TagPruner::covers(uint s, uint r) noexcept {
     return false;
 
   cap.clear();
-  const auto ri = graph.r2i.targetsOf(r);
-  const auto rw = graph.r2i.weightsOf(r);
+  const auto ri = graph.inputsOf(r);
+  const auto rw = graph.inputAmountsOf(r);
   for (size_t j = 0; j < ri.size(); j++)
     cap.emplace_back(ri[j], rw[j]);
 
-  const auto si = graph.r2i.targetsOf(s);
-  const auto sw = graph.r2i.weightsOf(s);
+  const auto si = graph.inputsOf(s);
+  const auto sw = graph.inputAmountsOf(s);
   for (size_t j = 0; j < si.size(); j++) {
     const NodeId h = si[j];
 
@@ -742,7 +742,7 @@ bool TagPruner::covers(uint s, uint r) noexcept {
 }
 
 bool TagPruner::colCover(uint r, NodeId w) noexcept {
-  for (NodeId sNode : graph.i2r.targetsOf(w))
+  for (NodeId sNode : graph.producersOf(w))
     if (covers(sNode - nItem, r))
       return true;
   return false;
@@ -766,7 +766,7 @@ bool TagPruner::validTag(NodeId t, NodeId w) noexcept {
 // w, or a tag pair dominated by w. The column-cover rule is the same escape
 // hatch as before.
 bool TagPruner::validItem(NodeId m, NodeId w) noexcept {
-  for (NodeId recipeNode : graph.i2r.targetsOf(m)) {
+  for (NodeId recipeNode : graph.producersOf(m)) {
     const uint r = recipeNode - nItem;
     bool ok = false;
     for (uint e = qualInputOffsets[r]; e < qualInputOffsets[r + 1]; e++) {
@@ -949,9 +949,9 @@ void TagPruner::pruneDominatedEdges() noexcept {
       // Nonoptimal mode waives the guard, see above.
       if (!nonoptimal && !unitOutput[m])
         continue;
-      for (NodeId recipeNode : graph.i2r.targetsOf(t)) {
+      for (NodeId recipeNode : graph.producersOf(t)) {
         const uint r = recipeNode - nItem;
-        const auto inputs = graph.r2i.targetsOf(r);
+        const auto inputs = graph.inputsOf(r);
         if (inputs.size() == 1 && inputs[0] == m)
           graph.tagEdgeDominated[r] = 1;
       }

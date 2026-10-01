@@ -225,7 +225,7 @@ void printSummary(const aw::CraftingGraph& graph) {
 
   size_t producedItems = 0;
   for (size_t item = 0; item < graph.nItem; ++item) {
-    if (!graph.i2r.targetsOf(item).empty()) ++producedItems;
+    if (!graph.producersOf(item).empty()) ++producedItems;
   }
 
   std::cout << "real resources   : " << graph.nReal << '\n';
@@ -422,7 +422,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         report("a real recipe is marked as a dominated tag edge");
         break;
       }
-      if (graph.r2i.targetsOf(r).size() != 1) {
+      if (graph.inputsOf(r).size() != 1) {
         report("a dominated tag edge is not a single-input recipe");
         break;
       }
@@ -450,7 +450,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         break;
       }
       bool consumed = false;
-      for (aw::NodeId input : graph.r2i.targetsOf(r))
+      for (aw::NodeId input : graph.inputsOf(r))
         if (input == guard)
           consumed = true;
       if (!consumed) {
@@ -478,7 +478,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
       if (!graph.recipeDominated[r])
         kept[graph.output[r]] = 1;
     for (size_t item = 0; item < graph.nReal; ++item) {
-      if (!graph.i2r.targetsOf(item).empty() && !kept[item]) {
+      if (!graph.producersOf(item).empty() && !kept[item]) {
         report("composite pruning removed every recipe of a real item");
         break;
       }
@@ -523,7 +523,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         keptEither[graph.output[r]] = 1;
     }
     for (size_t item = 0; item < graph.nReal; ++item) {
-      if (graph.i2r.targetsOf(item).empty())
+      if (graph.producersOf(item).empty())
         continue;
       if (!kept[item]) {
         report("direct dominance removed every recipe of a real item");
@@ -637,8 +637,8 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
           break;
         }
         addNet(graph.output[s], product);
-        const auto inputs = graph.r2i.targetsOf(s);
-        const auto weights = graph.r2i.weightsOf(s);
+        const auto inputs = graph.inputsOf(s);
+        const auto weights = graph.inputAmountsOf(s);
         for (size_t e = 0; e < inputs.size(); ++e) {
           if (mulOverflowInt(weights[e], count, product)) {
             overflow = true;
@@ -707,8 +707,8 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
   // Every recipe must appear exactly once, in the row of the item it outputs.
   auto seen = aw::vector<uint32_t>::zeroes(graph.nRecipe);
   for (size_t item = 0; item < graph.nItem; ++item) {
-    auto targets = graph.i2r.targetsOf(item);
-    auto weights = graph.i2r.weightsOf(item);
+    auto targets = graph.producersOf(item);
+    auto weights = graph.producedAmountsOf(item);
     for (size_t k = 0; k < targets.size(); ++k) {
       const uint32_t recipe = targets[k] - graph.nItem;
       if (recipe >= graph.nRecipe) {
@@ -740,10 +740,10 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         return graph.output[a] < graph.output[b];
       if (graph.outputAmt[a] != graph.outputAmt[b])
         return graph.outputAmt[a] < graph.outputAmt[b];
-      const auto ta = graph.r2i.targetsOf(a);
-      const auto tb = graph.r2i.targetsOf(b);
-      const auto wa = graph.r2i.weightsOf(a);
-      const auto wb = graph.r2i.weightsOf(b);
+      const auto ta = graph.inputsOf(a);
+      const auto tb = graph.inputsOf(b);
+      const auto wa = graph.inputAmountsOf(a);
+      const auto wb = graph.inputAmountsOf(b);
       const size_t shared = ta.size() < tb.size() ? ta.size() : tb.size();
       for (size_t i = 0; i < shared; ++i) {
         if (ta[i] != tb[i])
@@ -769,10 +769,10 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
 void dumpGraph(const aw::CraftingGraph& graph) {
   std::cout << "item -> recipe\n";
   for (size_t item = 0; item < graph.nItem; ++item) {
-    auto targets = graph.i2r.targetsOf(item);
+    auto targets = graph.producersOf(item);
     if (targets.empty()) continue;
     std::cout << "  item " << graph.itemHandle(item) << ":";
-    auto weights = graph.i2r.weightsOf(item);
+    auto weights = graph.producedAmountsOf(item);
     for (size_t k = 0; k < targets.size(); ++k) {
       std::cout << " r" << (targets[k] - graph.nItem) << " x" << weights[k];
     }
@@ -783,8 +783,8 @@ void dumpGraph(const aw::CraftingGraph& graph) {
   for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
     std::cout << "  r" << recipe << " -> item " << graph.itemHandle(graph.output[recipe])
           << " x" << graph.outputAmt[recipe] << " <-";
-    auto targets = graph.r2i.targetsOf(recipe);
-    auto weights = graph.r2i.weightsOf(recipe);
+    auto targets = graph.inputsOf(recipe);
+    auto weights = graph.inputAmountsOf(recipe);
     for (size_t k = 0; k < targets.size(); ++k) {
       std::cout << " item " << graph.itemHandle(targets[k]) << " x" << weights[k];
     }
@@ -811,7 +811,7 @@ void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
   aw::vector<aw::NodeId> leafItems;
   leafItems.reserve(g.nItem);
   for (aw::NodeId i = 0; i < g.nItem; i++) {
-    const size_t producers = g.i2r.targetsOf(i).size();
+    const size_t producers = g.producersOf(i).size();
     if (producers == 0) {
       leaves++;
       leafItems.push_back_unchecked(i);
@@ -842,8 +842,8 @@ void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
 
   for (uint32_t r = 0; r < g.nRecipe; r++) {
     std::cout << item(g.output[r]) << " x" << g.outputAmt[r] << " <- ";
-    const auto targets = g.r2i.targetsOf(r);
-    const auto weights = g.r2i.weightsOf(r);
+    const auto targets = g.inputsOf(r);
+    const auto weights = g.inputAmountsOf(r);
     if (targets.empty()) {
       std::cout << "(nothing)";
     } else {
@@ -1365,8 +1365,8 @@ int main(int argc, char** argv) {
         std::cout << "  " << count << " x "
                   << itemLabel(graph, names, sub.itemOrigin[sub.graph.output[r]]) << " x"
                   << sub.graph.outputAmt[r] << " <- ";
-        const auto inputs = sub.graph.r2i.targetsOf(r);
-        const auto weights = sub.graph.r2i.weightsOf(r);
+        const auto inputs = sub.graph.inputsOf(r);
+        const auto weights = sub.graph.inputAmountsOf(r);
         if (inputs.empty()) {
           std::cout << "(nothing)";
         } else {

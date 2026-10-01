@@ -102,6 +102,16 @@ struct BaseCraftingGraph {
   std::span<const NodeId> inputsOf(NodeId recipe) const noexcept {
     return r2i.targetsOf(recipe);
   }
+
+  [[nodiscard]]
+  std::span<const Amount> producedAmountsOf(NodeId item) const noexcept {
+    return i2r.weightsOf(item);
+  }
+
+  [[nodiscard]]
+  std::span<const Amount> inputAmountsOf(NodeId recipe) const noexcept {
+    return r2i.weightsOf(recipe);
+  }
 };
 
 // A precomputed "wasteful pack" certificate for one recipe.

@@ -166,8 +166,8 @@ void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput)
   qualOffsets.assign(g.nItem, 0);
   for (uint r = 0; r < g.nRecipe && g.output[r] < g.nReal; r++) {
     const Amount out = g.outputAmt[r];
-    const auto inputs = g.r2i.targetsOf(r);
-    const auto weights = g.r2i.weightsOf(r);
+    const auto inputs = g.inputsOf(r);
+    const auto weights = g.inputAmountsOf(r);
     for (size_t k = 0; k < inputs.size(); k++) {
       if (weights[k] >= out)
         qualOffsets[inputs[k]]++;
@@ -178,8 +178,8 @@ void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput)
   aw::vector<uint32_t> cursor(qualOffsets.begin(), qualOffsets.end() - 1);
   for (uint r = 0; r < g.nRecipe && g.output[r] < g.nReal; r++) {
     const Amount out = g.outputAmt[r];
-    const auto inputs = g.r2i.targetsOf(r);
-    const auto weights = g.r2i.weightsOf(r);
+    const auto inputs = g.inputsOf(r);
+    const auto weights = g.inputAmountsOf(r);
     for (size_t k = 0; k < inputs.size(); k++) {
       if (weights[k] >= out)
         qualRecipes[cursor[inputs[k]]++] = r;
@@ -207,7 +207,7 @@ void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput)
   recipeCount.assign(g.nReal, 0);
   realEligible.assign(g.nReal, 0);
   for (NodeId y = 0; y < g.nReal; y++) {
-    recipeCount[y] = (uint32_t) g.i2r.targetsOf(y).size();
+    recipeCount[y] = (uint32_t) g.producersOf(y).size();
     realEligible[y] = !requireUnit || unitOutput[y] != 0;
   }
 
@@ -429,13 +429,13 @@ bool collectGuards(const CraftingGraph &graph, NodeId y,
     out.push_back_unchecked(y);
     return true;
   }
-  const auto recipes = graph.i2r.targetsOf(y);
+  const auto recipes = graph.producersOf(y);
   if (recipes.size() > options.maxSubstitutionGuardItems)
     return false;
   // At most one guard per tag member recipe.
   out.reserve(recipes.size());
   for (NodeId recipeNode : recipes) {
-    const auto inputs = graph.r2i.targetsOf(recipeNode - graph.nItem);
+    const auto inputs = graph.inputsOf(recipeNode - graph.nItem);
     if (inputs.size() != 1)
       return false;
     out.push_back_unchecked(inputs[0]);
@@ -458,14 +458,14 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
   // Collect tags and members. TODO: can we reuse it from tag prune?
   aw::vector<aw::vector<NodeId>> tagMembers(nItem);
   for (NodeId t = nReal; t < nItem; t++) {
-    const auto recipes = graph.i2r.targetsOf(t);
+    const auto recipes = graph.producersOf(t);
     if (recipes.empty())
       continue;
     aw::vector<NodeId> ms;
     ms.reserve(recipes.size());
     for (NodeId recipeNode : recipes) {
       const uint r = recipeNode - graph.nItem;
-      const auto inputs = graph.r2i.targetsOf(r);
+      const auto inputs = graph.inputsOf(r);
       ms.push_back_unchecked(inputs[0]);
     }
     std::sort(ms.begin(), ms.end());
@@ -482,7 +482,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
   if (!options.nonoptimal) {
     unitOutput.assign(nItem, 1);
     for (NodeId m = 0; m < nReal; m++) {
-      for (NodeId recipeNode : graph.i2r.targetsOf(m)) {
+      for (NodeId recipeNode : graph.producersOf(m)) {
         if (graph.outputAmt[recipeNode - graph.nItem] != 1) {
           unitOutput[m] = 0;
           break;
@@ -516,7 +516,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
   recs.reserve(options.maxSiblingRecipes);
   for (NodeId X = 0; X < nReal; X++) {
     CHECK_WORK;
-    const auto recipeNodes = graph.i2r.targetsOf(X);
+    const auto recipeNodes = graph.producersOf(X);
     if (recipeNodes.size() < 2)
       continue;
     if (recipeNodes.size() > options.maxSiblingRecipes)

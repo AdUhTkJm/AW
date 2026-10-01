@@ -193,10 +193,10 @@ struct RecipeKeyLess {
     if (g.outputAmt[a] != g.outputAmt[b])
       return g.outputAmt[a] < g.outputAmt[b];
 
-    const auto ta = g.r2i.targetsOf(a);
-    const auto tb = g.r2i.targetsOf(b);
-    const auto wa = g.r2i.weightsOf(a);
-    const auto wb = g.r2i.weightsOf(b);
+    const auto ta = g.inputsOf(a);
+    const auto tb = g.inputsOf(b);
+    const auto wa = g.inputAmountsOf(a);
+    const auto wb = g.inputAmountsOf(b);
     const size_t shared = ta.size() < tb.size() ? ta.size() : tb.size();
     for (size_t i = 0; i < shared; i++) {
       if (ta[i] != tb[i])
@@ -302,7 +302,7 @@ void canonicalizeRecipes() noexcept {
   aw::vector<uint> inputOffsets(newNRecipe, 0);
   for (uint r = 0; r < nRecipe; r++) {
     if (rep[r] == r)
-      inputOffsets[newId[r]] = (uint) graph.r2i.targetsOf(r).size();
+      inputOffsets[newId[r]] = (uint) graph.inputsOf(r).size();
   }
   prefixSum(inputOffsets);
 
@@ -312,8 +312,8 @@ void canonicalizeRecipes() noexcept {
     if (rep[r] != r)
       continue;
     uint slot = inputOffsets[newId[r]];
-    const auto targets = graph.r2i.targetsOf(r);
-    const auto weights = graph.r2i.weightsOf(r);
+    const auto targets = graph.inputsOf(r);
+    const auto weights = graph.inputAmountsOf(r);
     for (size_t k = 0; k < targets.size(); k++) {
       inputTargets[slot] = targets[k];
       inputWeights[slot] = weights[k];
@@ -581,8 +581,8 @@ void extractRecipes(const CraftingGraph& graph, aw::vector<MutableRecipe> &out) 
     rec.outAmt = graph.outputAmt[r];
     const auto ws = graph.workstations.targetsOf(r);
     rec.ws.assign(ws.begin(), ws.end());
-    const auto inputs = graph.r2i.targetsOf(r);
-    const auto amounts = graph.r2i.weightsOf(r);
+    const auto inputs = graph.inputsOf(r);
+    const auto amounts = graph.inputAmountsOf(r);
     rec.inputs.assign(inputs.begin(), inputs.end());
     rec.amounts.assign(amounts.begin(), amounts.end());
     out.push_back(std::move(rec));
@@ -661,8 +661,8 @@ Amount selfConsumption(const MutableRecipe& rec) noexcept {
 
 // The same quantity read off the CSR form, without materializing the recipes.
 Amount selfConsumptionAt(const CraftingGraph& graph, uint r) noexcept {
-  const auto inputs = graph.r2i.targetsOf(r);
-  const auto amounts = graph.r2i.weightsOf(r);
+  const auto inputs = graph.inputsOf(r);
+  const auto amounts = graph.inputAmountsOf(r);
   Amount self = 0;
   for (size_t k = 0; k < inputs.size(); k++)
     if (inputs[k] == graph.output[r])
@@ -688,7 +688,7 @@ Amount selfConsumptionAt(const CraftingGraph& graph, uint r) noexcept {
 // the caller can skip its own call in that case.
 bool dropNonPositiveInputs(CraftingGraph& graph) noexcept {
   const auto degenerate = [&](uint r) noexcept {
-    for (Amount amount : graph.r2i.weightsOf(r))
+    for (Amount amount : graph.inputAmountsOf(r))
       if (amount <= 0)
         return true;
     return false;
@@ -843,7 +843,7 @@ struct ReachQuery {
     // member, in which case the free stock can still be spent on the tag.
     if (pruneTag && recipe < graph.tagEdgeDominated.size() &&
         graph.tagEdgeDominated[recipe]) {
-      const auto inputs = graph.r2i.targetsOf(recipe);
+      const auto inputs = graph.inputsOf(recipe);
       if (inputs.empty() || held(inputs[0]) == 0)
         return true;
     }
@@ -904,7 +904,7 @@ struct ReachQuery {
       const NodeId item = queue[q];
       const bool real = graph.isRealItem(item);
 
-      for (NodeId recipeNode : graph.i2r.targetsOf(item)) {
+      for (NodeId recipeNode : graph.producersOf(item)) {
         const uint recipe = recipeNode - graph.nItem;
         if (recipeSeen[recipe] || disabled[recipe] || prunedOut(recipe))
           continue;
@@ -916,7 +916,7 @@ struct ReachQuery {
           continue;
 
         recipeSeen[recipe] = 1;
-        for (NodeId input : graph.r2i.targetsOf(recipe)) {
+        for (NodeId input : graph.inputsOf(recipe)) {
           if (!itemSeen[input]) {
             itemSeen[input] = 1;
             queue.push_back_unchecked(input);
@@ -1000,7 +1000,7 @@ struct ReachQuery {
     for (uint r = 0; r < nRecipe; r++) {
       if (!recipeSeen[r])
         continue;
-      for (NodeId input : graph.r2i.targetsOf(r))
+      for (NodeId input : graph.inputsOf(r))
         consOffsets[input + 1]++;
     }
     for (NodeId item = 0; item < nItem; item++)
@@ -1010,7 +1010,7 @@ struct ReachQuery {
     for (uint r = 0; r < nRecipe; r++) {
       if (!recipeSeen[r])
         continue;
-      for (NodeId input : graph.r2i.targetsOf(r))
+      for (NodeId input : graph.inputsOf(r))
         consRecipes[cursor[input]++] = r;
     }
     
@@ -1019,7 +1019,7 @@ struct ReachQuery {
     aw::vector<uint32_t> missing(nRecipe, UINT32_MAX);
     for (uint r = 0; r < nRecipe; r++)
       if (recipeSeen[r])
-        missing[r] = (uint32_t) graph.r2i.targetsOf(r).size();
+        missing[r] = (uint32_t) graph.inputsOf(r).size();
 
     aw::vector<uint8_t> obtainable(nItem, 0);
     // Holds reachable items and recipes.
@@ -1091,8 +1091,8 @@ aw::vector<MutableRecipe> collectSurvivingRecipes(const aw::vector<uint8_t> &rec
     // tag edge from a real recipe.
     const auto ws = graph.workstations.targetsOf(r);
     rec.ws.assign(ws.begin(), ws.end());
-    const auto inputs = graph.r2i.targetsOf(r);
-    const auto amounts = graph.r2i.weightsOf(r);
+    const auto inputs = graph.inputsOf(r);
+    const auto amounts = graph.inputAmountsOf(r);
     rec.inputs.assign(inputs.begin(), inputs.end());
     rec.amounts.assign(amounts.begin(), amounts.end());
     built.push_back(std::move(rec));

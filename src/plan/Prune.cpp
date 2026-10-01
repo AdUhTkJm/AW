@@ -71,8 +71,8 @@ RecipeVectors::RecipeVectors(const BaseCraftingGraph &graph) noexcept {
   for (uint r = 0; r < nRecipe; r++) {
     scratch.clear();
     scratch.emplace_back(graph.output[r], graph.outputAmt[r]);
-    const auto inputs = graph.r2i.targetsOf(r);
-    const auto weights = graph.r2i.weightsOf(r);
+    const auto inputs = graph.inputsOf(r);
+    const auto weights = graph.inputAmountsOf(r);
     for (size_t k = 0; k < inputs.size(); k++)
       scratch.emplace_back(inputs[k], -weights[k]);
 
@@ -333,7 +333,7 @@ void computeDirectDominancePruning(CraftingGraph &graph,
   aw::vector<aw::vector<NodeId>> compWs;
 
   for (NodeId X = 0; X < nReal; X++) {
-    const auto recipeNodes = graph.i2r.targetsOf(X);
+    const auto recipeNodes = graph.producersOf(X);
     if (recipeNodes.size() < 2)
       continue;
     // The same budget as the composite pass: a quadratic scan of an item with
@@ -413,7 +413,7 @@ void computeDeadnodePruning(CraftingGraph &graph) noexcept {
       graph.recipeSubstituted.size() == graph.nRecipe &&
       graph.recipeSubstitutedGuards.size() == graph.nRecipe;
   for (NodeId X = 0; X < nReal; X++) {
-    const auto recipeNodes = graph.i2r.targetsOf(X);
+    const auto recipeNodes = graph.producersOf(X);
     if (recipeNodes.empty())
       continue;
     bool anyKept = false;

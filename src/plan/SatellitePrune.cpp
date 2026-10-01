@@ -102,8 +102,8 @@ Amount held(std::span<const Amount> inventory, NodeId item) noexcept {
 [[nodiscard]]
 Amount columnCoefficient(const CraftingGraph& graph, uint recipe, NodeId item) noexcept {
   Amount coeff = graph.output[recipe] == item ? graph.outputAmt[recipe] : 0;
-  const auto inputs = graph.r2i.targetsOf(recipe);
-  const auto weights = graph.r2i.weightsOf(recipe);
+  const auto inputs = graph.inputsOf(recipe);
+  const auto weights = graph.inputAmountsOf(recipe);
   for (size_t k = 0; k < inputs.size(); k++)
     if (inputs[k] == item)
       coeff -= weights[k];
@@ -139,7 +139,7 @@ void buildUndirected(const CraftingGraph& graph, std::span<const uint8_t> recipe
     const uint rn = nItem + r;
     counts[graph.output[r]]++;
     counts[rn]++;
-    for (NodeId input : graph.r2i.targetsOf(r)) {
+    for (NodeId input : graph.inputsOf(r)) {
       counts[input]++;
       counts[rn]++;
     }
@@ -160,7 +160,7 @@ void buildUndirected(const CraftingGraph& graph, std::span<const uint8_t> recipe
     const uint rn = nItem + r;
     link(graph.output[r], rn);
     link(rn, graph.output[r]);
-    for (NodeId input : graph.r2i.targetsOf(r)) {
+    for (NodeId input : graph.inputsOf(r)) {
       link(input, rn);
       link(rn, input);
     }
@@ -279,7 +279,7 @@ void buildItemGraph(const CraftingGraph& graph, std::span<const uint8_t> recipeS
     if (!recipeSeen[r])
       continue;
     const NodeId produced = graph.output[r];
-    for (NodeId input : graph.r2i.targetsOf(r))
+    for (NodeId input : graph.inputsOf(r))
       if (input != produced)
         counts[input]++;
   }
@@ -294,7 +294,7 @@ void buildItemGraph(const CraftingGraph& graph, std::span<const uint8_t> recipeS
     if (!recipeSeen[r])
       continue;
     const NodeId produced = graph.output[r];
-    for (NodeId input : graph.r2i.targetsOf(r))
+    for (NodeId input : graph.inputsOf(r))
       if (input != produced)
         out.targets[cursor[input]++] = produced;
   }
@@ -626,8 +626,8 @@ bool solveCertificate(const CraftingGraph& graph, NodeId cutNode, const Componen
       const int32_t outPos = itemPos[graph.output[r]];
       if (outPos >= 0)
         row->SetCoefficient(var[outPos], (double) graph.outputAmt[r]);
-      const auto inputs = graph.r2i.targetsOf(r);
-      const auto weights = graph.r2i.weightsOf(r);
+      const auto inputs = graph.inputsOf(r);
+      const auto weights = graph.inputAmountsOf(r);
       for (size_t e = 0; e < inputs.size(); e++)
         if (itemPos[inputs[e]] >= 0)
           row->SetCoefficient(var[itemPos[inputs[e]]], -(double) weights[e]);
@@ -657,8 +657,8 @@ bool certificateHolds(const CraftingGraph& graph, NodeId cutNode, const Componen
     const int32_t outPos = itemPos[graph.output[r]];
     if (outPos >= 0)
       sum += (aw::int128) scaled[outPos] * graph.outputAmt[r];
-    const auto inputs = graph.r2i.targetsOf(r);
-    const auto weights = graph.r2i.weightsOf(r);
+    const auto inputs = graph.inputsOf(r);
+    const auto weights = graph.inputAmountsOf(r);
     for (size_t e = 0; e < inputs.size(); e++)
       if (itemPos[inputs[e]] >= 0)
         sum -= (aw::int128) scaled[itemPos[inputs[e]]] * weights[e];
@@ -750,7 +750,7 @@ bool certifyIsland(DirectedRun& run, uint escape) noexcept {
   // G = every recipe that produces or consumes an island item.
   island.recipes.clear();
   for (uint j : island.items) {
-    for (NodeId recipeNode : graph.i2r.targetsOf(j)) {
+    for (NodeId recipeNode : graph.producersOf(j)) {
       const uint r = recipeNode - nItem;
       if (!run.recipeSeen[r] || run.recipeStamp[r] == stamp)
         continue;
@@ -850,7 +850,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
   for (uint r = 0; r < graph.nRecipe; r++) {
     if (!recipeSeen[r])
       continue;
-    depOffsets[graph.output[r] + 1] += (uint) graph.r2i.targetsOf(r).size();
+    depOffsets[graph.output[r] + 1] += (uint) graph.inputsOf(r).size();
   }
   for (uint j = 0; j < nItem; j++)
     depOffsets[j + 1] += depOffsets[j];
@@ -860,7 +860,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
     for (uint r = 0; r < graph.nRecipe; r++) {
       if (!recipeSeen[r])
         continue;
-      for (NodeId input : graph.r2i.targetsOf(r))
+      for (NodeId input : graph.inputsOf(r))
         depTargets[cursor[graph.output[r]]++] = input;
     }
   }
@@ -871,7 +871,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
   for (uint r = 0; r < graph.nRecipe; r++) {
     if (!recipeSeen[r])
       continue;
-    for (NodeId input : graph.r2i.targetsOf(r))
+    for (NodeId input : graph.inputsOf(r))
       consOffsets[input + 1]++;
   }
   for (uint j = 0; j < nItem; j++)
@@ -882,7 +882,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
     for (uint r = 0; r < graph.nRecipe; r++) {
       if (!recipeSeen[r])
         continue;
-      for (NodeId input : graph.r2i.targetsOf(r))
+      for (NodeId input : graph.inputsOf(r))
         consTargets[cursor[input]++] = r;
     }
   }

@@ -180,7 +180,7 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
   aw::vector<aw::vector<NodeId>> compWs;
 
   for (NodeId X = 0; X < nReal; X++) {
-    const auto recipeNodes = graph.i2r.targetsOf(X);
+    const auto recipeNodes = graph.producersOf(X);
     if (recipeNodes.size() < 2)
       continue;
     // Comparing every pair of X's recipes costs O(k^2) time and can build a
@@ -201,14 +201,14 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
 
     for (uint i = 0; i < k; i++) {
       const uint R = recs[i];
-      const auto inputs = graph.r2i.targetsOf(R);
-      const auto weights = graph.r2i.weightsOf(R);
+      const auto inputs = graph.inputsOf(R);
+      const auto weights = graph.inputAmountsOf(R);
       for (size_t a = 0; a < inputs.size(); a++) {
         const NodeId Y = inputs[a];
         if (!graph.isRealItem(Y))
           continue;
         const Amount q = weights[a];
-        const auto producers = graph.i2r.targetsOf(Y);
+        const auto producers = graph.producersOf(Y);
 
         // The composite has to be at least as good for every producer of Y, so
         // the inner loop is proportional to producers(Y). Skip a witness that

@@ -1370,7 +1370,7 @@ void testFireability() {
     int64_t seed = 0;
     for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
       total += retried.exec[r];
-      const auto inputs = sub.graph.r2i.targetsOf(r);
+      const auto inputs = sub.graph.inputsOf(r);
       if (inputs.size() == 1 && sub.itemOrigin[inputs[0]] == 0)  // handle 1 (L)
         seed += retried.exec[r];
     }
@@ -1442,7 +1442,7 @@ void testDuplicateRecipes() {
   expect(graph.nItem == 3 && graph.nReal == 3, "duplicate sample shape");
 
   // The survivor keeps rA's id (0) and order, and gains rB's workstations.
-  const auto recipes = graph.i2r.targetsOf(0);
+  const auto recipes = graph.producersOf(0);
   expect(recipes.size() == 3 && recipes[0] == graph.nItem &&
          recipes[1] == graph.nItem + 1 && recipes[2] == graph.nItem + 2,
          "surviving recipes keep their file order");
@@ -1452,7 +1452,7 @@ void testDuplicateRecipes() {
   expect(graph.outputAmt[0] == 1 && graph.outputAmt[1] == 2 &&
          graph.outputAmt[2] == 1,
          "output amounts survive the fold");
-  expect(graph.r2i.weightsOf(2).size() == 1 && graph.r2i.weightsOf(2)[0] == 2,
+  expect(graph.inputAmountsOf(2).size() == 1 && graph.r2i.weightsOf(2)[0] == 2,
          "a different input amount is not folded away");
   expect(graph.i2r.numEdges() == graph.nRecipe,
          "one item -> recipe edge per surviving recipe");
@@ -1493,19 +1493,19 @@ void testSample() {
   expect(graph.isRealItem(0) && graph.isRealItem(1), "handles 1 and 2 are real");
   expect(graph.recipeNode(0) == 3 && graph.recipeNode(1) == 4, "recipe node numbering");
 
-  const auto itemTargets = graph.i2r.targetsOf(0);
+  const auto itemTargets = graph.producersOf(0);
   expect(itemTargets.size() == 1 && itemTargets[0] == 3, "item 1 -> recipe 0");
-  const auto itemWeights = graph.i2r.weightsOf(0);
+  const auto itemWeights = graph.producedAmountsOf(0);
   expect(itemWeights.size() == 1 && itemWeights[0] == 1, "item 1 edge weights");
-  expect(graph.i2r.targetsOf(1).empty(), "item 2 has no producing recipe");
-  const auto pseudo = graph.i2r.targetsOf(2);
+  expect(graph.producersOf(1).empty(), "item 2 has no producing recipe");
+  const auto pseudo = graph.producersOf(2);
   expect(pseudo.size() == 1 && pseudo[0] == 4, "item 3 -> recipe 1");
 
-  const auto r0Targets = graph.r2i.targetsOf(0);
+  const auto r0Targets = graph.inputsOf(0);
   expect(r0Targets.size() == 1 && r0Targets[0] == 1, "recipe 0 input is item 2");
-  const auto r0Weights = graph.r2i.weightsOf(0);
+  const auto r0Weights = graph.inputAmountsOf(0);
   expect(r0Weights.size() == 1 && r0Weights[0] == 5, "recipe 0 amount");
-  const auto r1Targets = graph.r2i.targetsOf(1);
+  const auto r1Targets = graph.inputsOf(1);
   expect(r1Targets.size() == 2 && r1Targets[0] == 0 && r1Targets[1] == 2,
          "recipe 1 inputs are items 1, 3");
 
@@ -1528,8 +1528,8 @@ void testNetLossRecipes() {
   // though each has a workstation. Only the net producer survives.
   expect(graph.nRecipe == 1, "net-loss recipes are dropped at registration");
   expect(graph.output[0] == 0 && graph.outputAmt[0] == 3, "the survivor is r2");
-  const auto inputs = graph.r2i.targetsOf(0);
-  const auto weights = graph.r2i.weightsOf(0);
+  const auto inputs = graph.inputsOf(0);
+  const auto weights = graph.inputAmountsOf(0);
   expect(inputs.size() == 1 && inputs[0] == 0 && weights[0] == 1,
          "the survivor keeps its input");
 
@@ -1557,27 +1557,27 @@ void testNonPositiveInputs() {
 
   // The x0 edges are gone before any pass can read an amount.
   for (uint32_t r = 0; r < graph.nRecipe; r++) {
-    for (aw::Amount amount : graph.r2i.weightsOf(r))
+    for (aw::Amount amount : graph.inputAmountsOf(r))
       expect(amount > 0, "no non-positive input amount survives registration");
   }
   expect(graph.nRecipe == 3, "the x0 edges are dropped, not their recipes");
   expect(graph.r2i.numEdges() == 2, "a dropped edge leaves no empty slot behind");
-  expect(graph.i2r.targetsOf(0).size() == 3, "all three survivors still make item 1");
+  expect(graph.producersOf(0).size() == 3, "all three survivors still make item 1");
 
   // r0, then the fold of r1 and r2, then r3. The fold keeps the lowest recipe id
   // and gains both workstations.
   expect(graph.outputAmt[0] == 4 && graph.outputAmt[1] == 1 && graph.outputAmt[2] == 5,
          "surviving output amounts keep their file order");
-  expect(graph.r2i.targetsOf(0).size() == 1 && graph.r2i.targetsOf(0)[0] == 1 &&
-             graph.r2i.weightsOf(0)[0] == 2,
+  expect(graph.inputsOf(0).size() == 1 && graph.r2i.targetsOf(0)[0] == 1 &&
+             graph.inputAmountsOf(0)[0] == 2,
          "r0 is untouched");
-  expect(graph.r2i.targetsOf(1).size() == 1 && graph.r2i.targetsOf(1)[0] == 1 &&
-             graph.r2i.weightsOf(1)[0] == 1,
+  expect(graph.inputsOf(1).size() == 1 && graph.r2i.targetsOf(1)[0] == 1 &&
+             graph.inputAmountsOf(1)[0] == 1,
          "the folded recipe keeps only the real input");
   const auto foldedWs = graph.workstations.targetsOf(1);
   expect(foldedWs.size() == 2 && foldedWs[0] == 0 && foldedWs[1] == 1,
          "recipes that differed only by a degenerate input fold, workstations united");
-  expect(graph.r2i.targetsOf(2).empty(), "r3 keeps its output with no input at all");
+  expect(graph.inputsOf(2).empty(), "r3 keeps its output with no input at all");
 
   // An input-less recipe is not a curiosity to be husked out later: it is the
   // only route that does not need the unstocked leaf, and the plan must use it.
@@ -1613,8 +1613,8 @@ void testDegenerateOnlyInput() {
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
 
   expect(graph.nRecipe == 1, "the only recipe for item 1 survives");
-  expect(graph.r2i.targetsOf(0).empty(), "its x0 input is gone");
-  expect(graph.i2r.targetsOf(0).size() == 1, "item 1 is still produced");
+  expect(graph.inputsOf(0).empty(), "its x0 input is gone");
+  expect(graph.producersOf(0).size() == 1, "item 1 is still produced");
 
   aw::options.recipePruning = false;
   aw::options.directPruning = false;
@@ -1665,13 +1665,13 @@ void testReachability() {
     expect(sub.recipeOrigin[i] == recipes[i], "recipeOrigin is ascending");
 
   // rA consumes the pseudo (subgraph node 2) and outputs the start item.
-  const auto inputs = sub.graph.r2i.targetsOf(0);
+  const auto inputs = sub.graph.inputsOf(0);
   expect(inputs.size() == 1 && inputs[0] == 2, "rA consumes the renumbered pseudo");
   expect(sub.graph.output[0] == 0, "rA output item");
 
   // The pseudo's synthetic recipes need no workstation and are always kept.
   expect(sub.graph.output[1] == 2 && sub.graph.output[2] == 2, "synthetic outputs");
-  const auto pseudoRecipes = sub.graph.i2r.targetsOf(2);
+  const auto pseudoRecipes = sub.graph.producersOf(2);
   expect(pseudoRecipes.size() == 2 &&
          pseudoRecipes[0] == sub.graph.nItem + 1 &&
          pseudoRecipes[1] == sub.graph.nItem + 2,
@@ -1695,17 +1695,17 @@ void testReachability() {
             sub.graph.r2i.offsets.size() == sub.graph.nRecipe + 1 &&
             sub.graph.output.size() == sub.graph.nRecipe;
   for (uint32_t i = 0; ok && i < sub.graph.nItem; i++)
-    for (aw::NodeId target : sub.graph.i2r.targetsOf(i))
+    for (aw::NodeId target : sub.graph.producersOf(i))
       if (target < sub.graph.nItem || target >= sub.graph.nItem + sub.graph.nRecipe)
         ok = false;
   for (uint32_t r = 0; ok && r < sub.graph.nRecipe; ++r) {
     if (sub.graph.output[r] >= sub.graph.nItem)
       ok = false;
-    for (aw::NodeId target : sub.graph.r2i.targetsOf(r))
+    for (aw::NodeId target : sub.graph.inputsOf(r))
       if (target >= sub.graph.nItem)
         ok = false;
     bool listed = false;
-    for (aw::NodeId target : sub.graph.i2r.targetsOf(sub.graph.output[r]))
+    for (aw::NodeId target : sub.graph.producersOf(sub.graph.output[r]))
       if (target == sub.graph.nItem + r)
         listed = true;
     if (!listed)
@@ -1844,7 +1844,7 @@ void testRejectsBadInput() {
   const aw::CraftingGraph &graph = aw::getCraftingGraph();
   expect(graph.nReal == 2 && graph.nItem == 3 && graph.nRecipe == 2,
          "rejected blob leaves the previous graph in place");
-  const auto itemTargets = graph.i2r.targetsOf(0);
+  const auto itemTargets = graph.producersOf(0);
   expect(itemTargets.size() == 1 && itemTargets[0] == 3,
          "previous graph is still coherent after a rejected blob");
 
@@ -2008,7 +2008,7 @@ void testTagPruningParity() {
   // Leaves are free only via inventory, so stock every item with no recipe.
   aw::vector<aw::Amount> inventory(graph.nItem, 0);
   for (aw::NodeId m = 0; m < graph.nReal; m++)
-    if (graph.i2r.targetsOf(m).empty())
+    if (graph.producersOf(m).empty())
       inventory[m] = 1000000000ULL;
 
   auto plan = [&](bool prune) {
@@ -2043,9 +2043,9 @@ void testTagBatchingGuard() {
   // `T <- m`: T is pseudo handle 5, m is handle 3. It has to stay flagged as
   // undominated, because m's only recipe emits four units at a time.
   bool batchedEdgeKept = false;
-  for (aw::NodeId recipeNode : graph.i2r.targetsOf(4)) {
+  for (aw::NodeId recipeNode : graph.producersOf(4)) {
     const uint32_t r = recipeNode - graph.nItem;
-    const auto inputs = graph.r2i.targetsOf(r);
+    const auto inputs = graph.inputsOf(r);
     if (inputs.size() == 1 && inputs[0] == 2)
       batchedEdgeKept = graph.tagEdgeDominated[r] == 0;
   }
@@ -2100,9 +2100,9 @@ void testNonoptimal() {
   {
     const aw::CraftingGraph &graph = aw::getCraftingGraph();
     bool batchedEdgeDominated = false;
-    for (aw::NodeId recipeNode : graph.i2r.targetsOf(4)) {
+    for (aw::NodeId recipeNode : graph.producersOf(4)) {
       const uint32_t r = recipeNode - graph.nItem;
-      const auto inputs = graph.r2i.targetsOf(r);
+      const auto inputs = graph.inputsOf(r);
       if (inputs.size() == 1 && inputs[0] == 2)
         batchedEdgeDominated = graph.tagEdgeDominated[r] == 1;
     }
@@ -2209,7 +2209,7 @@ void testTagInlining() {
     const aw::CraftingGraph &graph = aw::getCraftingGraph();
     aw::vector<aw::Amount> inventory(graph.nItem, 0);
     for (aw::NodeId m = 0; m < graph.nReal; m++)
-      if (graph.i2r.targetsOf(m).empty())
+      if (graph.producersOf(m).empty())
         inventory[m] = 1000000000ULL;
     inventory[1] = stainedStock;  // handle 2: stained glass, the dominated member
     const aw::Subgraph sub = aw::reachableSubgraph(5, all, inventory);
@@ -2531,7 +2531,7 @@ void testRecipeDominatorWorkstations() {
   // Leaves are free only through inventory.
   aw::vector<aw::Amount> inventory(graph.nItem, 0);
   for (aw::NodeId m = 0; m < graph.nReal; m++)
-    if (graph.i2r.targetsOf(m).empty())
+    if (graph.producersOf(m).empty())
       inventory[m] = 1000000000LL;
 
   const aw::Handle a[] = {7};
@@ -2580,7 +2580,7 @@ void testRecipePruningParity() {
   // Leaves (handles 5 and 6) are free only through inventory.
   aw::vector<aw::Amount> inventory(graph.nItem, 0);
   for (aw::NodeId m = 0; m < graph.nReal; m++)
-    if (graph.i2r.targetsOf(m).empty())
+    if (graph.producersOf(m).empty())
       inventory[m] = 1000000000LL;
 
   auto plan = [&](bool prune, aw::Amount amount) {
@@ -2726,7 +2726,7 @@ void testSubstitutionPruning() {
   const aw::CraftingGraph &g = aw::getCraftingGraph();
   aw::vector<aw::Amount> inv(g.nItem, 0);
   for (aw::NodeId m = 0; m < g.nReal; m++)
-    if (g.i2r.targetsOf(m).empty())
+    if (g.producersOf(m).empty())
       inv[m] = 1000000000LL;
   auto plan = [&](bool prune, aw::Amount amount) {
     aw::options.substitutionPruning = prune;
@@ -2757,7 +2757,7 @@ void testReducedCostParity() {
   // Leaves are free only through inventory.
   aw::vector<aw::Amount> inventory(graph.nItem, 0);
   for (aw::NodeId m = 0; m < graph.nReal; m++)
-    if (graph.i2r.targetsOf(m).empty())
+    if (graph.producersOf(m).empty())
       inventory[m] = 1000000000LL;
 
   auto plan = [&](double gap, aw::Amount amount) {
@@ -2931,7 +2931,7 @@ void testPackPruningParity() {
       const aw::CraftingGraph &graph = aw::getCraftingGraph();
       aw::vector<aw::Amount> inventory(graph.nItem, 0);
       for (aw::NodeId m = 0; m < graph.nReal; m++)
-        if (graph.i2r.targetsOf(m).empty())
+        if (graph.producersOf(m).empty())
           inventory[m] = 1000000000LL;
       const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
       const aw::NodeId target = sub.translate(3);
@@ -3166,8 +3166,8 @@ bool greedyBalances(const aw::Subgraph &sub, aw::NodeId target, aw::Amount amoun
     if (times == 0)
       continue;
     balance[g.output[r]] += (aw::int128) g.outputAmt[r] * times;
-    const auto inputs = g.r2i.targetsOf(r);
-    const auto weights = g.r2i.weightsOf(r);
+    const auto inputs = g.inputsOf(r);
+    const auto weights = g.inputAmountsOf(r);
     for (size_t k = 0; k < inputs.size(); k++)
       balance[inputs[k]] -= (aw::int128) weights[k] * times;
   }

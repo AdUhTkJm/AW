@@ -116,9 +116,9 @@ ReachableView::ReachableView(const BaseCraftingGraph &g, NodeId target) noexcept
   for (size_t head = 0; head < queue.size(); head++) {
     const uint32_t item = queue[head];
     const int32_t nextDistance = distance[item] + 1;
-    for (NodeId producerNode : g.i2r.targetsOf(item)) {
+    for (NodeId producerNode : g.producersOf(item)) {
       const uint32_t recipe = producerNode - nItem;
-      for (NodeId input : g.r2i.targetsOf(recipe))
+      for (NodeId input : g.inputsOf(recipe))
         discover(input, nextDistance);
     }
   }
@@ -132,8 +132,8 @@ ReachableView::ReachableView(const BaseCraftingGraph &g, NodeId target) noexcept
   size_t nEdge = 0;
   for (uint32_t item : order) {
     uint32_t count = 0;
-    for (NodeId producerNode : g.i2r.targetsOf(item)) {
-      const auto inputs = g.r2i.targetsOf(producerNode - nItem);
+    for (NodeId producerNode : g.producersOf(item)) {
+      const auto inputs = g.inputsOf(producerNode - nItem);
       count += (uint32_t) inputs.size();
       for (NodeId input : inputs)
         consumerOffsets[input + 1]++;
@@ -151,9 +151,9 @@ ReachableView::ReachableView(const BaseCraftingGraph &g, NodeId target) noexcept
   aw::vector<NodeId> adjCursor(adjOffsets);
   aw::vector<NodeId> consumerCursor(consumerOffsets);
   for (uint32_t item : order) {
-    for (NodeId producerNode : g.i2r.targetsOf(item)) {
+    for (NodeId producerNode : g.producersOf(item)) {
       const uint32_t recipe = producerNode - nItem;
-      for (NodeId input : g.r2i.targetsOf(recipe)) {
+      for (NodeId input : g.inputsOf(recipe)) {
         adjTargets[adjCursor[item]++] = input;
         consumerTargets[consumerCursor[input]++] = recipe;
       }
@@ -195,7 +195,7 @@ RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
   // cut point of its own SCC in the stock-seeded pass, and an input-free recipe
   // is a producible entry point in both.
   for (uint32_t item : view.order) {
-    const auto producers = g.i2r.targetsOf(item);
+    const auto producers = g.producersOf(item);
     if (producers.empty()) {
       push(item, stockSeeded && stock[item] > 0 ? 0 : 2, 0);
       continue;
@@ -204,7 +204,7 @@ RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
       push(item, 1, 0);
     for (NodeId producerNode : producers) {
       const uint32_t recipe = producerNode - g.nItem;
-      const size_t dependencies = g.r2i.targetsOf(recipe).size();
+      const size_t dependencies = g.inputsOf(recipe).size();
       if (dependencies == 0)
         push(item, 0, 1);
       else

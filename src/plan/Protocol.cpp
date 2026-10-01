@@ -283,8 +283,8 @@ PlanResponse runPlan(const PlanRequest &request) noexcept {
     use.outputHandle = CraftingGraph::itemHandle(sub.itemOrigin[sub.graph.output[r]]);
     use.outputAmount = sub.graph.outputAmt[r];
 
-    const auto inputs = sub.graph.r2i.targetsOf(r);
-    const auto amounts = sub.graph.r2i.weightsOf(r);
+    const auto inputs = sub.graph.inputsOf(r);
+    const auto amounts = sub.graph.inputAmountsOf(r);
     use.inputHandles.reserve(inputs.size());
     use.inputAmounts.reserve(inputs.size());
     for (size_t k = 0; k < inputs.size(); k++) {

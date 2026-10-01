@@ -73,13 +73,13 @@ bool better(const BaseCraftingGraph &g, Strategy strategy, uint32_t lhs, uint32_
   if (strategy == Strategy::LargestBatch) {
     if (g.outputAmt[rhs] != g.outputAmt[lhs])
       return g.outputAmt[rhs] > g.outputAmt[lhs];
-    return g.r2i.targetsOf(rhs).size() < g.r2i.targetsOf(lhs).size();
+    return g.inputsOf(rhs).size() < g.r2i.targetsOf(lhs).size();
   }
   int64_t lhsMass = 0;
   int64_t rhsMass = 0;
-  for (Amount weight : g.r2i.weightsOf(lhs))
+  for (Amount weight : g.inputAmountsOf(lhs))
     lhsMass += weight;
-  for (Amount weight : g.r2i.weightsOf(rhs))
+  for (Amount weight : g.inputAmountsOf(rhs))
     rhsMass += weight;
   if (lhsMass != rhsMass)
     return rhsMass < lhsMass;
@@ -153,11 +153,11 @@ aw::vector<uint8_t> computeObtainable(const BaseCraftingGraph &g, const AcyclicV
     // If there exists a usable recipe, and every item of it is obtainable,
     // then so is the current one.
     bool ok = false;
-    for (NodeId producerNode : g.i2r.targetsOf(item)) {
+    for (NodeId producerNode : g.producersOf(item)) {
       const uint32_t recipe = producerNode - g.nItem;
       if (!view.usable[recipe])
         continue;
-      auto targets = g.r2i.targetsOf(recipe);
+      auto targets = g.inputsOf(recipe);
       if (std::ranges::all_of(targets, [&](NodeId id) { return obtainable[id]; })) {
         ok = true;
         break;
@@ -173,8 +173,8 @@ aw::vector<uint8_t> computeObtainable(const BaseCraftingGraph &g, const AcyclicV
 // reaches.
 int64_t producibleVia(const BaseCraftingGraph &g, uint32_t recipe,
                       std::span<const int64_t> cap) noexcept {
-  const auto inputs = g.r2i.targetsOf(recipe);
-  const auto weights = g.r2i.weightsOf(recipe);
+  const auto inputs = g.inputsOf(recipe);
+  const auto weights = g.inputAmountsOf(recipe);
   int64_t firings = INT64_MAX;
   for (size_t k = 0; k < inputs.size(); k++) {
     const int64_t weight = weights[k];
@@ -195,8 +195,8 @@ int64_t producibleVia(const BaseCraftingGraph &g, uint32_t recipe,
 // against `cap - need`, so `need` doubles as the global reservation.
 int64_t capRemainingVia(const BaseCraftingGraph &g, std::span<const int64_t> cap,
                         std::span<const int64_t> need, uint32_t recipe) noexcept {
-  const auto inputs = g.r2i.targetsOf(recipe);
-  const auto weights = g.r2i.weightsOf(recipe);
+  const auto inputs = g.inputsOf(recipe);
+  const auto weights = g.inputAmountsOf(recipe);
   int64_t firings = INT64_MAX;
   for (size_t k = 0; k < inputs.size(); k++) {
     const int64_t weight = weights[k];
@@ -238,7 +238,7 @@ aw::vector<int64_t> SweepContext::capacityFromOrder() const noexcept {
   aw::vector<int64_t> cap(g.nItem, 0);
   for (uint32_t item : view.post) {
     int64_t best = 0;
-    for (NodeId producerNode : g.i2r.targetsOf(item)) {
+    for (NodeId producerNode : g.producersOf(item)) {
       const uint32_t recipe = producerNode - g.nItem;
       if (!view.usable[recipe])
         continue;
@@ -272,7 +272,7 @@ aw::vector<int64_t> capacitySweep(const SweepContext &ctx, Strategy strategy) no
       continue;
 
     routes.clear();
-    for (NodeId producerNode : g.i2r.targetsOf(item)) {
+    for (NodeId producerNode : g.producersOf(item)) {
       const uint32_t recipe = producerNode - g.nItem;
       if (!view.usable[recipe] || g.outputAmt[recipe] <= 0)
         continue;
@@ -300,8 +300,8 @@ aw::vector<int64_t> capacitySweep(const SweepContext &ctx, Strategy strategy) no
       if (exec[route.recipe] > INT64_MAX - times)
         return {};
       exec[route.recipe] += times;
-      const auto inputs = g.r2i.targetsOf(route.recipe);
-      const auto weights = g.r2i.weightsOf(route.recipe);
+      const auto inputs = g.inputsOf(route.recipe);
+      const auto weights = g.inputAmountsOf(route.recipe);
       for (size_t k = 0; k < inputs.size(); k++) {
         const int64_t additional = satMul(weights[k], times);
         if (need[inputs[k]] > INT64_MAX - additional)
@@ -344,13 +344,13 @@ aw::vector<int64_t> demandSweep(const SweepContext &ctx,
     uint32_t best = UINT32_MAX;
     for (int pass = 0; pass < 2 && best == UINT32_MAX; pass++) {
       const bool requireObtainable = pass == 0;
-      for (NodeId producerNode : g.i2r.targetsOf(item)) {
+      for (NodeId producerNode : g.producersOf(item)) {
         const uint32_t recipe = producerNode - nItem;
         if (!view.usable[recipe])
           continue;
         if (requireObtainable) {
           bool all = true;
-          for (NodeId input : g.r2i.targetsOf(recipe))
+          for (NodeId input : g.inputsOf(recipe))
             if (!obtainable[input]) {
               all = false;
               break;
@@ -373,8 +373,8 @@ aw::vector<int64_t> demandSweep(const SweepContext &ctx,
     }
     const int64_t times = ceilDiv(deficit, batch);
     exec[best] += times;
-    const auto inputs = g.r2i.targetsOf(best);
-    const auto weights = g.r2i.weightsOf(best);
+    const auto inputs = g.inputsOf(best);
+    const auto weights = g.inputAmountsOf(best);
     for (size_t k = 0; k < inputs.size(); k++) {
       const aw::int128 next = (aw::int128) need[inputs[k]] + (aw::int128) weights[k] * times;
       if (next > (aw::int128) INT64_MAX) {
@@ -400,8 +400,8 @@ bool satisfiesBalance(const BaseCraftingGraph &g, const aw::vector<int64_t> &exe
     if (times == 0)
       continue;
     balance[g.output[recipe]] += (aw::int128) g.outputAmt[recipe] * times;
-    const auto inputs = g.r2i.targetsOf(recipe);
-    const auto weights = g.r2i.weightsOf(recipe);
+    const auto inputs = g.inputsOf(recipe);
+    const auto weights = g.inputAmountsOf(recipe);
     for (size_t k = 0; k < inputs.size(); k++)
       balance[inputs[k]] -= (aw::int128) weights[k] * times;
   }
