@@ -93,30 +93,29 @@ void computeComponents(std::span<const uint32_t> roots, const aw::vector<NodeId>
 
 }  // namespace
 
-ReachableView analyzeReachable(const BaseCraftingGraph &g, NodeId target) noexcept {
+ReachableView::ReachableView(const BaseCraftingGraph &g, NodeId target) noexcept {
   const uint32_t nItem = g.nItem;
-  ReachableView view;
-  view.component.assign(nItem, -1);
-  view.distance.assign(nItem, -1);
-  view.orderIndex.assign(nItem, -1);
+  component.assign(nItem, -1);
+  distance.assign(nItem, -1);
+  orderIndex.assign(nItem, -1);
 
   // BFS over the input cone. The first visit of an item is its shortest input
   // distance because every edge costs one hop.
-  view.order.reserve(nItem);
+  order.reserve(nItem);
   aw::vector<uint32_t> queue;
   queue.reserve(nItem);
-  const auto discover = [&](NodeId item, int32_t distance) {
-    if (view.orderIndex[item] >= 0)
+  const auto discover = [&](NodeId item, int32_t dist) {
+    if (orderIndex[item] >= 0)
       return;
-    view.orderIndex[item] = (int32_t) view.order.size();
-    view.distance[item] = distance;
-    view.order.push_back(item);
+    orderIndex[item] = (int32_t) order.size();
+    distance[item] = dist;
+    order.push_back(item);
     queue.push_back(item);
   };
   discover(target, 0);
   for (size_t head = 0; head < queue.size(); head++) {
     const uint32_t item = queue[head];
-    const int32_t nextDistance = view.distance[item] + 1;
+    const int32_t nextDistance = distance[item] + 1;
     for (NodeId producerNode : g.i2r.targetsOf(item)) {
       const uint32_t recipe = producerNode - nItem;
       for (NodeId input : g.r2i.targetsOf(recipe))
@@ -131,7 +130,7 @@ ReachableView analyzeReachable(const BaseCraftingGraph &g, NodeId target) noexce
   aw::vector<NodeId> adjOffsets = aw::vector<NodeId>::zeroes(nItem + 1);
   aw::vector<NodeId> consumerOffsets = aw::vector<NodeId>::zeroes(nItem + 1);
   size_t nEdge = 0;
-  for (uint32_t item : view.order) {
+  for (uint32_t item : order) {
     uint32_t count = 0;
     for (NodeId producerNode : g.i2r.targetsOf(item)) {
       const auto inputs = g.r2i.targetsOf(producerNode - nItem);
@@ -151,7 +150,7 @@ ReachableView analyzeReachable(const BaseCraftingGraph &g, NodeId target) noexce
   aw::vector<NodeId> consumerTargets(nEdge);
   aw::vector<NodeId> adjCursor(adjOffsets);
   aw::vector<NodeId> consumerCursor(consumerOffsets);
-  for (uint32_t item : view.order) {
+  for (uint32_t item : order) {
     for (NodeId producerNode : g.i2r.targetsOf(item)) {
       const uint32_t recipe = producerNode - nItem;
       for (NodeId input : g.r2i.targetsOf(recipe)) {
@@ -161,17 +160,16 @@ ReachableView analyzeReachable(const BaseCraftingGraph &g, NodeId target) noexce
     }
   }
 
-  computeComponents(view.order, adjOffsets, adjTargets, view.component);
+  computeComponents(order, adjOffsets, adjTargets, component);
 
-  view.consumers.offsets = std::move(consumerOffsets);
-  view.consumers.targets = std::move(consumerTargets);
-  return view;
+  consumers.offsets = std::move(consumerOffsets);
+  consumers.targets = std::move(consumerTargets);
 }
 
 RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
                          std::span<const Amount> stock, bool stockSeeded) noexcept {
   RankOrder order;
-  order.ordinal.assign(g.nItem, -1);
+  order.assign(g.nItem, -1);
   aw::vector<int32_t> pending;
   pending.assign(g.nRecipe, 0);
 
@@ -218,9 +216,9 @@ RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
   while (!ready.empty()) {
     const Ready entry = ready.top();
     ready.pop();
-    if (order.ordinal[entry.item] >= 0)
+    if (order[entry.item] >= 0)
       continue;
-    order.ordinal[entry.item] = next++;
+    order[entry.item] = next++;
     // Pops are monotone in (tier, level), so the last dependency to release a
     // recipe is the latest one; the output inherits its tier.
     for (NodeId consumer : view.consumers.targetsOf(entry.item)) {
@@ -231,16 +229,16 @@ RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
   return order;
 }
 
-bool cutByRank(const ReachableView &view, const RankOrder &order, NodeId output,
+bool rankPruning(const ReachableView &view, const RankOrder &order, NodeId output,
                std::span<const NodeId> inputs) noexcept {
   const int32_t component = view.component[output];
   if (component < 0)
     return false;
-  const int32_t own = order.ordinal[output];
+  const int32_t own = order[output];
   for (NodeId input : inputs) {
     if (view.component[input] != component)
       continue;
-    const int32_t dependency = order.ordinal[input];
+    const int32_t dependency = order[input];
     if (own < 0 || dependency < 0 || dependency >= own)
       return true;
   }

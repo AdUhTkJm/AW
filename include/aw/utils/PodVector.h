@@ -17,18 +17,12 @@
 
 namespace aw {
 
-// The element types PodVector is willing to hold: the integers, plus aw::int128.
-// The latter is a class on MSVC, which has no __int128, but it is still a
-// 16-byte trivially copyable word pair that is passed in registers, so it
-// belongs here rather than in the exception-throwing std::vector branch.
+// The C++20 way of testing POD.
 template<typename T>
 inline constexpr bool isPodElement =
   std::is_trivial_v<T> && std::is_standard_layout_v<T>;
 
-// Vector for integers.
 // Cannot hold more than 2^32 elements, but we never need that much.
-// Works for every POD theoretically, but elements are passed in value, since
-// integers are small enough to pass in a single register.
 template<typename T>
 class PodVector {
   static_assert(isPodElement<T>,
@@ -103,8 +97,7 @@ public:
       dat[i++] = value;
   }
 
-  template<typename It>
-    requires (isRange<It>)
+  template<typename It> requires (isRange<It>)
   PodVector(It first, It last) noexcept:
     cap((uint) std::distance(first, last)), sz(cap), dat(allocate(cap)) {
     size_type i = 0;

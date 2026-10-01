@@ -11,6 +11,7 @@ using Handle = uint32_t;
 // Indices into the unified node space. Items first, recipes next.
 using NodeId = uint32_t;
 using Amount = int64_t;
+using uint = uint32_t;
 
 // A compressed sparse row matrix, unweighted.
 // Row `r` owns targets[offsets[r] .. offsets[r+1]).
@@ -29,7 +30,7 @@ struct BaseSparseSets {
   }
 
   [[nodiscard]]
-  std::span<const NodeId> targetsOf(size_t row) const noexcept {
+  std::span<const NodeId> targetsOf(uint row) const noexcept {
     return {targets.data() + offsets[row], targets.data() + offsets[row + 1]};
   }
 };
@@ -44,7 +45,7 @@ struct SparseGraph : BaseSparseSets {
   }
 
   [[nodiscard]]
-  std::span<const Amount> weightsOf(size_t row) const noexcept {
+  std::span<const Amount> weightsOf(uint row) const noexcept {
     return {weights.data() + offsets[row], weights.data() + offsets[row + 1]};
   }
 };
@@ -60,7 +61,10 @@ struct BaseCraftingGraph {
 
   // Items and recipes are bipartite graphs.
   // These graphs are namely item to recipe and recipe to item graphs.
+
+  // Maps item to all recipes that produce it.
   SparseGraph i2r;
+  // Maps recipe to all items that it needs as input.
   SparseGraph r2i;
 
   // Output item node per recipe. Non-decreasing: the decoder emits recipes in
@@ -88,6 +92,16 @@ struct BaseCraftingGraph {
   bool isRealItem(NodeId node) const noexcept {
     return node < nReal;
   }
+
+  [[nodiscard]]
+  std::span<const NodeId> producersOf(NodeId item) const noexcept {
+    return i2r.targetsOf(item);
+  }
+
+  [[nodiscard]]
+  std::span<const NodeId> inputsOf(NodeId recipe) const noexcept {
+    return r2i.targetsOf(recipe);
+  }
 };
 
 // A precomputed "wasteful pack" certificate for one recipe.
@@ -97,8 +111,7 @@ struct BaseCraftingGraph {
 // holds stock, then that plan executes every support recipe at least `count`
 // times. Those executions sum to a net loss (their combined column is <= 0),
 // so removing the pack keeps the plan feasible and strictly cheaper. Hence no
-// optimal plan executes the certified recipe. See docs/algorithm.typ, section
-// "针对多个零库存物品的推广".
+// optimal plan executes the certified recipe.
 struct PackCertificate {
   // Source recipe ids with z_r > 0, ascending.
   aw::vector<uint32_t> support;

@@ -24,26 +24,12 @@ struct ReachableView {
   // a reachable item are listed, which is exactly the set the ranked order has
   // to place.
   BaseSparseSets consumers;
+
+  ReachableView(const BaseCraftingGraph &g, NodeId target) noexcept;
 };
 
-// One BFS over the input cone computes reachability, shortest input distances
-// and SCC membership. O(V + E) on that cone.
-ReachableView analyzeReachable(const BaseCraftingGraph &g, NodeId target) noexcept;
-
-// Hyperedge-Kahn order over the reachable items: a recipe only becomes ready
-// once every input it consumes has been ranked, so the ordinal grows from
-// producible sources toward the target.
-//
-// This mirrors Thunderbolt's `rankProducibleRoutes`. `stock` is indexed by
-// subgraph item and the target's own stock must be 0. `stockSeeded` selects one
-// of the two ranked passes: it prefers stocked cycle members as cut points,
-// while the stock-free pass is the plain zero-inventory DAG in which any route
-// producible from raw sources survives.
-struct RankOrder {
-  // Ordinal per item, -1 when the order could not place it (a cycle with no
-  // producible entry point).
-  aw::vector<int32_t> ordinal;
-};
+// Item `x` has ordinal `order[x]`.
+using RankOrder = aw::vector<int32_t>;
 
 RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
                          std::span<const Amount> stock, bool stockSeeded) noexcept;
@@ -55,7 +41,7 @@ RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
 // This mirrors Thunderbolt's `retainsProducibleRoute` and is deliberately
 // order-independent. Unlike the DFS back-edge cut it cannot drop every producer
 // of a needed cycle member merely because of discovery order.
-bool cutByRank(const ReachableView &view, const RankOrder &order, NodeId output,
+bool rankPruning(const ReachableView &view, const RankOrder &order, NodeId output,
                std::span<const NodeId> inputs) noexcept;
 
 }  // namespace aw

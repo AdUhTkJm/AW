@@ -37,6 +37,7 @@
 
 #include "aw/utils/Helpers.h"
 #include "aw/utils/Int128.h"
+#include "aw/utils/LargeStackCall.h"
 #include "RankedCut.h"
 
 namespace aw {
@@ -85,6 +86,8 @@ bool better(const BaseCraftingGraph &g, Strategy strategy, uint32_t lhs, uint32_
   return g.outputAmt[rhs] > g.outputAmt[lhs];
 }
 
+#define ACYCLIC_ARG_LIST const BaseCraftingGraph &g, NodeId target, const ReachableView *reach, const RankOrder *rank
+
 // The acyclic view of the reachable recipe graph.
 struct AcyclicView {
   // Post-order of items visited.
@@ -92,88 +95,63 @@ struct AcyclicView {
   // usable[r]: recipe `r` survived the cut.
   aw::vector<uint8_t> usable;
 
-  AcyclicView(const BaseCraftingGraph &g, NodeId target, const ReachableView *reach, const RankOrder *rank) noexcept;
+  AcyclicView(ACYCLIC_ARG_LIST) noexcept;
+private:
+  enum Status : uint8_t {
+    UNSEEN = 0, IN_STACK, DONE
+  };
+  aw::vector<Status> status;
+  void initImpl(ACYCLIC_ARG_LIST) noexcept;
 };
 
-// DFS from `target`, cutting every recipe that would close a cycle (an input
-// that is still on the DFS stack) and, when a ranked cut is supplied, every
-// recipe whose SCC-internal inputs are not ranked strictly earlier.
-AcyclicView::AcyclicView(const BaseCraftingGraph &g, NodeId target,
-                         const ReachableView *reach, const RankOrder *rank) noexcept {
-  const uint32_t nItem = g.nItem;
-  const uint32_t nRecipe = g.nRecipe;
-  usable = aw::vector<uint8_t>::zeroes(nRecipe);
-  post.reserve(nItem);
+void AcyclicView::initImpl(ACYCLIC_ARG_LIST) noexcept {
+  status[target] = IN_STACK;
+  const auto producers = g.producersOf(target);
 
-  aw::vector<uint8_t> color = aw::vector<uint8_t>::zeroes(nItem);  // 0 white, 1 gray, 2 black
-  aw::vector<uint32_t> stackItem;
-  aw::vector<uint32_t> stackRecipe;
-  aw::vector<uint32_t> stackInput;
-  stackItem.reserve(nItem);
-  stackRecipe.reserve(nItem);
-  stackInput.reserve(nItem);
-  color[target] = 1;
-  stackItem.push_back(target);
-  stackRecipe.push_back(0);
-  stackInput.push_back(0);
-  while (!stackItem.empty()) {
-    const uint32_t item = stackItem.back();
-    const auto producers = g.i2r.targetsOf(item);
-    if (stackRecipe.back() >= producers.size()) {
-      color[item] = 2;
-      post.push_back(item);
-      stackItem.pop_back();
-      stackRecipe.pop_back();
-      stackInput.pop_back();
+  for (auto r : producers) {
+    const uint32_t recipe = r - g.nItem;
+    const auto inputs = g.inputsOf(recipe);
+
+    // Prune.
+    if (reach != nullptr && rankPruning(*reach, *rank, target, inputs))
       continue;
-    }
-    const uint32_t recipe = producers[stackRecipe.back()] - nItem;
-    const auto inputs = g.r2i.targetsOf(recipe);
-    // The ranked cut is applied before the back-edge test: dropping a recipe
-    // also drops its children from the DFS frontier, so the traversal (and not
-    // just the retained set) changes, exactly as in Thunderbolt's frameFor.
-    if (reach != nullptr && cutByRank(*reach, *rank, item, inputs)) {
-      stackRecipe.back()++;
-      stackInput.back() = 0;
+
+    // Cycle check.
+    if (std::ranges::any_of(inputs, [&](NodeId input) { return status[input] == IN_STACK; }))
       continue;
+
+    // DFS for unseen items.
+    for (NodeId item : inputs) {
+      if (status[item] == UNSEEN)
+        initImpl(g, item, reach, rank);
     }
-    bool closesCycle = false;
-    for (NodeId input : inputs)
-      if (color[input] == 1) {
-        closesCycle = true;
-        break;
-      }
-    if (closesCycle) {
-      stackRecipe.back()++;
-      stackInput.back() = 0;
-      continue;
-    }
-    if (stackInput.back() < inputs.size()) {
-      const NodeId input = inputs[stackInput.back()++];
-      if (color[input] == 0) {
-        color[input] = 1;
-        stackItem.push_back(input);
-        stackRecipe.push_back(0);
-        stackInput.push_back(0);
-      }
-      continue;
-    }
+
+    // Everything works well. The recipe is preserved.
     usable[recipe] = 1;
-    stackRecipe.back()++;
-    stackInput.back() = 0;
   }
+
+  status[target] = DONE;
+  post.push_back_unchecked(target);
 }
 
-// Which items can bottom out in stock under the retained routes? Optimistic:
-// quantities are ignored, so this only guides producer choice.
+AcyclicView::AcyclicView(ACYCLIC_ARG_LIST) noexcept: usable(g.nRecipe, 0), status(g.nItem, UNSEEN) {
+  post.reserve(g.nItem);
+  aw::ls::call([this](auto&&... args) { this->initImpl(args...); }, g, target, reach, rank);
+}
+
+// Whether each item is obtainable, ignoring amounts.
 aw::vector<uint8_t> computeObtainable(const BaseCraftingGraph &g, const AcyclicView &view,
                                       std::span<const Amount> stock) noexcept {
   aw::vector<uint8_t> obtainable = aw::vector<uint8_t>::zeroes(g.nItem);
   for (uint32_t item : view.post) {
+    // Item with stock is of course obtainable.
     if (stock[item] > 0) {
       obtainable[item] = 1;
       continue;
     }
+
+    // If there exists a usable recipe, and every item of it is obtainable,
+    // then so is the current one.
     bool ok = false;
     for (NodeId producerNode : g.i2r.targetsOf(item)) {
       const uint32_t recipe = producerNode - g.nItem;
@@ -481,12 +459,12 @@ aw::vector<int64_t> greedyDagPlan(const Subgraph &sub, NodeId target, Amount amo
   // subtracted: `rhs[target] = amount`, exactly as in planCrafting, so a valid
   // plan must still produce `amount` new units.
   aw::vector<Amount> stock(g.nItem, 0);
-  for (uint32_t item = 0; item < g.nItem; item++) {
-    if (item == target)
-      continue;
+  for (uint32_t item = 0; item < g.nReal; item++) {
     const NodeId source = sub.itemOrigin[item];
     stock[item] = source < invSrc.size() ? invSrc[source] : 0;
   }
+  stock[target] = 0;
+  
   const std::span<const Amount> stockSpan(stock.data(), stock.size());
 
   // Evaluate every plain-view pass and keep the cheapest balance-checked plan.
@@ -508,7 +486,7 @@ aw::vector<int64_t> greedyDagPlan(const Subgraph &sub, NodeId target, Amount amo
   // cut from an order-independent ranking and retry only when the plain view
   // found nothing: ranked plans keep coverage, not cost.
   if (!best.found) {
-    const ReachableView reachable = analyzeReachable(g, target);
+    const ReachableView reachable(g, target);
     const bool stockSeededModes[] = {true, false};
     for (bool stockSeeded : stockSeededModes) {
       const RankOrder order = rankProducible(g, reachable, stockSpan, stockSeeded);
@@ -521,6 +499,8 @@ aw::vector<int64_t> greedyDagPlan(const Subgraph &sub, NodeId target, Amount amo
                     target, amount);
     }
   }
+
+  // NRVO doesn't work here, we're not returning the whole `best`.
   return std::move(best.exec);
 }
 
