@@ -23,8 +23,7 @@ namespace aw {
 // belongs here rather than in the exception-throwing std::vector branch.
 template<typename T>
 inline constexpr bool isPodElement =
-    (std::is_integral_v<T> || std::is_same_v<T, aw::int128>) &&
-    std::is_trivially_copyable_v<T>;
+  std::is_trivial_v<T> && std::is_standard_layout_v<T>;
 
 // Vector for integers.
 // Cannot hold more than 2^32 elements, but we never need that much.
@@ -77,13 +76,15 @@ public:
   using difference_type = std::make_signed_t<uint>;
   using iterator = pointer;
   using const_iterator = const_pointer;
+  // It's better to pass by value for things that fit in a single register.
+  using arg_type = std::conditional_t<sizeof(T) <= 8, T, const T &>;
 
   PodVector() noexcept: cap(8), sz(0), dat(allocate(cap)) {}
 
   explicit PodVector(size_type count) noexcept:
     cap(std::max<uint>(count, 8)), sz(count), dat(allocate(cap)) {}
 
-  PodVector(size_type count, T value) noexcept:
+  PodVector(size_type count, arg_type value) noexcept:
     cap(std::max<uint>(count, 8)), sz(count), dat(allocate(cap)) {
     for (size_type i = 0; i < sz; i++)
       dat[i] = value;
@@ -177,7 +178,7 @@ public:
 
   // Unlike std::vector::resize, this value-initializes only the new elements
   // when the vector grows; shrinking leaves the prefix untouched.
-  void resize(size_type newsz, T value) noexcept {
+  void resize(size_type newsz, arg_type value) noexcept {
     const size_type old = sz;
     if (newsz > cap)
       reserve_unchecked(growth(newsz));
@@ -199,14 +200,14 @@ public:
     sz = 0;
   }
 
-  void push_back(T val) noexcept {
+  void push_back(arg_type val) noexcept {
     if (sz >= cap) {
       reserve(growth(sz + 1));
     }
     dat[sz++] = val;
   }
 
-  void push_back_unchecked(T val) noexcept {
+  void push_back_unchecked(arg_type val) noexcept {
     dat[sz++] = val;
   }
 
@@ -248,7 +249,7 @@ public:
     assign(init.begin(), init.end());
   }
 
-  pointer insert(pointer pos, T value) noexcept {
+  pointer insert(pointer pos, arg_type value) noexcept {
     const size_type index = (size_type) (pos - dat);
     if (sz >= cap)
       reserve_unchecked(growth(sz + 1));
@@ -260,7 +261,7 @@ public:
     return pos;
   }
 
-  pointer insert(pointer pos, size_type count, T value) noexcept {
+  pointer insert(pointer pos, size_type count, arg_type value) noexcept {
     if (count == 0)
       return pos;
 
@@ -338,12 +339,12 @@ public:
   }
 
   reference operator[](size_type index) noexcept { return dat[index]; }
-  T operator[](size_type index) const noexcept { return dat[index]; }
+  arg_type operator[](size_type index) const noexcept { return dat[index]; }
 
   reference front() noexcept { return dat[0]; }
-  T front() const noexcept { return dat[0]; }
+  arg_type front() const noexcept { return dat[0]; }
   reference back() noexcept { return dat[sz - 1]; }
-  T back() const noexcept { return dat[sz - 1]; }
+  arg_type back() const noexcept { return dat[sz - 1]; }
 
   pointer data() noexcept { return dat; }
   const_pointer data() const noexcept { return dat; }

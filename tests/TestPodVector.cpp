@@ -139,22 +139,27 @@ void testConstruction() {
 void testAlias() {
   std::cout << "[PodVector] alias selection\n";
 
+  // Integrals are definitely pod.
   static_assert(std::is_same_v<aw::vector<int>, aw::PodVector<int>>);
   static_assert(std::is_same_v<aw::vector<uint8_t>, aw::PodVector<uint8_t>>);
   static_assert(std::is_same_v<aw::vector<int64_t>, aw::PodVector<int64_t>>);
   static_assert(std::is_same_v<aw::vector<uint64_t>, aw::PodVector<uint64_t>>);
   static_assert(std::is_same_v<aw::vector<bool>, aw::PodVector<bool>>);
-  // aw::int128 is not an integral type on MSVC, but the planner keeps balances
-  // in vectors of it, so it has to reach PodVector on every platform.
   static_assert(std::is_same_v<aw::vector<aw::int128>, aw::PodVector<aw::int128>>);
 
-  // Non-integral elements fall back to std::vector.
-  static_assert(std::is_same_v<aw::vector<double>, std::vector<double>>);
-  static_assert(std::is_same_v<aw::vector<std::byte>, std::vector<std::byte>>);
-  static_assert(std::is_same_v<aw::vector<float>, std::vector<float>>);
+  // Floating point and std::byte work too.
+  static_assert(std::is_same_v<aw::vector<double>, aw::PodVector<double>>);
+  static_assert(std::is_same_v<aw::vector<std::byte>, aw::PodVector<std::byte>>);
+  static_assert(std::is_same_v<aw::vector<float>, aw::PodVector<float>>);
+
+  // Non-POD elements fall back to std::vector.
   static_assert(std::is_same_v<aw::vector<aw::vector<int>>, std::vector<aw::PodVector<int>>>);
 
-  expect(true, "alias selection");
+  // These structs are also POD.
+  struct A {
+    int a, b;
+  };
+  static_assert(std::is_same_v<aw::vector<A>, aw::PodVector<A>>);
 }
 
 // ---------------------------------------------------------------- aw::int128

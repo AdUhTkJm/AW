@@ -85,10 +85,11 @@ bool better(const BaseCraftingGraph &g, Strategy strategy, uint32_t lhs, uint32_
   return g.outputAmt[rhs] > g.outputAmt[lhs];
 }
 
-// The acyclic view of the reachable recipe graph: items in finish order
-// (inputs before their consumer) and the recipes that survived the cycle cut.
+// The acyclic view of the reachable recipe graph.
 struct AcyclicView {
+  // Post-order of items visited.
   aw::vector<uint32_t> post;
+  // usable[r]: recipe `r` survived the cut.
   aw::vector<uint8_t> usable;
 
   AcyclicView(const BaseCraftingGraph &g, NodeId target, const ReachableView *reach, const RankOrder *rank) noexcept;
@@ -96,11 +97,9 @@ struct AcyclicView {
 
 // DFS from `target`, cutting every recipe that would close a cycle (an input
 // that is still on the DFS stack) and, when a ranked cut is supplied, every
-// recipe whose SCC-internal inputs are not ranked strictly earlier. The stack
-// is kept as three parallel PodVectors because PodVector only holds integral
-// types.
+// recipe whose SCC-internal inputs are not ranked strictly earlier.
 AcyclicView::AcyclicView(const BaseCraftingGraph &g, NodeId target,
-                             const ReachableView *reach, const RankOrder *rank) noexcept {
+                         const ReachableView *reach, const RankOrder *rank) noexcept {
   const uint32_t nItem = g.nItem;
   const uint32_t nRecipe = g.nRecipe;
   usable = aw::vector<uint8_t>::zeroes(nRecipe);
@@ -214,27 +213,6 @@ int64_t producibleVia(const BaseCraftingGraph &g, uint32_t recipe,
   return satMul(firings, g.outputAmt[recipe]);
 }
 
-// cap[x] = stock[x] + the most any single producer could make once its own
-// inputs are already capped. This ignores sharing between producers, so it is
-// an upper bound used only for reservation and ordering, never as a proof.
-aw::vector<int64_t> capacityFromOrder(const BaseCraftingGraph &g, const AcyclicView &view,
-                                      std::span<const Amount> stock) noexcept {
-  aw::vector<int64_t> cap = aw::vector<int64_t>::zeroes(g.nItem);
-  for (uint32_t item : view.post) {  // leaf-first
-    int64_t best = 0;
-    for (NodeId producerNode : g.i2r.targetsOf(item)) {
-      const uint32_t recipe = producerNode - g.nItem;
-      if (!view.usable[recipe])
-        continue;
-      const int64_t amount = producibleVia(g, recipe, cap);
-      if (amount > best)
-        best = amount;
-    }
-    cap[item] = satAdd(stock[item], best);
-  }
-  return cap;
-}
-
 // Remaining capacity of a recipe: the same combination as `producibleVia`, but
 // against `cap - need`, so `need` doubles as the global reservation.
 int64_t capRemainingVia(const BaseCraftingGraph &g, std::span<const int64_t> cap,
@@ -273,19 +251,36 @@ struct SweepContext {
   std::span<const Amount> stock;
   NodeId target;
   Amount amount;
+
+  aw::vector<int64_t> capacityFromOrder() const noexcept;
 };
 
-// One demand sweep in reverse post-order under `strategy`: deduct stock, then
-// resolve the remaining deficit by splitting it across the producers that still
-// have capacity. Returns the firing vector, or an empty vector when some demand
-// could not be covered (Policy A: no capacity means decline, never inflate).
+// Returns a vector `cap`, where cap[x] is an upper bound of needed amount of `x`.
+aw::vector<int64_t> SweepContext::capacityFromOrder() const noexcept {
+  aw::vector<int64_t> cap(g.nItem, 0);
+  for (uint32_t item : view.post) {
+    int64_t best = 0;
+    for (NodeId producerNode : g.i2r.targetsOf(item)) {
+      const uint32_t recipe = producerNode - g.nItem;
+      if (!view.usable[recipe])
+        continue;
+      const int64_t amount = producibleVia(g, recipe, cap);
+      if (amount > best)
+        best = amount;
+    }
+    cap[item] = satAdd(stock[item], best);
+  }
+  return cap;
+}
+
+// RPO demand sweep under `strategy`. Returns the plan.
 aw::vector<int64_t> capacitySweep(const SweepContext &ctx, Strategy strategy) noexcept {
   const BaseCraftingGraph &g = ctx.g;
   const AcyclicView &view = ctx.view;
   const std::span<const Amount> stock = ctx.stock;
-  const aw::vector<int64_t> cap = capacityFromOrder(g, view, stock);
-  aw::vector<int64_t> need = aw::vector<int64_t>::zeroes(g.nItem);
-  aw::vector<int64_t> exec = aw::vector<int64_t>::zeroes(g.nRecipe);
+  const aw::vector<int64_t> cap = ctx.capacityFromOrder();
+  aw::vector<int64_t> need(g.nItem, 0);
+  aw::vector<int64_t> exec(g.nRecipe, 0);
   need[ctx.target] = ctx.amount;
   aw::vector<Route> routes;
 

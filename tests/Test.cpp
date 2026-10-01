@@ -9,7 +9,6 @@
 #include <iostream>
 #include <span>
 #include <utility>
-#include <vector>
 
 #include "aw/utils/Int128.h"
 #include "aw/plan/Options.h"

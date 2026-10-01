@@ -131,8 +131,11 @@ RecipeDeltas buildRecipeDeltas(const BaseCraftingGraph &g,
     deltas.offsets[r + 1] = deltas.offsets[r] + (uint) touched.size();
   }
 
-  // Fill pass.
+  // Fill pass. The stamps from the size pass must be cleared, otherwise a
+  // recipe whose items were stamped with its own index in the size pass skips
+  // them here and leaves entries unwritten.
   deltas.entries.resize(deltas.offsets[n]);
+  std::fill(stamp.begin(), stamp.end(), -1);
   for (uint32_t r = 0; r < n; r++) {
     if (exec[r] <= 0)
       continue;
