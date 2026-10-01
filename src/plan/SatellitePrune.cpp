@@ -92,7 +92,7 @@ constexpr double CERTIFICATE_VALUE_LIMIT = 1e15;
 bool verbose = false;
 
 [[nodiscard]]
-Amount held(std::span<const Amount> inventory, NodeId item) noexcept {
+Amount held(std::span<const Amount> inventory, ItemId item) noexcept {
   return item < inventory.size() ? inventory[item] : 0;
 }
 
@@ -100,7 +100,7 @@ Amount held(std::span<const Amount> inventory, NodeId item) noexcept {
 // produces it, -amt for every input, summed when the recipe eats its own
 // output. The single place the balance matrix is read.
 [[nodiscard]]
-Amount columnCoefficient(const CraftingGraph& graph, uint recipe, NodeId item) noexcept {
+Amount columnCoefficient(const CraftingGraph& graph, uint recipe, ItemId item) noexcept {
   Amount coeff = graph.output[recipe] == item ? graph.outputAmt[recipe] : 0;
   const auto inputs = graph.inputsOf(recipe);
   const auto weights = graph.inputAmountsOf(recipe);
@@ -113,9 +113,10 @@ Amount columnCoefficient(const CraftingGraph& graph, uint recipe, NodeId item) n
 // ---------------------------------------------------------------------------
 // Undirected adjacency of the subgraph
 // ---------------------------------------------------------------------------
-// Nodes are item 0..nItem-1 followed by recipe nItem..nItem+nRecipe-1. Only the
-// nodes the reachability walk kept take part. Parallel edges are folded away,
-// so the articulation search below may skip the parent *vertex*.
+// Nodes are the item id for an item and nItem + recipe for a recipe. This
+// combined numbering is local to this file. Only the nodes the reachability
+// walk kept take part. Parallel edges are folded away, so the articulation
+// search below may skip the parent *vertex*.
 
 struct Undirected {
   aw::vector<uint> offsets;  // V + 1
@@ -139,7 +140,7 @@ void buildUndirected(const CraftingGraph& graph, std::span<const uint8_t> recipe
     const uint rn = nItem + r;
     counts[graph.output[r]]++;
     counts[rn]++;
-    for (NodeId input : graph.inputsOf(r)) {
+    for (ItemId input : graph.inputsOf(r)) {
       counts[input]++;
       counts[rn]++;
     }
@@ -160,7 +161,7 @@ void buildUndirected(const CraftingGraph& graph, std::span<const uint8_t> recipe
     const uint rn = nItem + r;
     link(graph.output[r], rn);
     link(rn, graph.output[r]);
-    for (NodeId input : graph.inputsOf(r)) {
+    for (ItemId input : graph.inputsOf(r)) {
       link(input, rn);
       link(rn, input);
     }
@@ -278,8 +279,8 @@ void buildItemGraph(const CraftingGraph& graph, std::span<const uint8_t> recipeS
   for (uint r = 0; r < graph.nRecipe; r++) {
     if (!recipeSeen[r])
       continue;
-    const NodeId produced = graph.output[r];
-    for (NodeId input : graph.inputsOf(r))
+    const ItemId produced = graph.output[r];
+    for (ItemId input : graph.inputsOf(r))
       if (input != produced)
         counts[input]++;
   }
@@ -293,8 +294,8 @@ void buildItemGraph(const CraftingGraph& graph, std::span<const uint8_t> recipeS
   for (uint r = 0; r < graph.nRecipe; r++) {
     if (!recipeSeen[r])
       continue;
-    const NodeId produced = graph.output[r];
-    for (NodeId input : graph.inputsOf(r))
+    const ItemId produced = graph.output[r];
+    for (ItemId input : graph.inputsOf(r))
       if (input != produced)
         out.targets[cursor[input]++] = produced;
   }
@@ -596,14 +597,14 @@ void collectDominated(const Dominators& dom, uint v, std::span<const uint8_t> it
 // ---------------------------------------------------------------------------
 
 struct Component {
-  aw::vector<NodeId> items;
+  aw::vector<ItemId> items;
   aw::vector<uint> recipes;
 };
 
 // Looks for y >= 0 with sum_j y_j A_{j,r} + A_{A,r} <= 0 for every recipe r of
 // G, minimising sum y so the point is as small as possible. False means "no
 // certificate was found", which only ever costs pruning power.
-bool solveCertificate(const CraftingGraph& graph, NodeId cutNode, const Component& comp,
+bool solveCertificate(const CraftingGraph& graph, ItemId cutNode, const Component& comp,
                       std::span<const int32_t> itemPos, aw::vector<double> &y) noexcept {
   try {
     std::unique_ptr<MPSolver> solver(MPSolver::CreateSolver("GLOP"));
@@ -649,7 +650,7 @@ bool solveCertificate(const CraftingGraph& graph, NodeId cutNode, const Componen
 }
 
 // Checks sum_j Y_j A_{j,r} + D A_{A,r} <= 0 for every recipe of the component.
-bool certificateHolds(const CraftingGraph& graph, NodeId cutNode, const Component& comp,
+bool certificateHolds(const CraftingGraph& graph, ItemId cutNode, const Component& comp,
                       std::span<const int32_t> itemPos,
                       std::span<const int64_t> scaled, int64_t scale) noexcept {
   for (uint r : comp.recipes) {
@@ -668,7 +669,7 @@ bool certificateHolds(const CraftingGraph& graph, NodeId cutNode, const Componen
   return true;
 }
 
-bool componentIsDead(const CraftingGraph& graph, NodeId cutNode, const Component& comp,
+bool componentIsDead(const CraftingGraph& graph, ItemId cutNode, const Component& comp,
                      std::span<const int32_t> itemPos, aw::vector<double> &y,
                      aw::vector<int64_t> &scaled) noexcept {
   // Cheap and exact: with no recipe of G producing A, (A z)_A <= 0 for every z,
@@ -743,15 +744,13 @@ struct DirectedRun {
 // dropped.
 bool certifyIsland(DirectedRun& run, uint escape) noexcept {
   const CraftingGraph& graph = *run.graph;
-  const uint nItem = run.nItem;
   const uint32_t stamp = run.stamp;
   Component& island = run.island;
 
   // G = every recipe that produces or consumes an island item.
   island.recipes.clear();
   for (uint j : island.items) {
-    for (NodeId recipeNode : graph.producersOf(j)) {
-      const uint r = recipeNode - nItem;
+    for (RecipeId r : graph.producersOf(j)) {
       if (!run.recipeSeen[r] || run.recipeStamp[r] == stamp)
         continue;
       run.recipeStamp[r] = stamp;
@@ -777,7 +776,7 @@ bool certifyIsland(DirectedRun& run, uint escape) noexcept {
   // The closure guarantees this, but never drop G on a surprise: the only net
   // output of G outside I may be the escape.
   for (uint r : island.recipes) {
-    const NodeId produced = graph.output[r];
+    const ItemId produced = graph.output[r];
     if (run.itemStamp[produced] == stamp || produced == escape)
       continue;
     if (columnCoefficient(graph, r, produced) > 0) {
@@ -790,7 +789,7 @@ bool certifyIsland(DirectedRun& run, uint escape) noexcept {
     run.itemPos[island.items[i]] = (int32_t) i;
   run.evaluated++;
   const bool dead = componentIsDead(graph, escape, island, run.itemPos, run.y, run.scaled);
-  for (NodeId item : island.items)
+  for (ItemId item : island.items)
     run.itemPos[item] = -1;
   if (!dead)
     return false;
@@ -819,7 +818,7 @@ bool certifyIsland(DirectedRun& run, uint escape) noexcept {
 // escapes live; running out of budget only means an escape is not tried. Each
 // island is read off the dominator tree, so a candidate costs its own subtree
 // and never a walk of the whole subgraph.
-bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> itemSeen,
+bool runDirected(const CraftingGraph& graph, ItemId target, std::span<const uint8_t> itemSeen,
                  std::span<const uint8_t> recipeSeen, std::span<const Amount> inventory,
                  aw::vector<uint8_t> &drop,
                  std::chrono::steady_clock::time_point started) noexcept {
@@ -860,7 +859,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
     for (uint r = 0; r < graph.nRecipe; r++) {
       if (!recipeSeen[r])
         continue;
-      for (NodeId input : graph.inputsOf(r))
+      for (ItemId input : graph.inputsOf(r))
         depTargets[cursor[graph.output[r]]++] = input;
     }
   }
@@ -871,7 +870,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
   for (uint r = 0; r < graph.nRecipe; r++) {
     if (!recipeSeen[r])
       continue;
-    for (NodeId input : graph.inputsOf(r))
+    for (ItemId input : graph.inputsOf(r))
       consOffsets[input + 1]++;
   }
   for (uint j = 0; j < nItem; j++)
@@ -882,7 +881,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
     for (uint r = 0; r < graph.nRecipe; r++) {
       if (!recipeSeen[r])
         continue;
-      for (NodeId input : graph.inputsOf(r))
+      for (ItemId input : graph.inputsOf(r))
         consTargets[cursor[input]++] = r;
     }
   }
@@ -969,7 +968,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
     // The walk this replaced collected the island by scanning item indices, and
     // which LP point comes back may depend on the order. Keep that order.
     std::sort(run.island.items.begin(), run.island.items.end());
-    for (NodeId item : run.island.items)
+    for (ItemId item : run.island.items)
       run.itemStamp[item] = candidate;
 
     if (certifyIsland(run, escape))
@@ -992,7 +991,7 @@ bool runDirected(const CraftingGraph& graph, NodeId target, std::span<const uint
 // The pass
 // ---------------------------------------------------------------------------
 
-bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> itemSeen,
+bool run(const CraftingGraph& graph, ItemId target, std::span<const uint8_t> itemSeen,
          std::span<const uint8_t> recipeSeen, std::span<const Amount> inventory,
          aw::vector<uint8_t> &drop) noexcept {
   const uint nItem = graph.nItem;
@@ -1074,7 +1073,7 @@ bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> ite
       any = true;
       dropped++;
     }
-    for (NodeId item : comp.items)
+    for (ItemId item : comp.items)
       itemPos[item] = -1;
   }
   if (verbose)
@@ -1091,7 +1090,7 @@ bool run(const CraftingGraph& graph, NodeId target, std::span<const uint8_t> ite
 
 }  // namespace
 
-bool computeSatellitePruning(const CraftingGraph& graph, NodeId target,
+bool computeSatellitePruning(const CraftingGraph& graph, ItemId target,
                              std::span<const uint8_t> itemSeen,
                              std::span<const uint8_t> recipeSeen,
                              std::span<const Amount> inventory,

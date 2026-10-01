@@ -67,7 +67,7 @@ namespace aw::detail {
 RecipeVectors::RecipeVectors(const BaseCraftingGraph &graph) noexcept {
   const uint nRecipe = graph.nRecipe;
   offsets.assign(nRecipe + 1, 0);
-  aw::vector<std::pair<NodeId, Amount>> scratch;
+  aw::vector<std::pair<ItemId, Amount>> scratch;
   for (uint r = 0; r < nRecipe; r++) {
     scratch.clear();
     scratch.emplace_back(graph.output[r], graph.outputAmt[r]);
@@ -81,7 +81,7 @@ RecipeVectors::RecipeVectors(const BaseCraftingGraph &graph) noexcept {
 
     // Sum equal rows and drop zero coefficients.
     for (size_t k = 0; k < scratch.size();) {
-      const NodeId item = scratch[k].first;
+      const ItemId item = scratch[k].first;
       Amount coeff = 0;
       while (k < scratch.size() && scratch[k].first == item) {
         coeff += scratch[k].second;
@@ -210,13 +210,13 @@ void compositeWorkstations(const CraftingGraph &graph,
                           const aw::vector<int32_t> &comp,
                           const aw::vector<uint32_t> &repOfComp,
                           const aw::vector<uint32_t> &recs,
-                          aw::vector<aw::vector<NodeId>> &compWs) noexcept {
+                          aw::vector<aw::vector<ItemId>> &compWs) noexcept {
   const uint32_t nComp = (uint32_t) compWs.size();
   aw::vector<aw::vector<uint32_t>> members(nComp);
   for (uint32_t a = 0; a < adj.size(); a++)
     members[comp[a]].push_back(a);
   for (uint32_t c = 0; c < nComp; c++) {
-    aw::vector<NodeId> &ws = compWs[c];
+    aw::vector<ItemId> &ws = compWs[c];
     if (repOfComp[c] != UINT32_MAX) {
       const auto own = graph.workstations.targetsOf(recs[repOfComp[c]]);
       ws.insert(ws.end(), own.begin(), own.end());
@@ -224,7 +224,7 @@ void compositeWorkstations(const CraftingGraph &graph,
     for (uint32_t a : members[c])
       for (uint32_t j : adj[a])
         if ((uint32_t) comp[j] != c) {
-          const aw::vector<NodeId> &succ = compWs[comp[j]];
+          const aw::vector<ItemId> &succ = compWs[comp[j]];
           ws.insert(ws.end(), succ.begin(), succ.end());
         }
     std::sort(ws.begin(), ws.end());
@@ -255,15 +255,15 @@ namespace {
 //
 // The second is dominated per unit by the first although six X need six
 // executions of it.
-void compareNormalized(std::span<const NodeId> ii, std::span<const Amount> ic,
-                       Amount outI, std::span<const NodeId> ji,
+void compareNormalized(std::span<const ItemId> ii, std::span<const Amount> ic,
+                       Amount outI, std::span<const ItemId> ji,
                        std::span<const Amount> jc, Amount outJ, bool &iLeJ,
                        bool &jLeI) noexcept {
   iLeJ = true;
   jLeI = true;
   size_t a = 0, b = 0;
   while (a < ii.size() || b < ji.size()) {
-    NodeId next = UINT32_MAX;
+    ItemId next = UINT32_MAX;
     if (a < ii.size())
       next = std::min(next, ii[a]);
     if (b < ji.size())
@@ -330,23 +330,22 @@ void computeDirectDominancePruning(CraftingGraph &graph,
   aw::vector<int32_t> comp;
   aw::vector<uint32_t> repOfComp;
   aw::vector<uint8_t> keep;
-  aw::vector<aw::vector<NodeId>> compWs;
+  aw::vector<aw::vector<ItemId>> compWs;
 
-  for (NodeId X = 0; X < nReal; X++) {
-    const auto recipeNodes = graph.producersOf(X);
-    if (recipeNodes.size() < 2)
+  for (ItemId X = 0; X < nReal; X++) {
+    const auto siblings = graph.producersOf(X);
+    if (siblings.size() < 2)
       continue;
     // The same budget as the composite pass: a quadratic scan of an item with
     // an absurd fan-out is not worth the memory it would need.
-    if (recipeNodes.size() > options.maxSiblingRecipes)
+    if (siblings.size() > options.maxSiblingRecipes)
       continue;
 
     recs.clear();
     outAmt.clear();
-    recs.reserve(recipeNodes.size());
-    outAmt.reserve(recipeNodes.size());
-    for (NodeId recipeNode : recipeNodes) {
-      const uint r = recipeNode - graph.nItem;
+    recs.reserve(siblings.size());
+    outAmt.reserve(siblings.size());
+    for (RecipeId r : siblings) {
       recs.push_back_unchecked(r);
       outAmt.push_back_unchecked(graph.outputAmt[r]);
     }
@@ -412,13 +411,12 @@ void computeDeadnodePruning(CraftingGraph &graph) noexcept {
   const bool haveSubstitution =
       graph.recipeSubstituted.size() == graph.nRecipe &&
       graph.recipeSubstitutedGuards.size() == graph.nRecipe;
-  for (NodeId X = 0; X < nReal; X++) {
-    const auto recipeNodes = graph.producersOf(X);
-    if (recipeNodes.empty())
+  for (ItemId X = 0; X < nReal; X++) {
+    const auto siblings = graph.producersOf(X);
+    if (siblings.empty())
       continue;
     bool anyKept = false;
-    for (NodeId recipeNode : recipeNodes) {
-      const uint r = recipeNode - graph.nItem;
+    for (RecipeId r : siblings) {
       const bool composite = haveComposite && graph.recipeDominated[r];
       const bool direct = haveDirect && graph.recipeDirectDominated[r];
       const bool substituted = haveSubstitution && graph.recipeSubstituted[r];
@@ -429,7 +427,7 @@ void computeDeadnodePruning(CraftingGraph &graph) noexcept {
     }
     if (anyKept)
       continue;
-    const uint r = recipeNodes.front() - graph.nItem;
+    const RecipeId r = siblings.front();
     if (haveComposite) {
       graph.recipeDominated[r] = 0;
       graph.recipeGuardInput[r] = UINT32_MAX;
@@ -565,10 +563,10 @@ aw::vector<uint8_t> repruneSubgraph(const Subgraph &sub,
   options.nonoptimal = savedNonoptimal;
 
   // Stock of a subgraph item, read through the remapping.
-  const auto held = [&](NodeId subItem) noexcept -> Amount {
+  const auto held = [&](ItemId subItem) noexcept -> Amount {
     if (subItem >= sub.itemOrigin.size())
       return 0;
-    const NodeId source = sub.itemOrigin[subItem];
+    const ItemId source = sub.itemOrigin[subItem];
     return source < sourceInventory.size() ? sourceInventory[source] : 0;
   };
 
@@ -590,7 +588,7 @@ aw::vector<uint8_t> repruneSubgraph(const Subgraph &sub,
     // Pack: keep it when any of the certificate's zero-stock items is stocked.
     if (!dropRecipe && g.packDominated[r]) {
       bool clear = true;
-      for (NodeId item : g.packCertificates[r].zeroStock) {
+      for (ItemId item : g.packCertificates[r].zeroStock) {
         if (held(item) > 0) {
           clear = false;
           break;

@@ -8,16 +8,23 @@ namespace aw {
 
 // The resource handle used by the Java side. 0 for no resource.
 using Handle = uint32_t;
-// Indices into the unified node space. Items first, recipes next.
-using NodeId = uint32_t;
+// Item index, `handle - 1`. Items and recipes live in two separate id spaces,
+// so a recipe id can index `r2i`, `output` and `workstations` directly.
+using ItemId = uint32_t;
+// Recipe index, `[0, nRecipe)`. The same ids are the targets of `i2r` and the
+// rows of `r2i`, `output` and `workstations`.
+using RecipeId = uint32_t;
 using Amount = int64_t;
 using uint = uint32_t;
 
 // A compressed sparse row matrix, unweighted.
 // Row `r` owns targets[offsets[r] .. offsets[r+1]).
+// The id space of `targets` depends on the matrix: `i2r` holds recipe ids,
+// `r2i` and `workstations` hold item ids. Both types alias uint32_t, so one
+// representation covers all of them.
 struct BaseSparseSets {
-  aw::vector<NodeId> offsets;  // V + 1
-  aw::vector<NodeId> targets;  // E
+  aw::vector<ItemId> offsets;  // V + 1
+  aw::vector<ItemId> targets;  // E
 
   [[nodiscard]]
   size_t numVertices() const noexcept {
@@ -30,7 +37,7 @@ struct BaseSparseSets {
   }
 
   [[nodiscard]]
-  std::span<const NodeId> targetsOf(uint row) const noexcept {
+  std::span<const ItemId> targetsOf(uint row) const noexcept {
     return {targets.data() + offsets[row], targets.data() + offsets[row + 1]};
   }
 };
@@ -62,12 +69,12 @@ struct BaseCraftingGraph {
   // Items and recipes are bipartite graphs.
   // These graphs are namely item to recipe and recipe to item graphs.
 
-  // Maps item to all recipes that produce it.
+  // Maps item to all recipes that produce it. Targets are recipe ids.
   SparseGraph i2r;
-  // Maps recipe to all items that it needs as input.
+  // Maps recipe to all items that it needs as input. Targets are item ids.
   SparseGraph r2i;
 
-  // Output item node per recipe. Non-decreasing: the decoder emits recipes in
+  // Output item id per recipe. Non-decreasing: the decoder emits recipes in
   // ascending output-handle order, and every path that rewrites the recipe list
   // (canonicalizeRecipes, rebuildFromRecipes, inlineSingleUseTagsCore,
   // assembleSubgraph) preserves or restores that order instead of sorting, so
@@ -75,41 +82,31 @@ struct BaseCraftingGraph {
   // a suffix. A loop that only handles real recipes may therefore `break` at
   // the first recipe with `output[r] >= nReal`, and one that only handles tag
   // edges may start at that boundary.
-  aw::vector<NodeId> output;
+  aw::vector<ItemId> output;
   aw::vector<Amount> outputAmt;
 
   [[nodiscard]]
-  NodeId recipeNode(uint32_t recipe) const noexcept {
-    return nItem + recipe;
-  }
-
-  [[nodiscard]]
-  bool isRecipeNode(NodeId node) const noexcept {
-    return node >= nItem;
-  }
-
-  [[nodiscard]]
-  bool isRealItem(NodeId node) const noexcept {
+  bool isRealItem(ItemId node) const noexcept {
     return node < nReal;
   }
 
   [[nodiscard]]
-  std::span<const NodeId> producersOf(NodeId item) const noexcept {
+  std::span<const RecipeId> producersOf(ItemId item) const noexcept {
     return i2r.targetsOf(item);
   }
 
   [[nodiscard]]
-  std::span<const NodeId> inputsOf(NodeId recipe) const noexcept {
+  std::span<const ItemId> inputsOf(RecipeId recipe) const noexcept {
     return r2i.targetsOf(recipe);
   }
 
   [[nodiscard]]
-  std::span<const Amount> producedAmountsOf(NodeId item) const noexcept {
+  std::span<const Amount> producedAmountsOf(ItemId item) const noexcept {
     return i2r.weightsOf(item);
   }
 
   [[nodiscard]]
-  std::span<const Amount> inputAmountsOf(NodeId recipe) const noexcept {
+  std::span<const Amount> inputAmountsOf(ItemId recipe) const noexcept {
     return r2i.weightsOf(recipe);
   }
 };
@@ -128,7 +125,7 @@ struct PackCertificate {
   // Parallel to `support`; every count is at least 1.
   aw::vector<Amount> count;
   // Real items whose balance was used as "no stock" (b = 0), ascending.
-  aw::vector<NodeId> zeroStock;
+  aw::vector<ItemId> zeroStock;
 };
 
 // Add workstation to base crafting graphs.
@@ -156,14 +153,14 @@ struct CraftingGraph : BaseCraftingGraph {
   // For a dominated recipe, the real input Y that the witness inlined. The
   // recipe is only dropped when inventory[Y] == 0, so stocked Y can still be
   // spent. UINT32_MAX otherwise.
-  aw::vector<NodeId> recipeGuardInput;  // nRecipe entries
+  aw::vector<ItemId> recipeGuardInput;  // nRecipe entries
 
   // For a dominated recipe r, the union of the workstations of every kept
   // sibling that dominates r (transitively). r may be dropped when one of them
   // is available and the guard has no stock, because that sibling can then
   // replace r. Empty for an undominated recipe, and also for a dominated recipe
   // whose only replacements cannot be run at all, which is then never dropped.
-  aw::vector<aw::vector<NodeId>> recipeDominatorWorkstations;  // nRecipe entries
+  aw::vector<aw::vector<ItemId>> recipeDominatorWorkstations;  // nRecipe entries
 
   // Direct (column) dominance. `recipeDirectDominated[r] == 1` means recipe r
   // outputs a real resource and a sibling recipe of the same output has a
@@ -179,7 +176,7 @@ struct CraftingGraph : BaseCraftingGraph {
   // the union of the workstations of every maximal-column sibling that
   // dominates r; r is dropped when one of them is available.
   aw::vector<uint8_t> recipeDirectDominated;  // nRecipe entries
-  aw::vector<aw::vector<NodeId>> recipeDirectDominatorWorkstations;  // nRecipe entries
+  aw::vector<aw::vector<ItemId>> recipeDirectDominatorWorkstations;  // nRecipe entries
 
   // Multi-item "wasteful pack" certificates. `packDominated[r] == 1` means
   // recipe r carries the certificate in `packCertificates[r]` and is never
@@ -202,17 +199,17 @@ struct CraftingGraph : BaseCraftingGraph {
   // replacements' workstations. See docs/algorithm.typ, section
   // "基于支配的剪枝：支配输入的替换".
   aw::vector<uint8_t> recipeSubstituted;  // nRecipe entries
-  aw::vector<aw::vector<NodeId>> recipeSubstitutedGuards;  // nRecipe entries
-  aw::vector<aw::vector<NodeId>>
+  aw::vector<aw::vector<ItemId>> recipeSubstitutedGuards;  // nRecipe entries
+  aw::vector<aw::vector<ItemId>>
       recipeSubstitutedDominatorWorkstations;  // nRecipe entries
 
   [[nodiscard]]
-  static NodeId itemNode(Handle handle) noexcept {
+  static ItemId itemNode(Handle handle) noexcept {
     return handle - 1;
   }
 
   [[nodiscard]]
-  static Handle itemHandle(NodeId node) noexcept {
+  static Handle itemHandle(ItemId node) noexcept {
     return node + 1;
   }
 };
@@ -222,14 +219,14 @@ struct Subgraph {
   BaseCraftingGraph graph;
 
   // Remappers.
-  // graph item node -> source item node, ascending.
-  aw::vector<NodeId> itemOrigin;
+  // graph item id -> source item id, ascending.
+  aw::vector<ItemId> itemOrigin;
   // graph recipe id -> source recipe id, ascending.
-  aw::vector<NodeId> recipeOrigin;
+  aw::vector<RecipeId> recipeOrigin;
 
   // Translates source-graph item id to id in this subgraph.
   // UINT32_MAX on failure.
-  NodeId translate(NodeId source) const noexcept;
+  ItemId translate(ItemId source) const noexcept;
 };
 
 // Computes a subgraph reachable from `output` with available `workstations`.

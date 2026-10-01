@@ -196,7 +196,7 @@ std::string defaultNamesPath(const std::string &awr) {
 }
 
 std::string itemLabel(const aw::CraftingGraph &graph, const NameTable &names,
-                      aw::NodeId node) {
+                      aw::ItemId node) {
   const aw::Handle handle = graph.itemHandle(node);
   if (node >= graph.nReal)
     return "#" + std::to_string(handle);
@@ -371,7 +371,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
     }
   };
 
-  check(graph.i2r, graph.nItem, graph.nItem + graph.nRecipe, "itemToRecipe");
+  check(graph.i2r, graph.nItem, graph.nRecipe, "itemToRecipe");
   check(graph.r2i, graph.nRecipe, graph.nItem, "recipeToItem");
 
   // The workstation sets have one row per recipe and only ever name real
@@ -444,13 +444,13 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         report("a pseudo-resource recipe is marked as composite-dominated");
         break;
       }
-      const aw::NodeId guard = graph.recipeGuardInput[r];
+      const aw::ItemId guard = graph.recipeGuardInput[r];
       if (guard >= graph.nReal) {
         report("a composite-dominated recipe has no real guard input");
         break;
       }
       bool consumed = false;
-      for (aw::NodeId input : graph.inputsOf(r))
+      for (aw::ItemId input : graph.inputsOf(r))
         if (input == guard)
           consumed = true;
       if (!consumed) {
@@ -461,7 +461,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
       // be empty: a real recipe with no workstation can be a representative in
       // graphs where that happens, and such a dominated recipe is simply never
       // dropped.
-      const aw::vector<aw::NodeId> &ws = graph.recipeDominatorWorkstations[r];
+      const aw::vector<aw::ItemId> &ws = graph.recipeDominatorWorkstations[r];
       bool wsOk = true;
       for (size_t k = 0; k < ws.size(); ++k) {
         if (ws[k] >= graph.nItem || (k > 0 && ws[k] <= ws[k - 1]))
@@ -499,7 +499,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         report("a pseudo-resource recipe is marked as directly dominated");
         break;
       }
-      const aw::vector<aw::NodeId> &ws = graph.recipeDirectDominatorWorkstations[r];
+      const aw::vector<aw::ItemId> &ws = graph.recipeDirectDominatorWorkstations[r];
       bool wsOk = true;
       for (size_t k = 0; k < ws.size(); ++k) {
         if (ws[k] >= graph.nItem || (k > 0 && ws[k] <= ws[k - 1]))
@@ -552,7 +552,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         report("a pseudo-resource recipe is marked as substituted");
         break;
       }
-      const aw::vector<aw::NodeId> &guards = graph.recipeSubstitutedGuards[r];
+      const aw::vector<aw::ItemId> &guards = graph.recipeSubstitutedGuards[r];
       bool guardsOk = true;
       for (size_t k = 0; k < guards.size(); ++k) {
         if (guards[k] >= graph.nReal || (k > 0 && guards[k] <= guards[k - 1])) {
@@ -564,7 +564,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         report("a substituted recipe has a bad stock guard");
         break;
       }
-      const aw::vector<aw::NodeId> &ws =
+      const aw::vector<aw::ItemId> &ws =
           graph.recipeSubstitutedDominatorWorkstations[r];
       bool wsOk = true;
       for (size_t k = 0; k < ws.size(); ++k) {
@@ -586,7 +586,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
     report("pack pruning arrays do not match the recipe count");
   } else {
     auto net = aw::vector<int64_t>::zeroes(graph.nItem);
-    aw::vector<aw::NodeId> touched;
+    aw::vector<aw::ItemId> touched;
     for (size_t r = 0; r < graph.nRecipe; ++r) {
       if (!graph.packDominated[r])
         continue;
@@ -621,7 +621,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
       for (size_t k = 0; k < cert.support.size() && !overflow; ++k) {
         const size_t s = cert.support[k];
         const int64_t count = cert.count[k];
-        auto addNet = [&](aw::NodeId item, int64_t delta) {
+        auto addNet = [&](aw::ItemId item, int64_t delta) {
           if (net[item] == 0)
             touched.push_back(item);
           if (delta > 0 ? net[item] > INT64_MAX - delta
@@ -648,18 +648,18 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         }
       }
       if (overflow) {
-        for (aw::NodeId item : touched)
+        for (aw::ItemId item : touched)
           net[item] = 0;
         report("a pack certificate overflows int64");
         break;
       }
-      for (aw::NodeId item : touched) {
+      for (aw::ItemId item : touched) {
         if (net[item] > 0) {
           report("a pack certificate is not a net loss");
           break;
         }
       }
-      for (aw::NodeId item : touched)
+      for (aw::ItemId item : touched)
         net[item] = 0;
 
       bool zeroAscending = true;
@@ -710,7 +710,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
     auto targets = graph.producersOf(item);
     auto weights = graph.producedAmountsOf(item);
     for (size_t k = 0; k < targets.size(); ++k) {
-      const uint32_t recipe = targets[k] - graph.nItem;
+      const uint32_t recipe = targets[k];
       if (recipe >= graph.nRecipe) {
         report("i2r points at an out-of-range recipe");
         continue;
@@ -774,7 +774,7 @@ void dumpGraph(const aw::CraftingGraph& graph) {
     std::cout << "  item " << graph.itemHandle(item) << ":";
     auto weights = graph.producedAmountsOf(item);
     for (size_t k = 0; k < targets.size(); ++k) {
-      std::cout << " r" << (targets[k] - graph.nItem) << " x" << weights[k];
+      std::cout << " r" << targets[k] << " x" << weights[k];
     }
     std::cout << '\n';
   }
@@ -801,16 +801,16 @@ void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
                   const NameTable &names, bool dumpWorkstation) {
   const aw::BaseCraftingGraph &g = sub.graph;
 
-  auto item = [&](aw::NodeId node) {
+  auto item = [&](aw::ItemId node) {
     return itemLabel(graph, names, sub.itemOrigin[node]);
   };
 
   size_t leaves = 0;
   size_t multi = 0;
   size_t bulk = 0;
-  aw::vector<aw::NodeId> leafItems;
+  aw::vector<aw::ItemId> leafItems;
   leafItems.reserve(g.nItem);
-  for (aw::NodeId i = 0; i < g.nItem; i++) {
+  for (aw::ItemId i = 0; i < g.nItem; i++) {
     const size_t producers = g.producersOf(i).size();
     if (producers == 0) {
       leaves++;
@@ -868,7 +868,7 @@ void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
   }
 
   std::cout << "#\n# leaf items:\n";
-  for (aw::NodeId i : leafItems)
+  for (aw::ItemId i : leafItems)
     std::cout << "#   " << item(i) << '\n';
 }
 
@@ -1321,7 +1321,7 @@ int main(int argc, char** argv) {
     std::cout << "  subgraph: " << sub.graph.nItem << " items, " << sub.graph.nRecipe
               << " recipes\n";
 
-    const aw::NodeId targetNode = sub.translate(aw::CraftingGraph::itemNode(target));
+    const aw::ItemId targetNode = sub.translate(aw::CraftingGraph::itemNode(target));
     const auto planStart = std::chrono::steady_clock::now();
     const aw::PlanResult plan =
         aw::planCrafting(sub, targetNode, planAmount, inventory, solverOptions);

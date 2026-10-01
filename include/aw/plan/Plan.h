@@ -41,7 +41,7 @@ struct PlanResult {
 // `options` exposes the solver's budget (relative gap, time limit, workers).
 // The defaults are tuned for an interactive caller and are expected to be
 // overridden from the mod's config.
-PlanResult planCrafting(const Subgraph& sub, NodeId target, Amount amount,
+PlanResult planCrafting(const Subgraph& sub, ItemId target, Amount amount,
                         std::span<const Amount> invSrc,
                         const solver::Options& options = {});
 
@@ -65,7 +65,7 @@ PlanResult planCrafting(const Subgraph& sub, NodeId target, Amount amount,
 // barriers.
 struct FireabilityWitness {
   aw::vector<uint32_t> recipe;  // subgraph recipe on the deadlocked component
-  aw::vector<NodeId> item;      // input of that recipe, in subgraph item ids
+  aw::vector<ItemId> item;      // input of that recipe, in subgraph item ids
   aw::vector<Amount> need;      // amount of `item` the recipe consumes at once
 };
 
@@ -81,7 +81,7 @@ bool planIsFireable(const Subgraph& sub, std::span<const Amount> invSrc,
 // otherwise the firing vector is verified against the exact balance
 // `planCrafting` hands the solver, so it is always feasible. It never reports
 // a false positive.
-aw::vector<int64_t> greedyDagPlan(const Subgraph& sub, NodeId target, Amount amount,
+aw::vector<int64_t> greedyDagPlan(const Subgraph& sub, ItemId target, Amount amount,
                                   std::span<const Amount> invSrc) noexcept;
 
 }  // namespace aw

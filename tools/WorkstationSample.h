@@ -135,12 +135,12 @@ inline WorkstationSample sampleWorkstations(
   // once, which is what "a percentage of workstations" refers to.
   aw::vector<uint8_t> isStation(graph.nReal, 0);
   for (uint32_t recipe = 0; recipe < graph.nRecipe; recipe++)
-    for (aw::NodeId station : graph.workstations.targetsOf(recipe))
+    for (aw::ItemId station : graph.workstations.targetsOf(recipe))
       if (station < graph.nReal)
         isStation[station] = 1;
 
   aw::vector<aw::Handle> pool;
-  for (aw::NodeId item = 0; item < graph.nReal; item++) {
+  for (aw::ItemId item = 0; item < graph.nReal; item++) {
     if (!isStation[item])
       continue;
     const aw::Handle handle = (aw::Handle) (item + 1);

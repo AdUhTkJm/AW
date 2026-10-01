@@ -86,7 +86,7 @@ bool better(const BaseCraftingGraph &g, Strategy strategy, uint32_t lhs, uint32_
   return g.outputAmt[rhs] > g.outputAmt[lhs];
 }
 
-#define ACYCLIC_ARG_LIST const BaseCraftingGraph &g, NodeId target, const ReachableView *reach, const RankOrder *rank
+#define ACYCLIC_ARG_LIST const BaseCraftingGraph &g, ItemId target, const ReachableView *reach, const RankOrder *rank
 
 // The acyclic view of the reachable recipe graph.
 struct AcyclicView {
@@ -108,8 +108,7 @@ void AcyclicView::initImpl(ACYCLIC_ARG_LIST) noexcept {
   status[target] = IN_STACK;
   const auto producers = g.producersOf(target);
 
-  for (auto r : producers) {
-    const uint32_t recipe = r - g.nItem;
+  for (RecipeId recipe : producers) {
     const auto inputs = g.inputsOf(recipe);
 
     // Prune.
@@ -117,11 +116,11 @@ void AcyclicView::initImpl(ACYCLIC_ARG_LIST) noexcept {
       continue;
 
     // Cycle check.
-    if (std::ranges::any_of(inputs, [&](NodeId input) { return status[input] == IN_STACK; }))
+    if (std::ranges::any_of(inputs, [&](ItemId input) { return status[input] == IN_STACK; }))
       continue;
 
     // DFS for unseen items.
-    for (NodeId item : inputs) {
+    for (ItemId item : inputs) {
       if (status[item] == UNSEEN)
         initImpl(g, item, reach, rank);
     }
@@ -153,12 +152,11 @@ aw::vector<uint8_t> computeObtainable(const BaseCraftingGraph &g, const AcyclicV
     // If there exists a usable recipe, and every item of it is obtainable,
     // then so is the current one.
     bool ok = false;
-    for (NodeId producerNode : g.producersOf(item)) {
-      const uint32_t recipe = producerNode - g.nItem;
+    for (RecipeId recipe : g.producersOf(item)) {
       if (!view.usable[recipe])
         continue;
       auto targets = g.inputsOf(recipe);
-      if (std::ranges::all_of(targets, [&](NodeId id) { return obtainable[id]; })) {
+      if (std::ranges::all_of(targets, [&](ItemId id) { return obtainable[id]; })) {
         ok = true;
         break;
       }
@@ -227,7 +225,7 @@ struct SweepContext {
   const BaseCraftingGraph &g;
   const AcyclicView &view;
   std::span<const Amount> stock;
-  NodeId target;
+  ItemId target;
   Amount amount;
 
   aw::vector<int64_t> capacityFromOrder() const noexcept;
@@ -238,8 +236,7 @@ aw::vector<int64_t> SweepContext::capacityFromOrder() const noexcept {
   aw::vector<int64_t> cap(g.nItem, 0);
   for (uint32_t item : view.post) {
     int64_t best = 0;
-    for (NodeId producerNode : g.producersOf(item)) {
-      const uint32_t recipe = producerNode - g.nItem;
+    for (RecipeId recipe : g.producersOf(item)) {
       if (!view.usable[recipe])
         continue;
       const int64_t amount = producibleVia(g, recipe, cap);
@@ -272,8 +269,7 @@ aw::vector<int64_t> capacitySweep(const SweepContext &ctx, Strategy strategy) no
       continue;
 
     routes.clear();
-    for (NodeId producerNode : g.producersOf(item)) {
-      const uint32_t recipe = producerNode - g.nItem;
+    for (RecipeId recipe : g.producersOf(item)) {
       if (!view.usable[recipe] || g.outputAmt[recipe] <= 0)
         continue;
       routes.push_back(Route{recipe, capRemainingVia(g, cap, need, recipe)});
@@ -344,13 +340,12 @@ aw::vector<int64_t> demandSweep(const SweepContext &ctx,
     uint32_t best = UINT32_MAX;
     for (int pass = 0; pass < 2 && best == UINT32_MAX; pass++) {
       const bool requireObtainable = pass == 0;
-      for (NodeId producerNode : g.producersOf(item)) {
-        const uint32_t recipe = producerNode - nItem;
+      for (RecipeId recipe : g.producersOf(item)) {
         if (!view.usable[recipe])
           continue;
         if (requireObtainable) {
           bool all = true;
-          for (NodeId input : g.inputsOf(recipe))
+          for (ItemId input : g.inputsOf(recipe))
             if (!obtainable[input]) {
               all = false;
               break;
@@ -392,7 +387,7 @@ aw::vector<int64_t> demandSweep(const SweepContext &ctx,
 // Verify the exact balance the solver will be handed: `exec` must cover the
 // requested amount of `target` plus every other item's stock deficit.
 bool satisfiesBalance(const BaseCraftingGraph &g, const aw::vector<int64_t> &exec,
-                      std::span<const Amount> stock, NodeId target, Amount amount) noexcept {
+                      std::span<const Amount> stock, ItemId target, Amount amount) noexcept {
   const uint32_t nItem = g.nItem;
   aw::vector<aw::int128> balance(nItem, 0);
   for (uint32_t recipe = 0; recipe < g.nRecipe; recipe++) {
@@ -433,7 +428,7 @@ struct BestPlan {
   bool found = false;
 
   void consider(const BaseCraftingGraph &g, aw::vector<int64_t> &&candidate,
-                std::span<const Amount> stock, NodeId target, Amount amount) {
+                std::span<const Amount> stock, ItemId target, Amount amount) {
     if (candidate.empty())
       return;
     if (!satisfiesBalance(g, candidate, stock, target, amount))
@@ -449,7 +444,7 @@ struct BestPlan {
 
 }  // namespace
 
-aw::vector<int64_t> greedyDagPlan(const Subgraph &sub, NodeId target, Amount amount,
+aw::vector<int64_t> greedyDagPlan(const Subgraph &sub, ItemId target, Amount amount,
                                   std::span<const Amount> invSrc) noexcept {
   const BaseCraftingGraph &g = sub.graph;
   if (target >= g.nItem || amount <= 0 || g.nRecipe == 0)
@@ -460,7 +455,7 @@ aw::vector<int64_t> greedyDagPlan(const Subgraph &sub, NodeId target, Amount amo
   // plan must still produce `amount` new units.
   aw::vector<Amount> stock(g.nItem, 0);
   for (uint32_t item = 0; item < g.nReal; item++) {
-    const NodeId source = sub.itemOrigin[item];
+    const ItemId source = sub.itemOrigin[item];
     stock[item] = source < invSrc.size() ? invSrc[source] : 0;
   }
   stock[target] = 0;

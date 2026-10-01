@@ -7,19 +7,19 @@
 namespace aw::detail {
 
 struct ColumnView {
-  const std::span<const NodeId> items;
+  const std::span<const ItemId> items;
   const std::span<const Amount> coeffs;
 
-  ColumnView(const std::span<const NodeId> &items, const std::span<const Amount> &coeffs) noexcept:
+  ColumnView(const std::span<const ItemId> &items, const std::span<const Amount> &coeffs) noexcept:
     items(items), coeffs(coeffs) {}
 
   bool empty() const noexcept { return items.empty(); }
   size_t size() const noexcept { return items.size(); }
 
-  Amount coeff(NodeId row) const noexcept;
+  Amount coeff(ItemId row) const noexcept;
 };
 
-Amount ColumnView::coeff(NodeId row) const noexcept {
+Amount ColumnView::coeff(ItemId row) const noexcept {
   const auto it = std::lower_bound(items.begin(), items.end(), row);
   if (it == items.end() || *it != row)
     return 0;
@@ -37,7 +37,7 @@ void prefixSum(aw::vector<uint32_t> &v) noexcept {
 // Adds `delta` to the coefficient of `row` of a sorted sparse column, writing
 // the result to `outItems`/`outCoeffs`.
 void addToColumn(const ColumnView &col,
-                 NodeId row, Amount delta, aw::vector<NodeId> &outItems,
+                 ItemId row, Amount delta, aw::vector<ItemId> &outItems,
                  aw::vector<Amount> &outCoeffs) noexcept {
   outItems.clear();
   outCoeffs.clear();
@@ -98,7 +98,7 @@ void addToColumn(const ColumnView &col,
 // entries against a few thousand true ones.
 struct CostContext {
   const CraftingGraph *graph = nullptr;
-  aw::vector<aw::vector<NodeId>> tagMembers;
+  aw::vector<aw::vector<ItemId>> tagMembers;
 
   // member -> real recipes that consume it as an amount-qualified input. A
   // synthetic tag recipe is left out: a tag is the AND over its members, not
@@ -120,16 +120,16 @@ struct CostContext {
   aw::vector<uint32_t> rrLeft;        // nReal
   aw::vector<uint32_t> rmStamp;       // nItem
   aw::vector<uint32_t> rmLeft;        // nItem
-  aw::vector<NodeId> queue;
-  aw::vector<NodeId> *curRow = nullptr;
+  aw::vector<ItemId> queue;
+  aw::vector<ItemId> *curRow = nullptr;
   uint32_t gen = 0;
 
   // Solver rows: the sorted true members of each witness already solved.
   aw::vector<uint8_t> rowDone;             // nItem
-  aw::vector<aw::vector<NodeId>> rowTrue;  // nItem
+  aw::vector<aw::vector<ItemId>> rowTrue;  // nItem
 
   // Temporary vectors, extracted to avoid repeated vector construction/destruction.
-  aw::vector<NodeId> tmpItems, nextItems;
+  aw::vector<ItemId> tmpItems, nextItems;
   aw::vector<Amount> tmpCoeffs, nextCoeffs;
 
   uint64_t work;
@@ -146,12 +146,12 @@ void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput)
   const CraftingGraph &g = *graph;
 
   aw::vector<uint8_t> tagEligible(g.nItem, 0);
-  for (NodeId t = g.nReal; t < g.nItem; t++) {
-    const aw::vector<NodeId> &ms = tagMembers[t];
+  for (ItemId t = g.nReal; t < g.nItem; t++) {
+    const aw::vector<ItemId> &ms = tagMembers[t];
     if (ms.empty())
       continue;
     bool ok = true;
-    for (NodeId z : ms) {
+    for (ItemId z : ms) {
       if (requireUnit && !unitOutput[z]) {
         ok = false;
         break;
@@ -188,9 +188,9 @@ void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput)
 
   // Eligible tags per real member.
   aw::vector<uint32_t> counts(g.nReal, 0);
-  for (NodeId t = g.nReal; t < g.nItem; t++) {
+  for (ItemId t = g.nReal; t < g.nItem; t++) {
     if (tagEligible[t])
-      for (NodeId z : tagMembers[t])
+      for (ItemId z : tagMembers[t])
         counts[z]++;
   }
 
@@ -198,15 +198,15 @@ void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput)
   prefixSum(memberTagOffsets);
   memberTagTargets.resize(memberTagOffsets.back());
   cursor.assign(memberTagOffsets.begin(), memberTagOffsets.end() - 1);
-  for (NodeId t = g.nReal; t < g.nItem; t++) {
+  for (ItemId t = g.nReal; t < g.nItem; t++) {
     if (tagEligible[t])
-      for (NodeId z : tagMembers[t])
+      for (ItemId z : tagMembers[t])
         memberTagTargets[cursor[z]++] = t;
   }
 
   recipeCount.assign(g.nReal, 0);
   realEligible.assign(g.nReal, 0);
-  for (NodeId y = 0; y < g.nReal; y++) {
+  for (ItemId y = 0; y < g.nReal; y++) {
     recipeCount[y] = (uint32_t) g.producersOf(y).size();
     realEligible[y] = !requireUnit || unitOutput[y] != 0;
   }
@@ -224,7 +224,7 @@ void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput)
 
 // Adds x to the row being solved, at the given derivation level. Items already
 // in the row keep the level of their first (shallowest) arrival.
-void addRowItem(CostContext &ctx, NodeId x, uint32_t level) noexcept {
+void addRowItem(CostContext &ctx, ItemId x, uint32_t level) noexcept {
   if (ctx.stamp[x] == ctx.gen)
     return;
   ctx.stamp[x] = ctx.gen;
@@ -236,9 +236,9 @@ void addRowItem(CostContext &ctx, NodeId x, uint32_t level) noexcept {
 // Solves the row of witness w by upward closure. Every queue and work step
 // that runs out of budget stops the closure early; the row is then left
 // incomplete, which can only report fewer costs and so prunes less.
-void computeRow(CostContext &ctx, NodeId w) noexcept {
+void computeRow(CostContext &ctx, ItemId w) noexcept {
   ctx.rowDone[w] = 1;
-  aw::vector<NodeId> &row = ctx.rowTrue[w];
+  aw::vector<ItemId> &row = ctx.rowTrue[w];
   row.clear();
   ctx.curRow = &row;
   ctx.gen++;
@@ -253,7 +253,7 @@ void computeRow(CostContext &ctx, NodeId w) noexcept {
       return;
     
     ctx.work--;
-    const NodeId x = ctx.queue[head];
+    const ItemId x = ctx.queue[head];
     const uint32_t lx = ctx.level[x];
     if (lx >= options.maxCostDepth)
       continue;
@@ -269,7 +269,7 @@ void computeRow(CostContext &ctx, NodeId w) noexcept {
       if (ctx.recipeSat[r] == ctx.gen)
         continue;
       ctx.recipeSat[r] = ctx.gen;
-      const NodeId y = g.output[r];
+      const ItemId y = g.output[r];
       if (ctx.rrStamp[y] != ctx.gen) {
         ctx.rrStamp[y] = ctx.gen;
         ctx.rrLeft[y] = ctx.recipeCount[y];
@@ -289,7 +289,7 @@ void computeRow(CostContext &ctx, NodeId w) noexcept {
         return;
       
       ctx.work--;
-      const NodeId t = ctx.memberTagTargets[e];
+      const ItemId t = ctx.memberTagTargets[e];
       if (ctx.rmStamp[t] != ctx.gen) {
         ctx.rmStamp[t] = ctx.gen;
         ctx.rmLeft[t] = (uint32_t) ctx.tagMembers[t].size();
@@ -306,12 +306,12 @@ void computeRow(CostContext &ctx, NodeId w) noexcept {
 
 // Resolves one cost query against the row of w, computing that row on first
 // use.
-bool costs(CostContext &ctx, NodeId y, NodeId w) noexcept {
+bool costs(CostContext &ctx, ItemId y, ItemId w) noexcept {
   if (y == w)
     return true;
   if (!ctx.rowDone[w])
     computeRow(ctx, w);
-  const aw::vector<NodeId> &row = ctx.rowTrue[w];
+  const aw::vector<ItemId> &row = ctx.rowTrue[w];
   return std::binary_search(row.begin(), row.end(), y);
 }
 
@@ -321,16 +321,16 @@ bool costs(CostContext &ctx, NodeId y, NodeId w) noexcept {
 // covered by moving `min(q_Y, deficit)` units from an input Y with
 // `costs(Y, d)`, then the next deficit is handled the same way.
 bool substitutionDominates(CostContext &ctx, const ColumnView &cur, const ColumnView &s, uint32_t depth,
-                           uint64_t &work, aw::vector<NodeId> &collapses) noexcept {
+                           uint64_t &work, aw::vector<ItemId> &collapses) noexcept {
   if (work == 0)
     return false;
   work--;
 
   // The first row where `cur` exceeds `s`.
-  NodeId d = UINT32_MAX;
+  ItemId d = UINT32_MAX;
   size_t i = 0, j = 0;
   while (i < cur.items.size() || j < s.items.size()) {
-    NodeId next = UINT32_MAX;
+    ItemId next = UINT32_MAX;
     if (i < cur.items.size())
       next = std::min(next, cur.items[i]);
     if (j < s.items.size())
@@ -361,7 +361,7 @@ bool substitutionDominates(CostContext &ctx, const ColumnView &cur, const Column
   ctx.tmpItems.clear();
   ctx.nextCoeffs.clear();
   for (size_t k = 0; k < cur.size(); k++) {
-    const NodeId y = cur.items[k];
+    const ItemId y = cur.items[k];
     const Amount coeff = cur.coeffs[k];
     if (coeff >= 0 || y == d)
       continue;
@@ -394,22 +394,22 @@ bool substitutionDominates(CostContext &ctx, const ColumnView &cur, const Column
 // already final.
 void computeCompGuards(const aw::vector<aw::vector<uint32_t>> &adj,
                        const aw::vector<int32_t> &comp,
-                       const aw::vector<aw::vector<NodeId>> &edgeGuards,
-                       aw::vector<aw::vector<NodeId>> &compGuards) noexcept {
+                       const aw::vector<aw::vector<ItemId>> &edgeGuards,
+                       aw::vector<aw::vector<ItemId>> &compGuards) noexcept {
   const uint32_t nComp = (uint32_t) compGuards.size();
   aw::vector<aw::vector<uint32_t>> members(nComp);
   for (uint32_t a = 0; a < adj.size(); a++)
     members[comp[a]].push_back(a);
   for (uint32_t c = 0; c < nComp; c++) {
-    aw::vector<NodeId> &g = compGuards[c];
+    aw::vector<ItemId> &g = compGuards[c];
     for (uint32_t a : members[c]) {
-      const aw::vector<NodeId> &own = edgeGuards[a];
+      const aw::vector<ItemId> &own = edgeGuards[a];
       g.insert(g.end(), own.begin(), own.end());
     }
     for (uint32_t a : members[c])
       for (uint32_t j : adj[a])
         if ((uint32_t) comp[j] != c) {
-          const aw::vector<NodeId> &succ = compGuards[comp[j]];
+          const aw::vector<ItemId> &succ = compGuards[comp[j]];
           g.insert(g.end(), succ.begin(), succ.end());
         }
     std::sort(g.begin(), g.end());
@@ -421,8 +421,8 @@ void computeCompGuards(const aw::vector<aw::vector<uint32_t>> &adj,
 // the substitution to apply: the item itself, or every member of a tag. A tag
 // wider than the cap is refused, because a catch-all tag is not worth a
 // per-recipe guard list.
-bool collectGuards(const CraftingGraph &graph, NodeId y,
-                   aw::vector<NodeId> &out) noexcept {
+bool collectGuards(const CraftingGraph &graph, ItemId y,
+                   aw::vector<ItemId> &out) noexcept {
   out.clear();
   if (y < graph.nReal) {
     out.reserve(1);
@@ -434,8 +434,8 @@ bool collectGuards(const CraftingGraph &graph, NodeId y,
     return false;
   // At most one guard per tag member recipe.
   out.reserve(recipes.size());
-  for (NodeId recipeNode : recipes) {
-    const auto inputs = graph.inputsOf(recipeNode - graph.nItem);
+  for (RecipeId r : recipes) {
+    const auto inputs = graph.inputsOf(r);
     if (inputs.size() != 1)
       return false;
     out.push_back_unchecked(inputs[0]);
@@ -456,15 +456,14 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
     return;
 
   // Collect tags and members. TODO: can we reuse it from tag prune?
-  aw::vector<aw::vector<NodeId>> tagMembers(nItem);
-  for (NodeId t = nReal; t < nItem; t++) {
+  aw::vector<aw::vector<ItemId>> tagMembers(nItem);
+  for (ItemId t = nReal; t < nItem; t++) {
     const auto recipes = graph.producersOf(t);
     if (recipes.empty())
       continue;
-    aw::vector<NodeId> ms;
+    aw::vector<ItemId> ms;
     ms.reserve(recipes.size());
-    for (NodeId recipeNode : recipes) {
-      const uint r = recipeNode - graph.nItem;
+    for (RecipeId r : recipes) {
       const auto inputs = graph.inputsOf(r);
       ms.push_back_unchecked(inputs[0]);
     }
@@ -481,9 +480,9 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
   aw::vector<uint8_t> unitOutput;
   if (!options.nonoptimal) {
     unitOutput.assign(nItem, 1);
-    for (NodeId m = 0; m < nReal; m++) {
-      for (NodeId recipeNode : graph.producersOf(m)) {
-        if (graph.outputAmt[recipeNode - graph.nItem] != 1) {
+    for (ItemId m = 0; m < nReal; m++) {
+      for (RecipeId r : graph.producersOf(m)) {
+        if (graph.outputAmt[r] != 1) {
           unitOutput[m] = 0;
           break;
         }
@@ -500,31 +499,31 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
 
   aw::vector<uint32_t> recs;
   aw::vector<aw::vector<uint32_t>> adj;
-  aw::vector<aw::vector<NodeId>> edgeGuards;
+  aw::vector<aw::vector<ItemId>> edgeGuards;
   aw::vector<uint> adjOffsets;
   aw::vector<uint32_t> adjTargets;
   aw::vector<int32_t> comp;
   aw::vector<uint32_t> repOfComp;
   aw::vector<uint8_t> keep;
-  aw::vector<aw::vector<NodeId>> compWs;
-  aw::vector<aw::vector<NodeId>> compGuards;
+  aw::vector<aw::vector<ItemId>> compWs;
+  aw::vector<aw::vector<ItemId>> compGuards;
 
-  aw::vector<NodeId> collapses, resolved, tmpGuards;
+  aw::vector<ItemId> collapses, resolved, tmpGuards;
   // The recursive search abandons any branch that would exceed the depth cap.
   collapses.reserve(options.maxSubstitutionDepth);
 
   recs.reserve(options.maxSiblingRecipes);
-  for (NodeId X = 0; X < nReal; X++) {
+  for (ItemId X = 0; X < nReal; X++) {
     CHECK_WORK;
-    const auto recipeNodes = graph.producersOf(X);
-    if (recipeNodes.size() < 2)
+    const auto siblings = graph.producersOf(X);
+    if (siblings.size() < 2)
       continue;
-    if (recipeNodes.size() > options.maxSiblingRecipes)
+    if (siblings.size() > options.maxSiblingRecipes)
       continue;
 
     recs.clear();
-    for (NodeId recipeNode : recipeNodes)
-      recs.push_back_unchecked(recipeNode - graph.nItem);
+    for (RecipeId r : siblings)
+      recs.push_back_unchecked(r);
     const uint k = recs.size();
 
     adj.assign(k, {});
@@ -549,7 +548,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
         // unusable, so it is dropped along with the rest of this attempt.
         tmpGuards.clear();
         bool guardOk = true;
-        for (NodeId y : collapses) {
+        for (ItemId y : collapses) {
           if (!collectGuards(graph, y, resolved)) {
             guardOk = false;
             break;
@@ -559,10 +558,10 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
         if (!guardOk)
           continue;
         adj[i].push_back(j);
-        aw::vector<NodeId> &eg = edgeGuards[i];
+        aw::vector<ItemId> &eg = edgeGuards[i];
         eg.insert(eg.end(), tmpGuards.begin(), tmpGuards.end());
       }
-      aw::vector<NodeId> &eg = edgeGuards[i];
+      aw::vector<ItemId> &eg = edgeGuards[i];
       std::sort(eg.begin(), eg.end());
       eg.erase(std::unique(eg.begin(), eg.end()), eg.end());
     }
@@ -584,7 +583,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
     for (uint i = 0; i < k; i++) {
       if (keep[i])
         continue;
-      const aw::vector<NodeId> &guards = compGuards[comp[i]];
+      const aw::vector<ItemId> &guards = compGuards[comp[i]];
       // A path union wider than the per-recipe cap would make the query-time
       // guard scan unbounded, so the recipe is left alive instead.
       if (guards.size() > options.maxSubstitutionGuardItems ||

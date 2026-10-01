@@ -60,7 +60,7 @@ int64_t trivialLowerBound(const solver::Matrix &A, std::span<const int64_t> b) {
 // tag -- so the free column stays finite under the `>=` row above.
 //
 // b_target = amount and b_i = -inventory(i) for every other item.
-PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
+PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
                         std::span<const Amount> invSrc,
                         const solver::Options &options) {
   PlanResult result;
@@ -136,7 +136,7 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
       // the output remain available.
       rhs[i] = amount;
     } else {
-      const NodeId source = sub.itemOrigin[i];
+      const ItemId source = sub.itemOrigin[i];
       const Amount available = source < invSrc.size() ? invSrc[source] : 0;
       rhs[i] = -available;
     }
@@ -171,7 +171,7 @@ PlanResult planCrafting(const Subgraph &sub, NodeId target, Amount amount,
     // behind the request, so read it from the caller's inventory instead.
     stockPerRow.resize(m, 0);
     for (uint32_t i = 0; i < m; i++) {
-      const NodeId source = sub.itemOrigin[i];
+      const ItemId source = sub.itemOrigin[i];
       stockPerRow[i] = source < invSrc.size() ? (int64_t) invSrc[source] : 0;
     }
     solveOptions.stock = std::span<const int64_t>(stockPerRow.data(), stockPerRow.size());

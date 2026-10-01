@@ -49,7 +49,7 @@ constexpr uint64_t FIRE_BUDGET = 1'000'000;
 // One item's role inside one recipe: `consume` is how much the recipe eats and
 // `delta` is its net change (output minus consumption).
 struct DeltaEntry {
-  NodeId item;
+  ItemId item;
   Amount consume;
   Amount delta;
 };
@@ -86,16 +86,16 @@ void applyDelta(Amount &avail, aw::int128 change) noexcept {
 // than once, so the entries are merged with the per-recipe `stamp` before the
 // SCC test reads them.
 void aggregateRecipe(const BaseCraftingGraph &g, uint32_t r, aw::vector<Amount> &acc,
-                     aw::vector<int32_t> &stamp, aw::vector<NodeId> &touched) noexcept {
+                     aw::vector<int32_t> &stamp, aw::vector<ItemId> &touched) noexcept {
   touched.clear();
-  const NodeId out = g.output[r];
+  const ItemId out = g.output[r];
   stamp[out] = (int32_t) r;
   acc[out] = g.outputAmt[r];
   touched.push_back(out);
   const auto inputs = g.inputsOf(r);
   const auto amounts = g.inputAmountsOf(r);
   for (size_t k = 0; k < inputs.size(); k++) {
-    const NodeId item = inputs[k];
+    const ItemId item = inputs[k];
     if (stamp[item] != (int32_t) r) {
       stamp[item] = (int32_t) r;
       acc[item] = 0;
@@ -118,7 +118,7 @@ RecipeDeltas buildRecipeDeltas(const BaseCraftingGraph &g,
   // Scratch space for the per-recipe aggregation, reused across both passes.
   aw::vector<Amount> acc(m, 0);
   aw::vector<int32_t> stamp(m, -1);
-  aw::vector<NodeId> touched;
+  aw::vector<ItemId> touched;
   touched.reserve(m < 64 ? m : 64);
 
   // Size pass.
@@ -141,7 +141,7 @@ RecipeDeltas buildRecipeDeltas(const BaseCraftingGraph &g,
       continue;
     aggregateRecipe(g, r, acc, stamp, touched);
     uint cursor = deltas.offsets[r];
-    for (NodeId item : touched) {
+    for (ItemId item : touched) {
       const Amount produced = item == g.output[r] ? g.outputAmt[r] : 0;
       deltas.entries[cursor].item = item;
       deltas.entries[cursor].delta = acc[item];
@@ -166,9 +166,8 @@ ProducerGraph buildProducerGraph(const BaseCraftingGraph &g,
   for (uint32_t r = 0; r < n; r++) {
     uint count = 0;
     if (exec[r] > 0) {
-      for (NodeId item : g.inputsOf(r)) {
-        for (NodeId producerNode : g.producersOf(item)) {
-          const uint32_t p = producerNode - g.nItem;
+      for (ItemId item : g.inputsOf(r)) {
+        for (RecipeId p : g.producersOf(item)) {
           if (exec[p] <= 0 || edgeStamp[p] == (int32_t) r)
             continue;
           edgeStamp[p] = (int32_t) r;
@@ -186,9 +185,8 @@ ProducerGraph buildProducerGraph(const BaseCraftingGraph &g,
   for (uint32_t r = 0; r < n; r++) {
     if (exec[r] <= 0)
       continue;
-    for (NodeId item : g.inputsOf(r)) {
-      for (NodeId producerNode : g.producersOf(item)) {
-        const uint32_t p = producerNode - g.nItem;
+    for (ItemId item : g.inputsOf(r)) {
+      for (RecipeId p : g.producersOf(item)) {
         if (exec[p] <= 0 || edgeStamp[p] == (int32_t) r)
           continue;
         edgeStamp[p] = (int32_t) r;
@@ -270,7 +268,7 @@ bool fireComponents(const FireInput &in) noexcept {
 
   aw::vector<Amount> avail(m, 0);
   for (uint32_t item = 0; item < m; item++) {
-    const NodeId source = sub.itemOrigin[item];
+    const ItemId source = sub.itemOrigin[item];
     avail[item] = source < in.invSrc.size() ? in.invSrc[source] : 0;
   }
 

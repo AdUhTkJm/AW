@@ -9,16 +9,16 @@ FILE *f = fopen("temp/a.txt", "w");
 
 // NOTE: This is linked against other translation units.
 // We don't use it in this particular file, but we cannot delete it.
-bool leVector(std::span<const NodeId> ci, std::span<const Amount> cc,
-              std::span<const NodeId> si, std::span<const Amount> sc) noexcept {
+bool leVector(std::span<const ItemId> ci, std::span<const Amount> cc,
+              std::span<const ItemId> si, std::span<const Amount> sc) noexcept {
   size_t i = 0, j = 0;
   const size_t c_size = ci.size();
   const size_t s_size = si.size();
 
   // Shared part, where both sides have elements.
   while (i < c_size && j < s_size) {
-    const NodeId c_id = ci[i];
-    const NodeId s_id = si[j];
+    const ItemId c_id = ci[i];
+    const ItemId s_id = si[j];
 
     if (c_id == s_id) {
       if (cc[i] > sc[j])
@@ -52,14 +52,14 @@ bool leVector(std::span<const NodeId> ci, std::span<const Amount> cc,
 }
 
 [[gnu::always_inline]]
-inline bool leVectorRaw(const NodeId *ci, const Amount *cc, size_t c_size,
-                 const NodeId *si, const Amount *sc, size_t s_size) noexcept {
+inline bool leVectorRaw(const ItemId *ci, const Amount *cc, size_t c_size,
+                 const ItemId *si, const Amount *sc, size_t s_size) noexcept {
   size_t i = 0, j = 0;
 
   // Shared part, where both sides have elements.
   while (i < c_size && j < s_size) {
-    const NodeId cid = ci[i];
-    const NodeId sid = si[j];
+    const ItemId cid = ci[i];
+    const ItemId sid = si[j];
 
     if (cid == sid) {
       if (cc[i] > sc[j])
@@ -103,7 +103,7 @@ bool leZero(std::span<const Amount> cc) noexcept {
 // Returns false on integer overflow, which is treated as "cannot prove
 // dominance" by the caller.
 bool buildComposite(int64_t alpha, const RecipeVectors &vec, uint r, uint R,
-                    aw::vector<NodeId> &outItems,
+                    aw::vector<ItemId> &outItems,
                     aw::vector<Amount> &outCoeffs) noexcept {
   const auto ri = vec.itemsOf(r);
   const auto rc = vec.coeffsOf(r);
@@ -114,7 +114,7 @@ bool buildComposite(int64_t alpha, const RecipeVectors &vec, uint r, uint R,
 
   size_t i = 0, j = 0;
   while (i < ri.size() || j < Ri.size()) {
-    NodeId next = UINT32_MAX;
+    ItemId next = UINT32_MAX;
     if (i < ri.size())
       next = std::min(next, ri[i]);
     if (j < Ri.size())
@@ -167,9 +167,9 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
 
   aw::vector<uint32_t> recs;
   aw::vector<aw::vector<uint32_t>> adj;
-  aw::vector<NodeId> guard;
+  aw::vector<ItemId> guard;
 
-  aw::vector<NodeId> cItems;
+  aw::vector<ItemId> cItems;
   aw::vector<Amount> cCoeffs;
   aw::vector<uint32_t> candidates;
   aw::vector<uint> adjOffsets;
@@ -177,22 +177,22 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
   aw::vector<int32_t> comp;
   aw::vector<uint32_t> repOfComp;
   aw::vector<uint8_t> keep;
-  aw::vector<aw::vector<NodeId>> compWs;
+  aw::vector<aw::vector<ItemId>> compWs;
 
-  for (NodeId X = 0; X < nReal; X++) {
-    const auto recipeNodes = graph.producersOf(X);
-    if (recipeNodes.size() < 2)
+  for (ItemId X = 0; X < nReal; X++) {
+    const auto siblings = graph.producersOf(X);
+    if (siblings.size() < 2)
       continue;
     // Comparing every pair of X's recipes costs O(k^2) time and can build a
     // k^2-edge adjacency. Leave an item with an absurd fan-out unpruned rather
     // than spend gigabytes on it.
-    if (recipeNodes.size() > options.maxSiblingRecipes)
+    if (siblings.size() > options.maxSiblingRecipes)
       continue;
 
     recs.clear();
-    recs.reserve(recipeNodes.size());
-    for (NodeId recipeNode : recipeNodes)
-      recs.push_back_unchecked(recipeNode - graph.nItem);
+    recs.reserve(siblings.size());
+    for (RecipeId r : siblings)
+      recs.push_back_unchecked(r);
     const uint k = (uint) recs.size();
 
     adj.assign(k, {});
@@ -204,7 +204,7 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
       const auto inputs = graph.inputsOf(R);
       const auto weights = graph.inputAmountsOf(R);
       for (size_t a = 0; a < inputs.size(); a++) {
-        const NodeId Y = inputs[a];
+        const ItemId Y = inputs[a];
         if (!graph.isRealItem(Y))
           continue;
         const Amount q = weights[a];
@@ -236,8 +236,7 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
           break;
         }
 
-        for (NodeId producerNode : producers) {
-          const uint r = producerNode - graph.nItem;
+        for (RecipeId r : producers) {
           const Amount p = graph.outputAmt[r];
           if (p <= 0) {
             candidates.clear();

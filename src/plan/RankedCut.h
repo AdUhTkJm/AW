@@ -25,7 +25,7 @@ struct ReachableView {
   // to place.
   BaseSparseSets consumers;
 
-  ReachableView(const BaseCraftingGraph &g, NodeId target) noexcept;
+  ReachableView(const BaseCraftingGraph &g, ItemId target) noexcept;
 };
 
 // Item `x` has ordinal `order[x]`.
@@ -41,8 +41,8 @@ RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
 // This mirrors Thunderbolt's `retainsProducibleRoute` and is deliberately
 // order-independent. Unlike the DFS back-edge cut it cannot drop every producer
 // of a needed cycle member merely because of discovery order.
-bool rankPruning(const ReachableView &view, const RankOrder &order, NodeId output,
-               std::span<const NodeId> inputs) noexcept;
+bool rankPruning(const ReachableView &view, const RankOrder &order, ItemId output,
+               std::span<const ItemId> inputs) noexcept;
 
 }  // namespace aw
 

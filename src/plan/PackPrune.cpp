@@ -55,7 +55,7 @@ int compareRatio(int64_t n1, int64_t d1, int64_t n2, int64_t d2) noexcept {
 // `item`'s input consumed per unit of `item` produced. Only inputs consumed by
 // *all* producers appear, because an input one producer skips has rate 0.
 struct Rate {
-  NodeId input;
+  ItemId input;
   int64_t num;
   int64_t den;
 };
@@ -79,11 +79,11 @@ struct PackSearch {
 
   // Union of items whose balance was used as b = 0.
   aw::vector<uint8_t> inG;
-  aw::vector<NodeId> zeroStock;
+  aw::vector<ItemId> zeroStock;
 
   // Per-item minimum input rates (CSR).
   aw::vector<uint32_t> rateOffsets;  // nItem + 1
-  aw::vector<NodeId> rateInput;
+  aw::vector<ItemId> rateInput;
   aw::vector<int64_t> rateNum;
   aw::vector<int64_t> rateDen;
 
@@ -119,7 +119,7 @@ struct PackSearch {
   aw::vector<int64_t> minPositive;     // nRecipe
 
   // Scratch.
-  aw::vector<std::pair<NodeId, int64_t>> pending;
+  aw::vector<std::pair<ItemId, int64_t>> pending;
   aw::vector<int64_t> net;  // nItem
   aw::vector<uint32_t> netTouched;
 
@@ -164,12 +164,12 @@ struct PackSearch {
     z[r] = value;
   }
 
-  void writeCons(NodeId i, int64_t value) noexcept {
+  void writeCons(ItemId i, int64_t value) noexcept {
     undo.push_back({kUndoCons, i, cons[i]});
     cons[i] = value;
   }
 
-  void writeNeed(NodeId i, int64_t value) noexcept {
+  void writeNeed(ItemId i, int64_t value) noexcept {
     if (value > options.maxNeed)
       value = options.maxNeed;
     if (value <= need[i])
@@ -206,7 +206,7 @@ struct PackSearch {
     }
   }
 
-  bool addG(NodeId i) noexcept {
+  bool addG(ItemId i) noexcept {
     if (i >= graph.nReal || inG[i])
       return true;
     if ((uint32_t) zeroStock.size() >= opt.maxZeroStockItems) {
@@ -275,7 +275,7 @@ struct PackSearch {
 
   // ---- Incremental net production -----------------------------------------
 
-  void netWrite(NodeId item, int64_t value) noexcept {
+  void netWrite(ItemId item, int64_t value) noexcept {
     if (value == net[item])
       return;
     undo.push_back({kUndoNet, item, net[item]});
@@ -288,7 +288,7 @@ struct PackSearch {
     net[item] = value;
   }
 
-  void netAdd(NodeId item, int64_t delta) noexcept {
+  void netAdd(ItemId item, int64_t delta) noexcept {
     if (delta == 0)
       return;
     int64_t value = 0;
@@ -302,7 +302,7 @@ struct PackSearch {
   }
 
   void netClear() noexcept {
-    for (NodeId item : netTouched)
+    for (ItemId item : netTouched)
       net[item] = 0;
     netTouched.clear();
   }
@@ -325,26 +325,25 @@ struct PackSearch {
     rateOffsets.assign(nItem + 1, 0);
     std::fill(unconsumed.begin(), unconsumed.end(), 1);
     for (uint r = 0; r < graph.nRecipe; r++)
-      for (NodeId input : graph.inputsOf(r))
+      for (ItemId input : graph.inputsOf(r))
         unconsumed[input] = 0;
 
     struct Raw {
-      NodeId input;
+      ItemId input;
       uint32_t producer;
       int64_t amount;
     };
     aw::vector<Raw> raw;
     aw::vector<Rate> rates;
 
-    for (NodeId i = 0; i < nItem; i++) {
+    for (ItemId i = 0; i < nItem; i++) {
       const auto producers = graph.producersOf(i);
       rates.clear();
 
       if (!producers.empty()) {
         raw.clear();
         uint32_t usable = 0;
-        for (NodeId producerNode : producers) {
-          const uint32_t p = producerNode - graph.nItem;
+        for (RecipeId p : producers) {
           const int64_t a = graph.outputAmt[p];
           if (a <= 0)
             continue;
@@ -363,7 +362,7 @@ struct PackSearch {
 
         size_t k = 0;
         while (k < raw.size()) {
-          const NodeId input = raw[k].input;
+          const ItemId input = raw[k].input;
           size_t group = k;
           uint32_t consumers = 0;
           int64_t bestNum = 0, bestDen = 0;
@@ -435,13 +434,13 @@ struct PackSearch {
 
       // R1: a unique producer must cover the demand.
       for (size_t k = 0; k < needList.size(); k++) {
-        const NodeId i = needList[k];
+        const ItemId i = needList[k];
         if (need[i] <= 0)
           continue;
         const auto producers = graph.producersOf(i);
         if (producers.size() != 1)
           continue;
-        const uint32_t p = producers[0] - graph.nItem;
+        const RecipeId p = producers[0];
         const int64_t a = graph.outputAmt[p];
         if (a <= 0)
           continue;
@@ -461,7 +460,7 @@ struct PackSearch {
 
       // R2': propagate consumption through the producers' inputs.
       for (size_t k = 0; k < needList.size(); k++) {
-        const NodeId i = needList[k];
+        const ItemId i = needList[k];
         if (need[i] <= 0)
           continue;
         if (rateOffsets[i] == rateOffsets[i + 1])
@@ -503,11 +502,10 @@ struct PackSearch {
     return ceilDiv(demand, (int64_t) producers * output);
   }
 
-  bool branchable(NodeId i) const noexcept {
+  bool branchable(ItemId i) const noexcept {
     const auto producers = graph.producersOf(i);
     const uint32_t m = (uint32_t) producers.size();
-    for (NodeId producerNode : producers) {
-      const uint32_t p = producerNode - graph.nItem;
+    for (RecipeId p : producers) {
       const int64_t a = graph.outputAmt[p];
       if (a <= 0)
         continue;
@@ -553,9 +551,9 @@ struct PackSearch {
     if (!std::getenv("AW_R3"))
       return;
 
-    NodeId branchItem = UINT32_MAX;
+    ItemId branchItem = UINT32_MAX;
     uint32_t branchProducers = UINT32_MAX;
-    for (NodeId i : needList) {
+    for (ItemId i : needList) {
       if (need[i] <= 0)
         continue;
       const uint32_t m = (uint32_t) graph.producersOf(i).size();
@@ -578,8 +576,7 @@ struct PackSearch {
     const uint32_t m = (uint32_t) producers.size();
 
     bool recorded = false;
-    for (NodeId producerNode : producers) {
-      const uint32_t p = producerNode - graph.nItem;
+    for (RecipeId p : producers) {
       const int64_t a = graph.outputAmt[p];
       if (a <= 0)
         continue;
@@ -657,7 +654,7 @@ struct PackSearch {
       }
     }
     bool ok = !aborted;
-    for (NodeId item : netTouched)
+    for (ItemId item : netTouched)
       if (net[item] > 0)
         ok = false;
     netClear();
@@ -686,10 +683,10 @@ struct PackSearch {
       inSupport[r] = 0;
     }
     support.clear();
-    for (NodeId i : needList)
+    for (ItemId i : needList)
       inNeed[i] = 0;
     needList.clear();
-    for (NodeId i : zeroStock)
+    for (ItemId i : zeroStock)
       inG[i] = 0;
     zeroStock.clear();
     netClear();

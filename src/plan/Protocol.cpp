@@ -249,7 +249,7 @@ PlanResponse runPlan(const PlanRequest &request) noexcept {
   if (sub.graph.nItem == 0)
     return response;
 
-  const NodeId target = sub.translate(CraftingGraph::itemNode(request.target));
+  const ItemId target = sub.translate(CraftingGraph::itemNode(request.target));
   if (target == UINT32_MAX)
     return response;
 

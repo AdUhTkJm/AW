@@ -49,8 +49,8 @@ void prefixSum(aw::vector<uint> &v) noexcept {
     v[i + 1] += v[i];
 }
 
-void intersect(const aw::vector<NodeId> &a, const aw::vector<NodeId> &b,
-                     aw::vector<NodeId> &out) noexcept {
+void intersect(const aw::vector<ItemId> &a, const aw::vector<ItemId> &b,
+                     aw::vector<ItemId> &out) noexcept {
   out.clear();
   out.reserve(std::min(a.size(), b.size()));
   size_t i = 0, j = 0;
@@ -70,8 +70,8 @@ void intersect(const aw::vector<NodeId> &a, const aw::vector<NodeId> &b,
 // Merges two ascending, internally unique runs into `out`. The item ids of a
 // witness row all sit below nReal and its tag ids all at or above it, so the
 // two halves of a row never overlap and the merge needs no duplicate handling.
-void mergeDisjoint(const aw::vector<NodeId> &a, const aw::vector<NodeId> &b,
-                   aw::vector<NodeId> &out) noexcept {
+void mergeDisjoint(const aw::vector<ItemId> &a, const aw::vector<ItemId> &b,
+                   aw::vector<ItemId> &out) noexcept {
   out.clear();
   out.reserve(a.size() + b.size());
   size_t i = 0, j = 0;
@@ -122,20 +122,20 @@ struct TagPruner {
   // Everything after `nReal` is guaranteed a tag, but we might quit
   // if the tag is too large.
   aw::vector<uint8_t> allowedTags;         // nItem
-  aw::vector<aw::vector<NodeId>> members;  // nItem
+  aw::vector<aw::vector<ItemId>> members;  // nItem
   // producible[m]: m has at least one recipe (it is crafted, not gathered).
   aw::vector<uint8_t> producible;          // nItem
 
   // member -> tags containing it, ascending.
   aw::vector<uint> itemTagOffsets;         // nReal + 1 after prefixSum
-  aw::vector<NodeId> itemTagTargets;
+  aw::vector<ItemId> itemTagTargets;
   // tag -> real items that consume it in a real recipe. Duplicates are kept;
   // the worklist dedups them.
   aw::vector<uint> tagConsumerOffsets;     // nItem + 1 after prefixSum
-  aw::vector<NodeId> tagConsumerTargets;
+  aw::vector<ItemId> tagConsumerTargets;
 
   // Amount-qualified inputs, see computeQualifiedInputs().
-  aw::vector<aw::vector<NodeId>> qualReal, qualTags;  // nReal each
+  aw::vector<aw::vector<ItemId>> qualReal, qualTags;  // nReal each
 
   // Per recipe, the inputs it consumes at least as much of as it outputs, with
   // tags the budget dropped left out. Recipes, amounts and the tag budget are
@@ -143,20 +143,20 @@ struct TagPruner {
   // on every one of the millions of validItem() and seedWitnessPairs() steps
   // that need it. computeQualifiedInputs() unions these per item.
   aw::vector<uint> qualInputOffsets;       // nRecipe + 1 after prefixSum
-  aw::vector<NodeId> qualInputItems;
+  aw::vector<ItemId> qualInputItems;
 
   // Witness seeds grouped by witness: witnessByW[w] holds the m with a witness
   // pair (m, w). Seeding is per item but solving is per witness, so the pairs
   // are bucketed here instead of stored packed.
-  aw::vector<aw::vector<NodeId>> witnessByW;  // nReal
+  aw::vector<aw::vector<ItemId>> witnessByW;  // nReal
 
   // The witness row currently being solved. Pairs carry their first component
   // only, because their witness is the row being processed. `rowItems` and
   // `rowTags` are sorted and unique and `rowX` is their sorted union. The rows
   // of one witness are independent, so a row is thrown away as soon as it is
   // fixed.
-  aw::vector<NodeId> rowItems, rowTags, rowX;
-  aw::vector<NodeId> candRow;
+  aw::vector<ItemId> rowItems, rowTags, rowX;
+  aw::vector<ItemId> candRow;
 
   // Scratch bitmap over the item id universe, one bit per item, always left
   // clear. sortIds() uses it to sort and dedup a batch without comparisons.
@@ -177,14 +177,14 @@ struct TagPruner {
   aw::vector<uint8_t> rowState;            // nItem
   // The fixpoint worklist. It holds first components, not row-local ids, so a
   // pop needs no second lookup and the queue cannot outlive the row.
-  aw::vector<NodeId> rowQueue;
+  aw::vector<ItemId> rowQueue;
 
   // Batching guard, see computeUnitOutputs(). Empty in nonoptimal mode.
   aw::vector<uint8_t> unitOutput;          // nItem
 
   // Column-cover work budget and scratch, see covers().
   uint64_t coverBudget = 0;
-  aw::vector<std::pair<NodeId, Amount>> cap;
+  aw::vector<std::pair<ItemId, Amount>> cap;
 
   // The closure's global pair budget, carried across witness rows.
   uint64_t prunePairs = 0;
@@ -199,32 +199,32 @@ struct TagPruner {
   void allocateTagAdjacency() noexcept;
   void seedWitnessPairs() noexcept;
   // Replaces `v` with its ascending, duplicate-free contents.
-  void sortIds(aw::vector<NodeId> &v) noexcept;
+  void sortIds(aw::vector<ItemId> &v) noexcept;
   // Merges the (unsorted, possibly duplicated) `cand` into the sorted-unique
   // `dst`, keeping `dst` sorted, and returns the entries that were not already
   // in it.
-  aw::vector<NodeId> mergeNewSorted(aw::vector<NodeId> &dst,
-                                    aw::vector<NodeId> &cand) noexcept;
+  aw::vector<ItemId> mergeNewSorted(aw::vector<ItemId> &dst,
+                                    aw::vector<ItemId> &cand) noexcept;
   // Builds the pair set for witness w; false when the row has no seeds.
-  bool seedRow(NodeId w) noexcept;
+  bool seedRow(ItemId w) noexcept;
   // Expands that row to its closure; nonoptimal mode only.
-  void rowClosure(NodeId w) noexcept;
+  void rowClosure(ItemId w) noexcept;
   // Marks the pairs of the row as present and alive in rowState.
   void beginRow() noexcept;
   // Clears those marks again.
   void endRow() noexcept;
   // True while the pair (x, w) of the row being fixed is alive.
-  bool rowAliveOf(NodeId x) const noexcept;
+  bool rowAliveOf(ItemId x) const noexcept;
   // Kills the row's unjustified pairs until convergence.
-  void fixRow(NodeId w) noexcept;
+  void fixRow(ItemId w) noexcept;
   // Copies the row's alive co-member edges into tagAdjBits.
-  void recordRowScc(NodeId w) noexcept;
+  void recordRowScc(ItemId w) noexcept;
   // True when one execution of recipe s can replace one of r, see the
   // column-cover comment above covers().
   bool covers(uint s, uint r) noexcept;
-  bool colCover(uint r, NodeId w) noexcept;
-  bool validTag(NodeId t, NodeId w) noexcept;
-  bool validItem(NodeId m, NodeId w) noexcept;
+  bool colCover(uint r, ItemId w) noexcept;
+  bool validTag(ItemId t, ItemId w) noexcept;
+  bool validItem(ItemId m, ItemId w) noexcept;
   void pruneDominatedEdges() noexcept;
 };
 
@@ -246,7 +246,7 @@ void TagPruner::run() noexcept {
   seedWitnessPairs();
 
   coverBudget = options.maxTagCoverWork;
-  for (NodeId w = 0; w < nReal; w++) {
+  for (ItemId w = 0; w < nReal; w++) {
     if (!seedRow(w))
       continue;
     fixRow(w);
@@ -258,7 +258,7 @@ void TagPruner::run() noexcept {
 
 // Optimized from std::sort + std::unique.
 // Use a bitset when v is large, to avoid O(n log n).
-void TagPruner::sortIds(aw::vector<NodeId> &v) noexcept {
+void TagPruner::sortIds(aw::vector<ItemId> &v) noexcept {
   const size_t n = v.size();
   if (n < 2)
     return;
@@ -269,7 +269,7 @@ void TagPruner::sortIds(aw::vector<NodeId> &v) noexcept {
   }
 
   // Bucket sorting, set bit `x` to 1.
-  for (NodeId x : v)
+  for (ItemId x : v)
     idBits[x >> 6] |= 1ULL << (x & 63);
 
   // Scan through 1's and extract the elements.
@@ -280,7 +280,7 @@ void TagPruner::sortIds(aw::vector<NodeId> &v) noexcept {
       continue;
     idBits[word] = 0;
     do {
-      v[out++] = (NodeId) (word * 64 + std::countr_zero(bits));
+      v[out++] = (ItemId) (word * 64 + std::countr_zero(bits));
       bits &= bits - 1;
     } while (bits != 0);
   }
@@ -294,16 +294,16 @@ void TagPruner::sortIds(aw::vector<NodeId> &v) noexcept {
 // and then merging it linearly is what lets the closure expand one frontier at
 // a time: whatever `dst` already held is dropped here, so the returned frontier
 // is exactly the new pairs of that round.
-aw::vector<NodeId> TagPruner::mergeNewSorted(aw::vector<NodeId> &dst,
-                                             aw::vector<NodeId> &cand) noexcept {
+aw::vector<ItemId> TagPruner::mergeNewSorted(aw::vector<ItemId> &dst,
+                                             aw::vector<ItemId> &cand) noexcept {
   sortIds(cand);
-  aw::vector<NodeId> added;
+  aw::vector<ItemId> added;
   if (cand.empty())
     return added;
   // Every new entry comes from `cand`, so size the result up front.
   added.reserve(cand.size());
 
-  aw::vector<NodeId> merged;
+  aw::vector<ItemId> merged;
   merged.reserve(dst.size() + cand.size());
   size_t i = 0, j = 0;
   while (i < dst.size() && j < cand.size()) {
@@ -336,15 +336,14 @@ aw::vector<NodeId> TagPruner::mergeNewSorted(aw::vector<NodeId> &dst,
 void TagPruner::findSimpleTags() noexcept {
   allowedTags.assign(nItem, 0);
   members.resize(nItem);
-  for (NodeId t = nReal; t < nItem; t++) {
+  for (ItemId t = nReal; t < nItem; t++) {
     const auto recipes = graph.producersOf(t);
     if (recipes.empty())
       continue;
 
-    aw::vector<NodeId> ms;
+    aw::vector<ItemId> ms;
     ms.reserve(recipes.size());
-    for (NodeId recipeNode : recipes) {
-      const uint r = recipeNode - nItem;
+    for (RecipeId r : recipes) {
       const auto inputs = graph.inputsOf(r);
       ms.push_back_unchecked(inputs[0]);
     }
@@ -355,7 +354,7 @@ void TagPruner::findSimpleTags() noexcept {
   }
 
   producible.assign(nItem, 0);
-  for (NodeId m = 0; m < nItem; m++)
+  for (ItemId m = 0; m < nItem; m++)
     if (!graph.producersOf(m).empty())
       producible[m] = 1;
 }
@@ -370,7 +369,7 @@ void TagPruner::findSimpleTags() noexcept {
 void TagPruner::budgetTagUniverse() noexcept {
   aw::vector<uint32_t> order;
   order.reserve(nItem);
-  for (NodeId t = nReal; t < nItem; t++)
+  for (ItemId t = nReal; t < nItem; t++)
     order.push_back_unchecked(t);
 
   std::sort(order.begin(), order.end(), [this](uint32_t a, uint32_t b) noexcept {
@@ -393,17 +392,17 @@ void TagPruner::budgetTagUniverse() noexcept {
 
 void TagPruner::buildMemberIndex() noexcept {
   itemTagOffsets.assign(nReal, 0);
-  for (NodeId t = nReal; t < nItem; t++) {
+  for (ItemId t = nReal; t < nItem; t++) {
     if (allowedTags[t])
-      for (NodeId m : members[t])
+      for (ItemId m : members[t])
         itemTagOffsets[m]++;
   }
   prefixSum(itemTagOffsets);
   itemTagTargets.resize(itemTagOffsets.back());
   aw::vector<uint> cursor(itemTagOffsets.begin(), itemTagOffsets.end() - 1);
-  for (NodeId t = nReal; t < nItem; t++) {
+  for (ItemId t = nReal; t < nItem; t++) {
     if (allowedTags[t])
-      for (NodeId m : members[t])
+      for (ItemId m : members[t])
         itemTagTargets[cursor[m]++] = t;
   }
 }
@@ -414,7 +413,7 @@ void TagPruner::buildConsumerIndex() noexcept {
   // note on BaseCraftingGraph::output.
   tagConsumerOffsets.assign(nItem, 0);
   for (uint r = 0; r < nRecipe && graph.output[r] < nReal; r++) {
-    for (NodeId j : graph.inputsOf(r)) {
+    for (ItemId j : graph.inputsOf(r)) {
       if (j >= nReal && allowedTags[j])
         tagConsumerOffsets[j]++;
     }
@@ -424,8 +423,8 @@ void TagPruner::buildConsumerIndex() noexcept {
   aw::vector<uint> cursor(tagConsumerOffsets.begin(),
                           tagConsumerOffsets.end() - 1);
   for (uint r = 0; r < nRecipe && graph.output[r] < nReal; r++) {
-    const NodeId m = graph.output[r];
-    for (NodeId j : graph.inputsOf(r))
+    const ItemId m = graph.output[r];
+    for (ItemId j : graph.inputsOf(r))
       if (j >= nReal && allowedTags[j])
         tagConsumerTargets[cursor[j]++] = m;
   }
@@ -456,7 +455,7 @@ void TagPruner::buildQualifiedInputs() noexcept {
     const auto weights = graph.inputAmountsOf(r);
     const Amount out = graph.outputAmt[r];
     for (size_t k = 0; k < inputs.size(); k++) {
-      const NodeId j = inputs[k];
+      const ItemId j = inputs[k];
       if (weights[k] >= out && (j < nReal || allowedTags[j]))
         qualInputItems[cursor[r]++] = j;
     }
@@ -470,11 +469,10 @@ void TagPruner::buildQualifiedInputs() noexcept {
 void TagPruner::computeQualifiedInputs() noexcept {
   qualReal.resize(nReal);
   qualTags.resize(nReal);
-  for (NodeId m = 0; m < nReal; m++) {
-    for (NodeId recipeNode : graph.producersOf(m)) {
-      const uint r = recipeNode - nItem;
+  for (ItemId m = 0; m < nReal; m++) {
+    for (RecipeId r : graph.producersOf(m)) {
       for (uint e = qualInputOffsets[r]; e < qualInputOffsets[r + 1]; e++) {
-        const NodeId j = qualInputItems[e];
+        const ItemId j = qualInputItems[e];
         if (j < nReal) {
           // A raw input is gathered, not crafted, so it never requires w.
           if (producible[j])
@@ -494,9 +492,9 @@ void TagPruner::computeUnitOutputs() noexcept {
   if (nonoptimal)
     return;
   unitOutput.assign(nItem, 1);
-  for (NodeId m = 0; m < nReal; m++) {
-    for (NodeId recipeNode : graph.producersOf(m))
-      if (graph.outputAmt[recipeNode - nItem] != 1) {
+  for (ItemId m = 0; m < nReal; m++) {
+    for (RecipeId r : graph.producersOf(m))
+      if (graph.outputAmt[r] != 1) {
         unitOutput[m] = 0;
         break;
       }
@@ -531,20 +529,19 @@ void TagPruner::seedWitnessPairs() noexcept {
   witnessByW.clear();
   witnessByW.resize(nReal);
 
-  aw::vector<NodeId> acc, next, scratch;
+  aw::vector<ItemId> acc, next, scratch;
   uint64_t witnessPairs = 0;
-  for (NodeId m = 0; m < nReal && witnessPairs < options.maxWitnessPairs; m++) {
+  for (ItemId m = 0; m < nReal && witnessPairs < options.maxWitnessPairs; m++) {
     const auto recipes = graph.producersOf(m);
     if (recipes.empty())
       continue;
 
     bool first = true;
     acc.clear();
-    for (NodeId recipeNode : recipes) {
-      const uint r = recipeNode - nItem;
+    for (RecipeId r : recipes) {
       scratch.clear();
       for (uint e = qualInputOffsets[r]; e < qualInputOffsets[r + 1]; e++) {
-        const NodeId j = qualInputItems[e];
+        const ItemId j = qualInputItems[e];
         if (j < nReal)
           scratch.push_back(j);
         else
@@ -561,7 +558,7 @@ void TagPruner::seedWitnessPairs() noexcept {
       if (acc.empty())
         break;
     }
-    for (NodeId w : acc) {
+    for (ItemId w : acc) {
       if (w == m)
         continue;
       witnessByW[w].push_back(m);
@@ -578,17 +575,17 @@ void TagPruner::seedWitnessPairs() noexcept {
 // one-step rule; the tag-pair lookup in validItem then enforces the member
 // restriction for free. In nonoptimal mode the gate is dropped and rowClosure()
 // expands the relation.
-bool TagPruner::seedRow(NodeId w) noexcept {
+bool TagPruner::seedRow(ItemId w) noexcept {
   rowItems.clear();
   rowTags.clear();
 
-  const aw::vector<NodeId> &seeds = witnessByW[w];
+  const aw::vector<ItemId> &seeds = witnessByW[w];
   rowItems.insert(rowItems.end(), seeds.begin(), seeds.end());
   // Support pairs: a tag containing w supports (z, w) for each other member z
   // that is itself crafted.
   for (uint e = itemTagOffsets[w]; e < itemTagOffsets[w + 1]; e++) {
-    const NodeId t = itemTagTargets[e];
-    for (NodeId z : members[t]) {
+    const ItemId t = itemTagTargets[e];
+    for (ItemId z : members[t]) {
       if (z == w || !producible[z])
         continue;
       rowItems.push_back(z);
@@ -599,8 +596,8 @@ bool TagPruner::seedRow(NodeId w) noexcept {
   sortIds(rowItems);
 
   candRow.clear();
-  for (NodeId m : rowItems)
-    for (NodeId j : qualTags[m]) {
+  for (ItemId m : rowItems)
+    for (ItemId j : qualTags[m]) {
       if (!nonoptimal &&
           !std::binary_search(members[j].begin(), members[j].end(), w))
         continue;
@@ -624,26 +621,26 @@ bool TagPruner::seedRow(NodeId w) noexcept {
 // in it. The cap is global but consumed one row at a time, so a row that grows
 // large enough to exhaust it can leave later rows thinner than a global
 // seeding order would; running out only leaves pairs out, so that is safe.
-void TagPruner::rowClosure(NodeId w) noexcept {
+void TagPruner::rowClosure(ItemId w) noexcept {
   uint64_t total = prunePairs + rowItems.size() + rowTags.size();
-  aw::vector<NodeId> frontierItems = rowItems;
-  aw::vector<NodeId> frontierTags = rowTags;
+  aw::vector<ItemId> frontierItems = rowItems;
+  aw::vector<ItemId> frontierTags = rowTags;
   while ((!frontierItems.empty() || !frontierTags.empty()) &&
          total < options.maxPrunePairs) {
     candRow.clear();
-    for (NodeId m : frontierItems)
-      for (NodeId j : qualTags[m]) {
+    for (ItemId m : frontierItems)
+      for (ItemId j : qualTags[m]) {
         if (total + candRow.size() >= options.maxPrunePairs)
           break;
         candRow.push_back(j);
       }
-    const aw::vector<NodeId> newTags = mergeNewSorted(rowTags, candRow);
+    const aw::vector<ItemId> newTags = mergeNewSorted(rowTags, candRow);
     total += newTags.size();
 
     candRow.clear();
     // A tag has to dominate w through all of its producible members.
-    for (NodeId j : frontierTags)
-      for (NodeId z : members[j]) {
+    for (ItemId j : frontierTags)
+      for (ItemId z : members[j]) {
         if (z == w || !producible[z])
           continue;
         if (total + candRow.size() >= options.maxPrunePairs)
@@ -653,15 +650,15 @@ void TagPruner::rowClosure(NodeId w) noexcept {
     // A real item m is dominated by w when its input j is; a raw input is
     // gathered rather than crafted, so it never requires w and is skipped by
     // the `producible` precomputation above.
-    for (NodeId m : frontierItems)
-      for (NodeId j : qualReal[m]) {
+    for (ItemId m : frontierItems)
+      for (ItemId j : qualReal[m]) {
         if (j == w)
           continue;
         if (total + candRow.size() >= options.maxPrunePairs)
           break;
         candRow.push_back(j);
       }
-    const aw::vector<NodeId> newItems =
+    const aw::vector<ItemId> newItems =
         mergeNewSorted(rowItems, candRow);
     total += newItems.size();
     frontierItems = newItems;
@@ -676,22 +673,22 @@ void TagPruner::rowClosure(NodeId w) noexcept {
 // questions the fixpoint asks about it: is it in the row, is it still alive,
 // is it queued. See rowState.
 void TagPruner::beginRow() noexcept {
-  for (NodeId x : rowX)
+  for (ItemId x : rowX)
     rowState[x] = ROW_IN | ROW_ALIVE;
 }
 
 void TagPruner::endRow() noexcept {
-  for (NodeId x : rowX)
+  for (ItemId x : rowX)
     rowState[x] = 0;
 }
 
-bool TagPruner::rowAliveOf(NodeId x) const noexcept {
+bool TagPruner::rowAliveOf(ItemId x) const noexcept {
   return (rowState[x] & ROW_ALIVE) != 0;
 }
 
 // Consumes up to `need` units of `item` from `pool`, and returns what is still missing.
 // The sizes are always small (mostly 1 item each), so we use a linear scan.
-Amount consume(aw::vector<std::pair<NodeId, Amount>> &pool, NodeId item,
+Amount consume(aw::vector<std::pair<ItemId, Amount>> &pool, ItemId item,
                Amount need) noexcept {
   for (auto &p : pool) {
     if (p.first != item)
@@ -724,12 +721,12 @@ bool TagPruner::covers(uint s, uint r) noexcept {
   const auto si = graph.inputsOf(s);
   const auto sw = graph.inputAmountsOf(s);
   for (size_t j = 0; j < si.size(); j++) {
-    const NodeId h = si[j];
+    const ItemId h = si[j];
 
     // An exact row first, so a tag consumed atomically matches itself.
     Amount need = consume(cap, h, sw[j]);
     if (need > 0 && h >= nReal && allowedTags[h]) {
-      for (NodeId z : members[h]) {
+      for (ItemId z : members[h]) {
         if (need <= 0)
           break;
         need = consume(cap, z, need);
@@ -741,9 +738,9 @@ bool TagPruner::covers(uint s, uint r) noexcept {
   return true;
 }
 
-bool TagPruner::colCover(uint r, NodeId w) noexcept {
-  for (NodeId sNode : graph.producersOf(w))
-    if (covers(sNode - nItem, r))
+bool TagPruner::colCover(uint r, ItemId w) noexcept {
+  for (RecipeId s : graph.producersOf(w))
+    if (covers(s, r))
       return true;
   return false;
 }
@@ -751,8 +748,8 @@ bool TagPruner::colCover(uint r, NodeId w) noexcept {
 // A tag pair (t, w) holds when every producible member of t is dominated by
 // w. A member with no recipe is gathered directly, so it never requires w and
 // it blocks the gate: it has no pair, so the lookup fails.
-bool TagPruner::validTag(NodeId t, NodeId w) noexcept {
-  for (NodeId z : members[t]) {
+bool TagPruner::validTag(ItemId t, ItemId w) noexcept {
+  for (ItemId z : members[t]) {
     if (z == w)
       continue;
     if (!rowAliveOf(z))
@@ -765,12 +762,11 @@ bool TagPruner::validTag(NodeId t, NodeId w) noexcept {
 // amount-qualified input that is w itself, an item pair in turn dominated by
 // w, or a tag pair dominated by w. The column-cover rule is the same escape
 // hatch as before.
-bool TagPruner::validItem(NodeId m, NodeId w) noexcept {
-  for (NodeId recipeNode : graph.producersOf(m)) {
-    const uint r = recipeNode - nItem;
+bool TagPruner::validItem(ItemId m, ItemId w) noexcept {
+  for (RecipeId r : graph.producersOf(m)) {
     bool ok = false;
     for (uint e = qualInputOffsets[r]; e < qualInputOffsets[r + 1]; e++) {
-      const NodeId j = qualInputItems[e];
+      const ItemId j = qualInputItems[e];
       // Consuming w itself is the strongest justification, and it holds even
       // for a gathered w, which never carries a pair of its own.
       if (j == w) {
@@ -802,12 +798,12 @@ bool TagPruner::validItem(NodeId m, NodeId w) noexcept {
 // The witness never changes during any of those steps, so the rows are
 // independent and fixRow() solves exactly one of them. That is what lets the
 // pair set of the row be built on demand and dropped afterwards.
-void TagPruner::fixRow(NodeId w) noexcept {
+void TagPruner::fixRow(ItemId w) noexcept {
   beginRow();
   const uint k = (uint) rowX.size();
   rowQueue.resize(k);
   size_t head = 0, tail = 0, pending = 0;
-  auto push = [&](NodeId x) noexcept {
+  auto push = [&](ItemId x) noexcept {
     if (rowState[x] & ROW_QUEUED)
       return;
     rowState[x] |= ROW_QUEUED;
@@ -817,11 +813,11 @@ void TagPruner::fixRow(NodeId w) noexcept {
       tail = 0;
     pending++;
   };
-  for (NodeId x : rowX)
+  for (ItemId x : rowX)
     push(x);
 
   while (pending != 0) {
-    const NodeId x = rowQueue[head];
+    const ItemId x = rowQueue[head];
     head++;
     if (head == k)
       head = 0;
@@ -861,7 +857,7 @@ void TagPruner::fixRow(NodeId w) noexcept {
 void TagPruner::allocateTagAdjacency() noexcept {
   tagAdjOffsets.assign(nItem + 1, 0);
   uint64_t total = 0;
-  for (NodeId t = nReal; t < nItem; t++) {
+  for (ItemId t = nReal; t < nItem; t++) {
     tagAdjOffsets[t] = (uint) total;
     if (!allowedTags[t] || members[t].size() < 2)
       continue;
@@ -872,10 +868,10 @@ void TagPruner::allocateTagAdjacency() noexcept {
   tagAdjBits.assign(total, 0);
 }
 
-void TagPruner::recordRowScc(NodeId w) noexcept {
+void TagPruner::recordRowScc(ItemId w) noexcept {
   for (uint e = itemTagOffsets[w]; e < itemTagOffsets[w + 1]; e++) {
-    const NodeId t = itemTagTargets[e];
-    const aw::vector<NodeId> &ms = members[t];
+    const ItemId t = itemTagTargets[e];
+    const aw::vector<ItemId> &ms = members[t];
     const size_t k = ms.size();
     if (k < 2)
       continue;
@@ -887,7 +883,7 @@ void TagPruner::recordRowScc(NodeId w) noexcept {
     for (size_t a = 0; a < k; a++) {
       if (a == b)
         continue;
-      const NodeId z = ms[a];
+      const ItemId z = ms[a];
       // Only crafted members carry a pair, hence an edge.
       if (!producible[z] || !rowAliveOf(z))
         continue;
@@ -905,10 +901,10 @@ void TagPruner::pruneDominatedEdges() noexcept {
   aw::vector<int32_t> comp;
   aw::vector<uint32_t> repOfComp;
   aw::vector<uint8_t> keep;
-  for (NodeId t = nReal; t < nItem; t++) {
+  for (ItemId t = nReal; t < nItem; t++) {
     if (!allowedTags[t])
       continue;
-    const aw::vector<NodeId> &ms = members[t];
+    const aw::vector<ItemId> &ms = members[t];
     const size_t k = ms.size();
     if (k < 2)
       continue;
@@ -943,14 +939,13 @@ void TagPruner::pruneDominatedEdges() noexcept {
     for (uint32_t a = 0; a < k; a++) {
       if (keep[a])
         continue;
-      const NodeId m = ms[a];
+      const ItemId m = ms[a];
       // A batched member keeps its tag edge: the batch surplus would otherwise
       // be a free way to satisfy T, and dropping the edge costs real steps.
       // Nonoptimal mode waives the guard, see above.
       if (!nonoptimal && !unitOutput[m])
         continue;
-      for (NodeId recipeNode : graph.producersOf(t)) {
-        const uint r = recipeNode - nItem;
+      for (RecipeId r : graph.producersOf(t)) {
         const auto inputs = graph.inputsOf(r);
         if (inputs.size() == 1 && inputs[0] == m)
           graph.tagEdgeDominated[r] = 1;

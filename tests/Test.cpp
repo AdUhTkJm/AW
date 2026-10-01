@@ -1285,7 +1285,7 @@ void testPlan() {
     aw::vector<aw::Amount> inventory(graph.nItem, 0);
     inventory[0] = 1;  // item 1
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
-    const aw::NodeId target = sub.translate(0);
+    const aw::ItemId target = sub.translate(0);
     expect(target == 0, "target is found in the subgraph");
     expect(sub.translate(99) == UINT32_MAX, "missing item reports no index");
     const aw::PlanResult seeded = aw::planCrafting(sub, target, 4, inventory);
@@ -1321,7 +1321,7 @@ void testFireability() {
     aw::vector<aw::Amount> inventory(2, 0);
     inventory[0] = 1;  // one S
     const aw::Subgraph sub = aw::reachableSubgraph(2, all, inventory);
-    const aw::NodeId target = sub.translate(1);  // handle 2 (C)
+    const aw::ItemId target = sub.translate(1);  // handle 2 (C)
     expect(target != UINT32_MAX, "the target is in the subgraph");
     const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
     expect(r.status == aw::PlanStatus::CYCLE_UNFULFILLED,
@@ -1349,7 +1349,7 @@ void testFireability() {
     aw::vector<aw::Amount> inventory(graph.nItem, 0);
     inventory[0] = 10;  // handle 1 (L)
     const aw::Subgraph sub = aw::reachableSubgraph(4, stations, inventory);
-    const aw::NodeId target = sub.translate(3);  // handle 4 (T)
+    const aw::ItemId target = sub.translate(3);  // handle 4 (T)
     expect(target != UINT32_MAX, "the retry target is in the subgraph");
     expect(sub.graph.nRecipe == 4, "the retry sample keeps every route");
 
@@ -1390,7 +1390,7 @@ void testFireability() {
     inventory[0] = 10;     // handle 1 (L)
     inventory[2] = 1000;   // handle 3 (L2)
     const aw::Subgraph sub = aw::reachableSubgraph(4, stations, inventory);
-    const aw::NodeId target = sub.translate(3);  // handle 4 (T)
+    const aw::ItemId target = sub.translate(3);  // handle 4 (T)
     expect(target != UINT32_MAX, "the barrier target is in the subgraph");
     expect(sub.graph.nRecipe == 3, "the barrier sample keeps every route");
 
@@ -1426,7 +1426,7 @@ void testPlanInfeasible() {
   aw::options.satellite.enabled = true;
   expect(sub.graph.nItem == 2 && sub.graph.nRecipe == 1, "leaf subgraph shape");
 
-  const aw::NodeId target = sub.translate(0);
+  const aw::ItemId target = sub.translate(0);
   const aw::PlanResult r = aw::planCrafting(sub, target, 4, {});
   expect(r.status == aw::PlanStatus::INFEASIBLE, "missing leaf makes the plan infeasible");
 }
@@ -1443,8 +1443,8 @@ void testDuplicateRecipes() {
 
   // The survivor keeps rA's id (0) and order, and gains rB's workstations.
   const auto recipes = graph.producersOf(0);
-  expect(recipes.size() == 3 && recipes[0] == graph.nItem &&
-         recipes[1] == graph.nItem + 1 && recipes[2] == graph.nItem + 2,
+  expect(recipes.size() == 3 && recipes[0] == 0 && recipes[1] == 1 &&
+         recipes[2] == 2,
          "surviving recipes keep their file order");
   const auto ws = graph.workstations.targetsOf(0);
   expect(ws.size() == 3 && ws[0] == 0 && ws[1] == 1 && ws[2] == 2,
@@ -1491,15 +1491,14 @@ void testSample() {
   expect(graph.nRecipe == 2, "recipeCount");
   expect(!graph.isRealItem(2), "handle 3 is a pseudo-resource");
   expect(graph.isRealItem(0) && graph.isRealItem(1), "handles 1 and 2 are real");
-  expect(graph.recipeNode(0) == 3 && graph.recipeNode(1) == 4, "recipe node numbering");
 
   const auto itemTargets = graph.producersOf(0);
-  expect(itemTargets.size() == 1 && itemTargets[0] == 3, "item 1 -> recipe 0");
+  expect(itemTargets.size() == 1 && itemTargets[0] == 0, "item 1 -> recipe 0");
   const auto itemWeights = graph.producedAmountsOf(0);
   expect(itemWeights.size() == 1 && itemWeights[0] == 1, "item 1 edge weights");
   expect(graph.producersOf(1).empty(), "item 2 has no producing recipe");
   const auto pseudo = graph.producersOf(2);
-  expect(pseudo.size() == 1 && pseudo[0] == 4, "item 3 -> recipe 1");
+  expect(pseudo.size() == 1 && pseudo[0] == 1, "item 3 -> recipe 1");
 
   const auto r0Targets = graph.inputsOf(0);
   expect(r0Targets.size() == 1 && r0Targets[0] == 1, "recipe 0 input is item 2");
@@ -1652,7 +1651,7 @@ void testReachability() {
   // Kept items are the output (0), the pseudo (4) and the pseudo's reachable
   // member (1)
   expect(sub.graph.nItem == 3 && sub.graph.nReal == 2, "subgraph item counts");
-  const aw::NodeId items[] = {0, 1, 4};
+  const aw::ItemId items[] = {0, 1, 4};
   for (int i = 0; i < 3; i++)
     expect(sub.itemOrigin[i] == items[i], "itemOrigin is ascending");
   expect(!sub.graph.isRealItem(3), "the renumbered pseudo is not a real item");
@@ -1672,9 +1671,8 @@ void testReachability() {
   // The pseudo's synthetic recipes need no workstation and are always kept.
   expect(sub.graph.output[1] == 2 && sub.graph.output[2] == 2, "synthetic outputs");
   const auto pseudoRecipes = sub.graph.producersOf(2);
-  expect(pseudoRecipes.size() == 2 &&
-         pseudoRecipes[0] == sub.graph.nItem + 1 &&
-         pseudoRecipes[1] == sub.graph.nItem + 2,
+  expect(pseudoRecipes.size() == 2 && pseudoRecipes[0] == 1 &&
+         pseudoRecipes[1] == 2,
          "the pseudo expands to both synthetic recipes");
 
   // With nothing allowed, no real recipe survives and only the output remains.
@@ -1695,18 +1693,18 @@ void testReachability() {
             sub.graph.r2i.offsets.size() == sub.graph.nRecipe + 1 &&
             sub.graph.output.size() == sub.graph.nRecipe;
   for (uint32_t i = 0; ok && i < sub.graph.nItem; i++)
-    for (aw::NodeId target : sub.graph.producersOf(i))
-      if (target < sub.graph.nItem || target >= sub.graph.nItem + sub.graph.nRecipe)
+    for (aw::RecipeId target : sub.graph.producersOf(i))
+      if (target >= sub.graph.nRecipe)
         ok = false;
   for (uint32_t r = 0; ok && r < sub.graph.nRecipe; ++r) {
     if (sub.graph.output[r] >= sub.graph.nItem)
       ok = false;
-    for (aw::NodeId target : sub.graph.inputsOf(r))
+    for (aw::ItemId target : sub.graph.inputsOf(r))
       if (target >= sub.graph.nItem)
         ok = false;
     bool listed = false;
-    for (aw::NodeId target : sub.graph.producersOf(sub.graph.output[r]))
-      if (target == sub.graph.nItem + r)
+    for (aw::RecipeId target : sub.graph.producersOf(sub.graph.output[r]))
+      if (target == r)
         listed = true;
     if (!listed)
       ok = false;
@@ -1845,7 +1843,7 @@ void testRejectsBadInput() {
   expect(graph.nReal == 2 && graph.nItem == 3 && graph.nRecipe == 2,
          "rejected blob leaves the previous graph in place");
   const auto itemTargets = graph.producersOf(0);
-  expect(itemTargets.size() == 1 && itemTargets[0] == 3,
+  expect(itemTargets.size() == 1 && itemTargets[0] == 0,
          "previous graph is still coherent after a rejected blob");
 
   // A failure must not poison the next attempt with a stale error.
@@ -1878,7 +1876,7 @@ void testTagPruning() {
   const aw::Handle all[] = {1, 2, 3, 4, 5};
   const uint32_t nItem = aw::getCraftingGraph().nItem;
   auto keepsStainedEdge = [](const aw::Subgraph &sub) {
-    for (aw::NodeId recipe : sub.recipeOrigin)
+    for (aw::ItemId recipe : sub.recipeOrigin)
       if (recipe == 3)
         return true;
     return false;
@@ -2007,14 +2005,14 @@ void testTagPruningParity() {
 
   // Leaves are free only via inventory, so stock every item with no recipe.
   aw::vector<aw::Amount> inventory(graph.nItem, 0);
-  for (aw::NodeId m = 0; m < graph.nReal; m++)
+  for (aw::ItemId m = 0; m < graph.nReal; m++)
     if (graph.producersOf(m).empty())
       inventory[m] = 1000000000ULL;
 
   auto plan = [&](bool prune) {
     aw::options.tagPruning = prune;
     const aw::Subgraph sub = aw::reachableSubgraph(5, all, inventory);
-    const aw::NodeId target = sub.translate(4);
+    const aw::ItemId target = sub.translate(4);
     const aw::PlanResult r = aw::planCrafting(sub, target, 16, inventory);
     int64_t total = 0;
     for (int64_t x : r.exec)
@@ -2043,8 +2041,7 @@ void testTagBatchingGuard() {
   // `T <- m`: T is pseudo handle 5, m is handle 3. It has to stay flagged as
   // undominated, because m's only recipe emits four units at a time.
   bool batchedEdgeKept = false;
-  for (aw::NodeId recipeNode : graph.producersOf(4)) {
-    const uint32_t r = recipeNode - graph.nItem;
+  for (aw::RecipeId r : graph.producersOf(4)) {
     const auto inputs = graph.inputsOf(r);
     if (inputs.size() == 1 && inputs[0] == 2)
       batchedEdgeKept = graph.tagEdgeDominated[r] == 0;
@@ -2063,7 +2060,7 @@ void testTagBatchingGuard() {
     aw::options.seedPruning = false;
     const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
     aw::options.seedPruning = true;
-    const aw::NodeId target = sub.translate(3);
+    const aw::ItemId target = sub.translate(3);
     const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
     int64_t real = 0;
     if (r.status == aw::PlanStatus::OK)
@@ -2100,8 +2097,7 @@ void testNonoptimal() {
   {
     const aw::CraftingGraph &graph = aw::getCraftingGraph();
     bool batchedEdgeDominated = false;
-    for (aw::NodeId recipeNode : graph.producersOf(4)) {
-      const uint32_t r = recipeNode - graph.nItem;
+    for (aw::RecipeId r : graph.producersOf(4)) {
       const auto inputs = graph.inputsOf(r);
       if (inputs.size() == 1 && inputs[0] == 2)
         batchedEdgeDominated = graph.tagEdgeDominated[r] == 1;
@@ -2112,7 +2108,7 @@ void testNonoptimal() {
     aw::options.seedPruning = false;
     const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
     aw::options.seedPruning = true;
-    const aw::NodeId target = sub.translate(3);
+    const aw::ItemId target = sub.translate(3);
     const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
     // The relaxed pass still drops the tag edge, but the sample is an unseeded
     // cycle, so the net-balanced plan is rejected instead of reported feasible.
@@ -2208,12 +2204,12 @@ void testTagInlining() {
     aw::registerCraftingGraph(buildGlassSample());
     const aw::CraftingGraph &graph = aw::getCraftingGraph();
     aw::vector<aw::Amount> inventory(graph.nItem, 0);
-    for (aw::NodeId m = 0; m < graph.nReal; m++)
+    for (aw::ItemId m = 0; m < graph.nReal; m++)
       if (graph.producersOf(m).empty())
         inventory[m] = 1000000000ULL;
     inventory[1] = stainedStock;  // handle 2: stained glass, the dominated member
     const aw::Subgraph sub = aw::reachableSubgraph(5, all, inventory);
-    const aw::NodeId target = sub.translate(4);
+    const aw::ItemId target = sub.translate(4);
     const aw::PlanResult r = aw::planCrafting(sub, target, 16, inventory);
     int64_t real = 0;
     if (r.status == aw::PlanStatus::OK)
@@ -2325,7 +2321,7 @@ void testFreeTagObjective() {
   inventory[1] = 1000000000ULL;  // m2
 
   const aw::Subgraph sub = aw::reachableSubgraph(6, all, inventory);
-  const aw::NodeId target = sub.translate(5);
+  const aw::ItemId target = sub.translate(5);
   const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
 
   expect(r.status == aw::PlanStatus::OK, "free tag plan is feasible");
@@ -2385,11 +2381,11 @@ void testRecipePruning() {
     inventory[0] = 10;  // black_candle
     const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
     bool kept = false;
-    for (aw::NodeId r : sub.recipeOrigin)
+    for (aw::ItemId r : sub.recipeOrigin)
       if (r == 5)
         kept = true;
     expect(kept, "stocking the guard input keeps the dominated recipe");
-    const aw::NodeId target = sub.translate(3);
+    const aw::ItemId target = sub.translate(3);
     const aw::PlanResult r = aw::planCrafting(sub, target, 224, inventory);
     expect(r.status == aw::PlanStatus::OK, "a stocked guard still plans");
   }
@@ -2406,7 +2402,7 @@ void testRecipePruning() {
     aw::options.satellite.enabled = true;
     aw::options.recipePruning = true;
     bool kept = false;
-    for (aw::NodeId r : sub.recipeOrigin)
+    for (aw::ItemId r : sub.recipeOrigin)
       if (r == 5)
         kept = true;
     expect(kept, "disabling recipe pruning keeps every recipe");
@@ -2453,7 +2449,7 @@ void testRecipePruning() {
   {
     const aw::CraftingGraph &graph = aw::getCraftingGraph();
     bool hasB = false;
-    for (aw::NodeId station : graph.recipeDominatorWorkstations[0])
+    for (aw::ItemId station : graph.recipeDominatorWorkstations[0])
       if (station == 4)  // handle 5 = WS_B, the only station of S
         hasB = true;
     expect(hasB, "the dominator workstations record S's station");
@@ -2482,7 +2478,7 @@ void testRecipePruningWorkstations() {
   // workstation-subset gate never allowed.
   auto keepsR = [&](std::span<const aw::Handle> ws) {
     const aw::Subgraph sub = aw::reachableSubgraph(1, ws, inventory);
-    for (aw::NodeId r : sub.recipeOrigin)
+    for (aw::ItemId r : sub.recipeOrigin)
       if (r == 0)
         return true;
     return false;
@@ -2493,7 +2489,7 @@ void testRecipePruningWorkstations() {
   auto plan = [&](bool prune, std::span<const aw::Handle> ws) {
     aw::options.recipePruning = prune;
     const aw::Subgraph sub = aw::reachableSubgraph(1, ws, inventory);
-    const aw::NodeId target = sub.translate(0);
+    const aw::ItemId target = sub.translate(0);
     const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
     int64_t total = 0;
     for (int64_t x : r.exec)
@@ -2523,14 +2519,14 @@ void testRecipeDominatorWorkstations() {
   {
     // WS_B is handle 8 -> node 7 and WS_C is handle 9 -> node 8. Both sink
     // representatives contribute, so either station alone can drop R.
-    const aw::vector<aw::NodeId> want = {7, 8};
+    const aw::vector<aw::ItemId> want = {7, 8};
     expect(graph.recipeDominatorWorkstations[0] == want,
            "both dominators contribute their stations");
   }
 
   // Leaves are free only through inventory.
   aw::vector<aw::Amount> inventory(graph.nItem, 0);
-  for (aw::NodeId m = 0; m < graph.nReal; m++)
+  for (aw::ItemId m = 0; m < graph.nReal; m++)
     if (graph.producersOf(m).empty())
       inventory[m] = 1000000000LL;
 
@@ -2540,7 +2536,7 @@ void testRecipeDominatorWorkstations() {
 
   auto keepsR = [&](std::span<const aw::Handle> ws) {
     const aw::Subgraph sub = aw::reachableSubgraph(1, ws, inventory);
-    for (aw::NodeId r : sub.recipeOrigin)
+    for (aw::ItemId r : sub.recipeOrigin)
       if (r == 0)
         return true;
     return false;
@@ -2552,7 +2548,7 @@ void testRecipeDominatorWorkstations() {
   auto plan = [&](bool prune, std::span<const aw::Handle> ws) {
     aw::options.recipePruning = prune;
     const aw::Subgraph sub = aw::reachableSubgraph(1, ws, inventory);
-    const aw::NodeId target = sub.translate(0);
+    const aw::ItemId target = sub.translate(0);
     const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
     int64_t total = 0;
     for (int64_t x : r.exec)
@@ -2579,14 +2575,14 @@ void testRecipePruningParity() {
 
   // Leaves (handles 5 and 6) are free only through inventory.
   aw::vector<aw::Amount> inventory(graph.nItem, 0);
-  for (aw::NodeId m = 0; m < graph.nReal; m++)
+  for (aw::ItemId m = 0; m < graph.nReal; m++)
     if (graph.producersOf(m).empty())
       inventory[m] = 1000000000LL;
 
   auto plan = [&](bool prune, aw::Amount amount) {
     aw::options.recipePruning = prune;
     const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
-    const aw::NodeId target = sub.translate(3);
+    const aw::ItemId target = sub.translate(3);
     const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
     int64_t total = 0;
     for (int64_t x : r.exec)
@@ -2621,7 +2617,7 @@ void testDirectDominancePruning() {
     expect(graph.recipeDirectDominated[1] == 0, "the maximal column survives");
     expect(graph.recipeDominated[0] == 0 && graph.recipeDominated[1] == 0,
            "the composite pass cannot see this pair");
-    const aw::vector<aw::NodeId> want = {4};  // node 4 = handle 5 = WS_B
+    const aw::vector<aw::ItemId> want = {4};  // node 4 = handle 5 = WS_B
     expect(graph.recipeDirectDominatorWorkstations[0] == want,
            "the dominator's workstation is recorded");
   }
@@ -2649,7 +2645,7 @@ void testDirectDominancePruning() {
   auto plan = [&](bool prune, std::span<const aw::Handle> ws, aw::Amount amount) {
     aw::options.directPruning = prune;
     const aw::Subgraph sub = aw::reachableSubgraph(1, ws, inventory);
-    const aw::NodeId target = sub.translate(0);
+    const aw::ItemId target = sub.translate(0);
     const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
     int64_t total = 0;
     for (int64_t x : r.exec)
@@ -2683,10 +2679,10 @@ void testSubstitutionPruning() {
            "one substitution flag per recipe");
     expect(graph.recipeSubstituted[0] == 1, "X <- T is substituted");
     expect(graph.recipeSubstituted[1] == 0, "the dominator survives");
-    const aw::vector<aw::NodeId> guards = {1, 2};  // A, B
+    const aw::vector<aw::ItemId> guards = {1, 2};  // A, B
     expect(graph.recipeSubstitutedGuards[0] == guards,
            "the tag expands into its members for the stock guard");
-    const aw::vector<aw::NodeId> ws = {5};  // WS
+    const aw::vector<aw::ItemId> ws = {5};  // WS
     expect(graph.recipeSubstitutedDominatorWorkstations[0] == ws,
            "the dominator's workstation is recorded");
   }
@@ -2718,21 +2714,21 @@ void testSubstitutionPruning() {
   expect(aw::getCraftingGraph().recipeSubstituted[0] == 1,
          "a real input that costs w is substituted");
   expect(aw::getCraftingGraph().recipeSubstitutedGuards[0] ==
-             aw::vector<aw::NodeId>{1},
+             aw::vector<aw::ItemId>{1},
          "the real input is its own guard");
 
   // Substitution preserves the optimum: leaves are free only through stock.
   aw::registerCraftingGraph(buildSubstitutionSample());
   const aw::CraftingGraph &g = aw::getCraftingGraph();
   aw::vector<aw::Amount> inv(g.nItem, 0);
-  for (aw::NodeId m = 0; m < g.nReal; m++)
+  for (aw::ItemId m = 0; m < g.nReal; m++)
     if (g.producersOf(m).empty())
       inv[m] = 1000000000LL;
   auto plan = [&](bool prune, aw::Amount amount) {
     aw::options.substitutionPruning = prune;
     const aw::Handle all[] = {1, 2, 3, 4, 5, 6, 7, 8};
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inv);
-    const aw::NodeId target = sub.translate(0);
+    const aw::ItemId target = sub.translate(0);
     const aw::PlanResult r = aw::planCrafting(sub, target, amount, inv);
     int64_t total = 0;
     for (int64_t x : r.exec)
@@ -2756,7 +2752,7 @@ void testReducedCostParity() {
 
   // Leaves are free only through inventory.
   aw::vector<aw::Amount> inventory(graph.nItem, 0);
-  for (aw::NodeId m = 0; m < graph.nReal; m++)
+  for (aw::ItemId m = 0; m < graph.nReal; m++)
     if (graph.producersOf(m).empty())
       inventory[m] = 1000000000LL;
 
@@ -2764,7 +2760,7 @@ void testReducedCostParity() {
     aw::solver::Options options;
     options.reducedCostGap = gap;
     const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
-    const aw::NodeId target = sub.translate(3);
+    const aw::ItemId target = sub.translate(3);
     const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory, options);
     int64_t total = 0;
     for (int64_t x : r.exec)
@@ -2784,7 +2780,7 @@ void testReducedCostParity() {
 }
 
 bool subgraphHasRecipe(const aw::Subgraph &sub, uint32_t source) {
-  for (aw::NodeId r : sub.recipeOrigin)
+  for (aw::ItemId r : sub.recipeOrigin)
     if (r == source)
       return true;
   return false;
@@ -2879,7 +2875,7 @@ void testPackPruningParity() {
       inventory[0] = 1000000;  // ingot
       inventory[1] = 1000000;  // stick
       const aw::Subgraph sub = aw::reachableSubgraph(3, all, inventory);
-      const aw::NodeId target = sub.translate(2);
+      const aw::ItemId target = sub.translate(2);
       const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
       return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
     };
@@ -2909,7 +2905,7 @@ void testPackPruningParity() {
       inventory[2] = 1000000;  // B
       inventory[3] = 1000000;  // C
       const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
-      const aw::NodeId target = sub.translate(0);
+      const aw::ItemId target = sub.translate(0);
       const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
       return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
     };
@@ -2930,11 +2926,11 @@ void testPackPruningParity() {
       const aw::Handle all[] = {1, 2, 3, 4, 5, 6};
       const aw::CraftingGraph &graph = aw::getCraftingGraph();
       aw::vector<aw::Amount> inventory(graph.nItem, 0);
-      for (aw::NodeId m = 0; m < graph.nReal; m++)
+      for (aw::ItemId m = 0; m < graph.nReal; m++)
         if (graph.producersOf(m).empty())
           inventory[m] = 1000000000LL;
       const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
-      const aw::NodeId target = sub.translate(3);
+      const aw::ItemId target = sub.translate(3);
       const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
       return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
     };
@@ -3104,7 +3100,7 @@ void testSatellitePruningParity() {
       inventory[3] = oreStock;
       inventory[2] = variantStock;
       const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
-      const aw::NodeId target = sub.translate(0);
+      const aw::ItemId target = sub.translate(0);
       const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
       return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
     };
@@ -3135,7 +3131,7 @@ void testSatellitePruningParity() {
       inventory[3] = 10;      // handle 4, item node 3 (X, the shared input)
       inventory[5] = eStock;  // handle 6, item node 5 (E)
       const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
-      const aw::NodeId target = sub.translate(0);
+      const aw::ItemId target = sub.translate(0);
       const aw::PlanResult r = aw::planCrafting(sub, target, amount, inventory);
       return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
     };
@@ -3156,7 +3152,7 @@ void testSatellitePruningParity() {
 
 // Recomputes the balance `planCrafting` hands the solver and returns whether
 // `exec` satisfies it. Mirrors `deriveMissing` in tools/Bench.cpp.
-bool greedyBalances(const aw::Subgraph &sub, aw::NodeId target, aw::Amount amount,
+bool greedyBalances(const aw::Subgraph &sub, aw::ItemId target, aw::Amount amount,
                     const aw::vector<aw::Amount> &inventory,
                     const aw::vector<int64_t> &exec) {
   const aw::BaseCraftingGraph &g = sub.graph;
@@ -3172,7 +3168,7 @@ bool greedyBalances(const aw::Subgraph &sub, aw::NodeId target, aw::Amount amoun
       balance[inputs[k]] -= (aw::int128) weights[k] * times;
   }
   for (uint32_t i = 0; i < g.nItem; i++) {
-    const aw::NodeId source = sub.itemOrigin[i];
+    const aw::ItemId source = sub.itemOrigin[i];
     const aw::Amount available = source < inventory.size() ? inventory[source] : 0;
     const aw::int128 required = i == target ? (aw::int128) amount : -(aw::int128) available;
     if (balance[i] < required)
@@ -3191,7 +3187,7 @@ void testGreedyDag() {
   {
     const aw::Handle all[] = {1, 2};
     const aw::Subgraph sub = aw::reachableSubgraph(1, all);
-    const aw::NodeId target = sub.translate(0);
+    const aw::ItemId target = sub.translate(0);
     const aw::vector<int64_t> exec = aw::greedyDagPlan(sub, target, 7, {});
     expect(!exec.empty(), "greedy finds a zero-input route");
     expect(exec.size() == sub.graph.nRecipe, "greedy result has one count per recipe");
@@ -3212,7 +3208,7 @@ void testGreedyDag() {
   {
     const aw::Handle all[] = {1, 2};
     const aw::Subgraph sub = aw::reachableSubgraph(1, all);
-    const aw::NodeId target = sub.translate(0);
+    const aw::ItemId target = sub.translate(0);
     expect(aw::greedyDagPlan(sub, target, 4, {}).empty(), "greedy declines an unseeded cycle");
   }
 
@@ -3225,7 +3221,7 @@ void testGreedyDag() {
     const aw::Handle all[] = {1};
     const aw::Subgraph sub = aw::reachableSubgraph(1, all);
     aw::options.satellite.enabled = true;
-    const aw::NodeId target = sub.translate(0);
+    const aw::ItemId target = sub.translate(0);
     expect(aw::greedyDagPlan(sub, target, 4, {}).empty(), "greedy declines a missing leaf");
     expect(aw::planCrafting(sub, target, 4, {}).status == aw::PlanStatus::INFEASIBLE,
            "planner still reports the missing leaf");
@@ -3255,7 +3251,7 @@ void testGreedyDag() {
     aw::options.satellite.enabled = false;
     const aw::Handle all[] = {1};
     const aw::Subgraph sub = aw::reachableSubgraph(1072, all);
-    const aw::NodeId target = sub.translate(1072 - 1);
+    const aw::ItemId target = sub.translate(1072 - 1);
     const aw::vector<int64_t> exec = aw::greedyDagPlan(sub, target, 1, {});
     expect(!exec.empty(), "ranked cut finds a plan the DFS cut alone loses");
     if (!exec.empty())

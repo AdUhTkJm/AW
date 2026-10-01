@@ -40,7 +40,8 @@ namespace {
 using aw::Amount;
 using aw::BaseCraftingGraph;
 using aw::Handle;
-using aw::NodeId;
+using aw::ItemId;
+using aw::RecipeId;
 
 struct Target {
   Handle handle = 0;
@@ -178,9 +179,9 @@ struct Decompose {
   uint32_t fringeTagRecipes = 0, bigTagRecipes = 0;
 };
 
-// Iterative Tarjan over the bipartite subgraph. Node ids are items 0..nItem-1
-// followed by recipes nItem..nItem+nRecipe-1, which is already the numbering
-// `Subgraph::graph` uses in its adjacency rows.
+// Iterative Tarjan over the bipartite subgraph. The combined vertex id is the
+// item id for an item and nItem + recipe for a recipe. The i2r rows carry plain
+// recipe ids, so the shift is applied while filling the CSR below.
 SccStats analyzeScc(const BaseCraftingGraph &g, aw::vector<int32_t> &comp) {
   SccStats stats;
   const uint32_t nItem = g.nItem;
@@ -202,12 +203,12 @@ SccStats analyzeScc(const BaseCraftingGraph &g, aw::vector<int32_t> &comp) {
   aw::vector<uint32_t> arcs(offsets[n]);
   for (uint32_t item = 0; item < nItem; item++) {
     uint32_t cursor = offsets[item];
-    for (NodeId to : g.producersOf(item))
-      arcs[cursor++] = to;
+    for (RecipeId to : g.producersOf(item))
+      arcs[cursor++] = nItem + to;
   }
   for (uint32_t r = 0; r < nRecipe; r++) {
     uint32_t cursor = offsets[nItem + r];
-    for (NodeId to : g.inputsOf(r))
+    for (ItemId to : g.inputsOf(r))
       arcs[cursor++] = to;
   }
 
@@ -302,12 +303,12 @@ void buildArcs(const BaseCraftingGraph &g, aw::vector<uint32_t> &offsets,
   arcs.resize(offsets[n]);
   for (uint32_t item = 0; item < nItem; item++) {
     uint32_t cursor = offsets[item];
-    for (NodeId to : g.producersOf(item))
-      arcs[cursor++] = to;
+    for (RecipeId to : g.producersOf(item))
+      arcs[cursor++] = nItem + to;
   }
   for (uint32_t r = 0; r < nRecipe; r++) {
     uint32_t cursor = offsets[nItem + r];
-    for (NodeId to : g.inputsOf(r))
+    for (ItemId to : g.inputsOf(r))
       arcs[cursor++] = to;
   }
 }

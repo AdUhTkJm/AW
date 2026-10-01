@@ -28,8 +28,8 @@ struct Ready {
 // Iterative Tarjan over the CSR adjacency `adjOffsets` / `adjTargets`.
 // `component` is filled with the component id of every vertex reachable from a
 // root in `roots`; every other entry keeps its -1 value.
-void computeComponents(std::span<const uint32_t> roots, const aw::vector<NodeId> &adjOffsets,
-                       const aw::vector<NodeId> &adjTargets,
+void computeComponents(std::span<const uint32_t> roots, const aw::vector<ItemId> &adjOffsets,
+                       const aw::vector<ItemId> &adjTargets,
                        aw::vector<int32_t> &component) noexcept {
   const size_t nItem = component.size();
   aw::vector<int32_t> index;
@@ -39,7 +39,7 @@ void computeComponents(std::span<const uint32_t> roots, const aw::vector<NodeId>
   aw::vector<uint8_t> onStack = aw::vector<uint8_t>::zeroes(nItem);
   aw::vector<uint32_t> componentStack;
   aw::vector<uint32_t> nodeStack;
-  aw::vector<NodeId> edgeStack;
+  aw::vector<ItemId> edgeStack;
   componentStack.reserve(nItem);
   nodeStack.reserve(nItem);
   edgeStack.reserve(nItem);
@@ -93,7 +93,7 @@ void computeComponents(std::span<const uint32_t> roots, const aw::vector<NodeId>
 
 }  // namespace
 
-ReachableView::ReachableView(const BaseCraftingGraph &g, NodeId target) noexcept {
+ReachableView::ReachableView(const BaseCraftingGraph &g, ItemId target) noexcept {
   const uint32_t nItem = g.nItem;
   component.assign(nItem, -1);
   distance.assign(nItem, -1);
@@ -104,7 +104,7 @@ ReachableView::ReachableView(const BaseCraftingGraph &g, NodeId target) noexcept
   order.reserve(nItem);
   aw::vector<uint32_t> queue;
   queue.reserve(nItem);
-  const auto discover = [&](NodeId item, int32_t dist) {
+  const auto discover = [&](ItemId item, int32_t dist) {
     if (orderIndex[item] >= 0)
       return;
     orderIndex[item] = (int32_t) order.size();
@@ -116,9 +116,8 @@ ReachableView::ReachableView(const BaseCraftingGraph &g, NodeId target) noexcept
   for (size_t head = 0; head < queue.size(); head++) {
     const uint32_t item = queue[head];
     const int32_t nextDistance = distance[item] + 1;
-    for (NodeId producerNode : g.producersOf(item)) {
-      const uint32_t recipe = producerNode - nItem;
-      for (NodeId input : g.inputsOf(recipe))
+    for (RecipeId recipe : g.producersOf(item)) {
+      for (ItemId input : g.inputsOf(recipe))
         discover(input, nextDistance);
     }
   }
@@ -127,15 +126,15 @@ ReachableView::ReachableView(const BaseCraftingGraph &g, NodeId target) noexcept
   // walks from an item to the inputs of its producers (the Tarjan graph), and
   // `consumers` walks from an item to the recipes that consume it (the Kahn
   // reverse graph). Only reachable items contribute.
-  aw::vector<NodeId> adjOffsets = aw::vector<NodeId>::zeroes(nItem + 1);
-  aw::vector<NodeId> consumerOffsets = aw::vector<NodeId>::zeroes(nItem + 1);
+  aw::vector<ItemId> adjOffsets = aw::vector<ItemId>::zeroes(nItem + 1);
+  aw::vector<ItemId> consumerOffsets = aw::vector<ItemId>::zeroes(nItem + 1);
   size_t nEdge = 0;
   for (uint32_t item : order) {
     uint32_t count = 0;
-    for (NodeId producerNode : g.producersOf(item)) {
-      const auto inputs = g.inputsOf(producerNode - nItem);
+    for (RecipeId recipe : g.producersOf(item)) {
+      const auto inputs = g.inputsOf(recipe);
       count += (uint32_t) inputs.size();
-      for (NodeId input : inputs)
+      for (ItemId input : inputs)
         consumerOffsets[input + 1]++;
     }
     adjOffsets[item + 1] = count;
@@ -146,14 +145,13 @@ ReachableView::ReachableView(const BaseCraftingGraph &g, NodeId target) noexcept
     consumerOffsets[item] += consumerOffsets[item - 1];
   }
 
-  aw::vector<NodeId> adjTargets(nEdge);
-  aw::vector<NodeId> consumerTargets(nEdge);
-  aw::vector<NodeId> adjCursor(adjOffsets);
-  aw::vector<NodeId> consumerCursor(consumerOffsets);
+  aw::vector<ItemId> adjTargets(nEdge);
+  aw::vector<ItemId> consumerTargets(nEdge);
+  aw::vector<ItemId> adjCursor(adjOffsets);
+  aw::vector<ItemId> consumerCursor(consumerOffsets);
   for (uint32_t item : order) {
-    for (NodeId producerNode : g.producersOf(item)) {
-      const uint32_t recipe = producerNode - nItem;
-      for (NodeId input : g.inputsOf(recipe)) {
+    for (RecipeId recipe : g.producersOf(item)) {
+      for (ItemId input : g.inputsOf(recipe)) {
         adjTargets[adjCursor[item]++] = input;
         consumerTargets[consumerCursor[input]++] = recipe;
       }
@@ -202,8 +200,7 @@ RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
     }
     if (stockSeeded && stock[item] > 0)
       push(item, 1, 0);
-    for (NodeId producerNode : producers) {
-      const uint32_t recipe = producerNode - g.nItem;
+    for (RecipeId recipe : producers) {
       const size_t dependencies = g.inputsOf(recipe).size();
       if (dependencies == 0)
         push(item, 0, 1);
@@ -221,7 +218,7 @@ RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
     order[entry.item] = next++;
     // Pops are monotone in (tier, level), so the last dependency to release a
     // recipe is the latest one; the output inherits its tier.
-    for (NodeId consumer : view.consumers.targetsOf(entry.item)) {
+    for (ItemId consumer : view.consumers.targetsOf(entry.item)) {
       if (--pending[consumer] == 0)
         push(g.output[consumer], entry.tier, entry.level + 1);
     }
@@ -229,13 +226,13 @@ RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
   return order;
 }
 
-bool rankPruning(const ReachableView &view, const RankOrder &order, NodeId output,
-               std::span<const NodeId> inputs) noexcept {
+bool rankPruning(const ReachableView &view, const RankOrder &order, ItemId output,
+               std::span<const ItemId> inputs) noexcept {
   const int32_t component = view.component[output];
   if (component < 0)
     return false;
   const int32_t own = order[output];
-  for (NodeId input : inputs) {
+  for (ItemId input : inputs) {
     if (view.component[input] != component)
       continue;
     const int32_t dependency = order[input];

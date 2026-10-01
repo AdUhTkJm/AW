@@ -11,7 +11,7 @@ void prune(CraftingGraph &graph) noexcept;
 // Satellite elimination. Note `inventory` is indexed in source node.
 //
 // This is called in `reachableSubgraph` per-query, so it doesn't lie in aw::detail.
-bool computeSatellitePruning(const CraftingGraph &graph, NodeId target,
+bool computeSatellitePruning(const CraftingGraph &graph, ItemId target,
                              std::span<const uint8_t> items,
                              std::span<const uint8_t> recipes,
                              std::span<const Amount> inventory,
@@ -24,11 +24,11 @@ namespace aw::detail {
 // A CSR matrix storing all recipes.
 struct RecipeVectors {
   aw::vector<uint> offsets;  // nRecipe + 1
-  aw::vector<NodeId> items;  // nnz
+  aw::vector<ItemId> items;  // nnz
   aw::vector<Amount> coeffs; // nnz
 
   [[nodiscard]]
-  std::span<const NodeId> itemsOf(uint r) const noexcept {
+  std::span<const ItemId> itemsOf(uint r) const noexcept {
     return {items.data() + offsets[r], items.data() + offsets[r + 1]};
   }
 
@@ -69,11 +69,11 @@ void compositeWorkstations(const CraftingGraph &graph,
                           const aw::vector<int32_t> &comp,
                           const aw::vector<uint32_t> &repOfComp,
                           const aw::vector<uint32_t> &recs,
-                          aw::vector<aw::vector<NodeId>> &compWs) noexcept;
+                          aw::vector<aw::vector<ItemId>> &compWs) noexcept;
 
 
-bool leVector(std::span<const NodeId> ci, std::span<const Amount> cc,
-              std::span<const NodeId> si, std::span<const Amount> sc) noexcept;
+bool leVector(std::span<const ItemId> ci, std::span<const Amount> cc,
+              std::span<const ItemId> si, std::span<const Amount> sc) noexcept;
 
 void computeTagPruning(CraftingGraph &graph) noexcept;
 void computePackPruning(CraftingGraph& graph) noexcept;

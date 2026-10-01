@@ -252,7 +252,7 @@ void configureForRegistration(bool nonoptimal, aw::TagInlineMode inlineMode,
 // ------------------------------------------------------- derived missing set
 
 struct MissingItem {
-  aw::NodeId item = 0;
+  aw::ItemId item = 0;
   aw::Amount amount = 0;
 };
 
@@ -262,7 +262,7 @@ struct MissingItem {
 //   rhs(target) = amount, rhs(i) = -stock(i)
 // and reports every row that came up short -- the same currency in which the
 // Java baselines report `missing`.
-aw::vector<MissingItem> deriveMissing(const aw::Subgraph &sub, aw::NodeId target,
+aw::vector<MissingItem> deriveMissing(const aw::Subgraph &sub, aw::ItemId target,
                                        aw::Amount amount,
                                        const aw::vector<aw::Amount> &inventory,
                                        const aw::vector<int64_t> &exec) {
@@ -284,7 +284,7 @@ aw::vector<MissingItem> deriveMissing(const aw::Subgraph &sub, aw::NodeId target
     if (i == target) {
       required = amount;
     } else {
-      const aw::NodeId source = sub.itemOrigin[i];
+      const aw::ItemId source = sub.itemOrigin[i];
       const aw::Amount available = source < inventory.size() ? inventory[source] : 0;
       required = -(aw::int128) available;
     }
@@ -313,7 +313,7 @@ std::map<aw::Handle, std::string> loadNames(const std::string &path) {
   return names;
 }
 
-std::string label(const std::map<aw::Handle, std::string> &names, aw::NodeId item,
+std::string label(const std::map<aw::Handle, std::string> &names, aw::ItemId item,
                   uint32_t nReal) {
   const aw::Handle handle = item + 1;
   if (item >= nReal) return "#" + std::to_string(handle);
@@ -781,7 +781,7 @@ int main(int argc, char **argv) {
 
             double solveMs = 0.0;
             aw::PlanResult plan;
-            aw::NodeId node = UINT32_MAX;
+            aw::ItemId node = UINT32_MAX;
             if (sub.graph.nItem == 0) {
               plan.status = aw::PlanStatus::INVALID_INPUT;
             } else {

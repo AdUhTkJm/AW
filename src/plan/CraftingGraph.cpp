@@ -253,16 +253,16 @@ void canonicalizeRecipes() noexcept {
     wsOffsets[newId[rep[r]]] += graph.workstations.targetsOf(r).size();
   prefixSum(wsOffsets);
 
-  aw::vector<NodeId> wsTargets(wsOffsets.back());
+  aw::vector<ItemId> wsTargets(wsOffsets.back());
   aw::vector<uint> wsCursor(wsOffsets.begin(), wsOffsets.end() - 1);
   for (uint r = 0; r < nRecipe; r++) {
     const uint dst = newId[rep[r]];
-    for (NodeId station : graph.workstations.targetsOf(r))
+    for (ItemId station : graph.workstations.targetsOf(r))
       wsTargets[wsCursor[dst]++] = station;
   }
 
   aw::vector<uint> newWsOffsets(newNRecipe + 1, 0);
-  aw::vector<NodeId> newWsTargets;
+  aw::vector<ItemId> newWsTargets;
   newWsTargets.reserve(wsTargets.size());
   for (uint j = 0; j < newNRecipe; j++) {
     std::sort(wsTargets.begin() + wsOffsets[j], wsTargets.begin() + wsOffsets[j + 1]);
@@ -284,14 +284,14 @@ void canonicalizeRecipes() noexcept {
   }
   prefixSum(itemOffsets);
 
-  aw::vector<NodeId> itemTargets(newNRecipe, 0);
+  aw::vector<ItemId> itemTargets(newNRecipe, 0);
   aw::vector<Amount> itemWeights(newNRecipe, 0);
   aw::vector<uint> itemCursor(itemOffsets.begin(), itemOffsets.end() - 1);
   for (uint r = 0; r < nRecipe; r++) {
     if (rep[r] != r)
       continue;
     const uint slot = itemCursor[graph.output[r]]++;
-    itemTargets[slot] = graph.nItem + newId[r];
+    itemTargets[slot] = newId[r];
     itemWeights[slot] = graph.outputAmt[r];
   }
   graph.i2r.offsets = std::move(itemOffsets);
@@ -306,7 +306,7 @@ void canonicalizeRecipes() noexcept {
   }
   prefixSum(inputOffsets);
 
-  aw::vector<NodeId> inputTargets(inputOffsets.back(), 0);
+  aw::vector<ItemId> inputTargets(inputOffsets.back(), 0);
   aw::vector<Amount> inputWeights(inputOffsets.back(), 0);
   for (uint r = 0; r < nRecipe; r++) {
     if (rep[r] != r)
@@ -324,7 +324,7 @@ void canonicalizeRecipes() noexcept {
   graph.r2i.targets = std::move(inputTargets);
   graph.r2i.weights = std::move(inputWeights);
 
-  aw::vector<NodeId> output(newNRecipe, 0);
+  aw::vector<ItemId> output(newNRecipe, 0);
   aw::vector<Amount> outputAmt(newNRecipe, 0);
   for (uint r = 0; r < nRecipe; r++) {
     if (rep[r] != r)
@@ -361,10 +361,10 @@ void canonicalizeRecipes() noexcept {
 // inlining strictly decreases the recipe count, so the loop terminates.
 
 struct MutableRecipe {
-  NodeId out = 0;
+  ItemId out = 0;
   Amount outAmt = 0;
-  aw::vector<NodeId> ws;
-  aw::vector<NodeId> inputs;
+  aw::vector<ItemId> ws;
+  aw::vector<ItemId> inputs;
   aw::vector<Amount> amounts;
   // Source recipe id, or UINT32_MAX for a recipe the query-time inliner made.
   uint32_t origin = UINT32_MAX;
@@ -398,7 +398,7 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
     if (!hasRecipe[t])
       simpleTag[t] = 0;
 
-  aw::vector<aw::vector<NodeId>> members(nItem);
+  aw::vector<aw::vector<ItemId>> members(nItem);
   for (uint r = 0; r < recipes.size(); r++) {
     const MutableRecipe& rec = recipes[r];
     if (rec.out < nReal || !simpleTag[rec.out] || !allowed(r))
@@ -417,11 +417,11 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
   for (const MutableRecipe &rec : recipes) {
     if (rec.out >= nReal)
       continue;
-    for (NodeId j : rec.inputs)
+    for (ItemId j : rec.inputs)
       if (j >= nReal)
         consOffsets[j + 1]++;
   }
-  for (NodeId t = 0; t < nItem; t++)
+  for (ItemId t = 0; t < nItem; t++)
     consOffsets[t + 1] += consOffsets[t];
   aw::vector<uint32_t> consRecipes(consOffsets.back());
   {
@@ -430,12 +430,12 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
       const MutableRecipe &rec = recipes[i];
       if (rec.out >= nReal)
         continue;
-      for (NodeId j : rec.inputs)
+      for (ItemId j : rec.inputs)
         if (j >= nReal)
           consRecipes[cursor[j]++] = i;
     }
   }
-  const auto consumersOf = [&](NodeId t) noexcept {
+  const auto consumersOf = [&](ItemId t) noexcept {
     return std::span<const uint32_t>(consRecipes.data() + consOffsets[t],
                                      consOffsets[t + 1] - consOffsets[t]);
   };
@@ -452,13 +452,13 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
   // consumer can spend it directly, keeping the amount. Substituting in place
   // cannot invalidate any other tag, so all of them are applied in one sweep.
   if (singleMemberRule) {
-    for (NodeId t = nReal; t < nItem; t++) {
+    for (ItemId t = nReal; t < nItem; t++) {
       if (!simpleTag[t] || members[t].size() != 1)
         continue;
       const auto consumers = consumersOf(t);
       if (consumers.empty())
         continue;
-      const NodeId m = members[t][0];
+      const ItemId m = members[t][0];
       for (uint32_t consumer : consumers) {
         MutableRecipe &rec = recipes[consumer];
         const auto it = std::lower_bound(rec.inputs.begin(), rec.inputs.end(), t);
@@ -487,7 +487,7 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
   // share the consumer cannot both be expanded -- the first copy set turns the
   // other into a multi-consumer tag -- so at most one tag is claimed per
   // consumer recipe.
-  for (NodeId t = nReal; t < nItem; t++) {
+  for (ItemId t = nReal; t < nItem; t++) {
     if (!simpleTag[t] || members[t].size() < 2)
       continue;
     const auto consumers = consumersOf(t);
@@ -515,7 +515,7 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
 
   // Drop every member edge of an inlined tag.
   for (uint i = 0; i < recipes.size(); i++) {
-    const NodeId out = recipes[i].out;
+    const ItemId out = recipes[i].out;
     if (out >= nReal && tagDeleted[out])
       deleted[i] = 1;
   }
@@ -535,10 +535,10 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
       next.push_back(std::move(recipes[i]));
       continue;
     }
-    const NodeId t = expansionTag[i];
+    const ItemId t = expansionTag[i];
     // The consumer without its tag input. Inputs are strictly ascending, so
     // dropping the one slot keeps them ordered.
-    aw::vector<NodeId> newInputs;
+    aw::vector<ItemId> newInputs;
     aw::vector<Amount> newAmounts;
     newInputs.reserve(recipes[i].inputs.size());
     newAmounts.reserve(recipes[i].inputs.size());
@@ -548,7 +548,7 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
       newInputs.push_back_unchecked(recipes[i].inputs[k]);
       newAmounts.push_back_unchecked(recipes[i].amounts[k]);
     }
-    for (NodeId m : members[t]) {
+    for (ItemId m : members[t]) {
       MutableRecipe copy;
       copy.out = recipes[i].out;
       copy.outAmt = recipes[i].outAmt;
@@ -607,7 +607,7 @@ void rebuildFromRecipes(CraftingGraph& graph, aw::vector<MutableRecipe> &recipes
     aw::vector<uint> cursor(graph.i2r.offsets.begin(), graph.i2r.offsets.end() - 1);
     for (uint r = 0; r < newNRecipe; r++) {
       const uint slot = cursor[recipes[r].out]++;
-      graph.i2r.targets[slot] = graph.recipeNode(r);
+      graph.i2r.targets[slot] = r;
       graph.i2r.weights[slot] = recipes[r].outAmt;
     }
   }
@@ -635,7 +635,7 @@ void rebuildFromRecipes(CraftingGraph& graph, aw::vector<MutableRecipe> &recipes
   graph.workstations.targets.resize(graph.workstations.offsets.back());
   for (uint r = 0; r < newNRecipe; r++) {
     uint slot = graph.workstations.offsets[r];
-    for (NodeId w : recipes[r].ws)
+    for (ItemId w : recipes[r].ws)
       graph.workstations.targets[slot++] = w;
   }
 
@@ -808,7 +808,7 @@ struct ReachQuery {
   aw::vector<uint8_t> itemSeen;
   aw::vector<uint8_t> recipeSeen;
   aw::vector<uint8_t> disabled;
-  aw::vector<NodeId> queue;
+  aw::vector<ItemId> queue;
 
   ReachQuery(Handle output, std::span<const Handle> workstations,
              std::span<const Amount> inventory) noexcept
@@ -825,13 +825,13 @@ struct ReachQuery {
   }
 
   // Stock of a source item, 0 when the inventory does not cover it.
-  Amount held(NodeId item) const noexcept {
+  Amount held(ItemId item) const noexcept {
     return item < inventory.size() ? inventory[item] : 0;
   }
 
   // True when one of `stations` is available in this query.
-  bool anyStationAvailable(std::span<const NodeId> stations) const noexcept {
-    for (NodeId station : stations)
+  bool anyStationAvailable(std::span<const ItemId> stations) const noexcept {
+    for (ItemId station : stations)
       if (station < allowed.size() && allowed[station])
         return true;
     return false;
@@ -877,7 +877,7 @@ struct ReachQuery {
         graph.recipeSubstituted[recipe] &&
         recipe < graph.recipeSubstitutedGuards.size()) {
       bool stocked = false;
-      for (NodeId guard : graph.recipeSubstitutedGuards[recipe]) {
+      for (ItemId guard : graph.recipeSubstitutedGuards[recipe]) {
         if (held(guard) != 0) {
           stocked = true;
           break;
@@ -896,16 +896,15 @@ struct ReachQuery {
     std::fill(recipeSeen.begin(), recipeSeen.end(), 0);
     queue.clear();
 
-    const NodeId start = CraftingGraph::itemNode(output);
+    const ItemId start = CraftingGraph::itemNode(output);
     itemSeen[start] = 1;
     queue.push_back_unchecked(start);
 
     for (size_t q = 0; q < queue.size(); q++) {
-      const NodeId item = queue[q];
+      const ItemId item = queue[q];
       const bool real = graph.isRealItem(item);
 
-      for (NodeId recipeNode : graph.producersOf(item)) {
-        const uint recipe = recipeNode - graph.nItem;
+      for (RecipeId recipe : graph.producersOf(item)) {
         if (recipeSeen[recipe] || disabled[recipe] || prunedOut(recipe))
           continue;
 
@@ -916,7 +915,7 @@ struct ReachQuery {
           continue;
 
         recipeSeen[recipe] = 1;
-        for (NodeId input : graph.inputsOf(recipe)) {
+        for (ItemId input : graph.inputsOf(recipe)) {
           if (!itemSeen[input]) {
             itemSeen[input] = 1;
             queue.push_back_unchecked(input);
@@ -950,7 +949,7 @@ struct ReachQuery {
       }
       if (!ok)
         continue;
-      for (NodeId item : cert.zeroStock) {
+      for (ItemId item : cert.zeroStock) {
         if (held(item) > 0) {
           ok = false;
           break;
@@ -975,7 +974,7 @@ struct ReachQuery {
       return;
     constexpr uint MAX_SATELLITE_ROUNDS = 4;
     const uint nRecipe = graph.nRecipe;
-    const NodeId target = CraftingGraph::itemNode(output);
+    const ItemId target = CraftingGraph::itemNode(output);
     aw::vector<uint8_t> drop(nRecipe, 0);
     for (uint round = 0; round < MAX_SATELLITE_ROUNDS; round++) {
       std::fill(drop.begin(), drop.end(), 0);
@@ -1000,17 +999,17 @@ struct ReachQuery {
     for (uint r = 0; r < nRecipe; r++) {
       if (!recipeSeen[r])
         continue;
-      for (NodeId input : graph.inputsOf(r))
+      for (ItemId input : graph.inputsOf(r))
         consOffsets[input + 1]++;
     }
-    for (NodeId item = 0; item < nItem; item++)
+    for (ItemId item = 0; item < nItem; item++)
       consOffsets[item + 1] += consOffsets[item];
     aw::vector<uint32_t> consRecipes(consOffsets.back());
     aw::vector<uint> cursor(consOffsets.begin(), consOffsets.end() - 1);
     for (uint r = 0; r < nRecipe; r++) {
       if (!recipeSeen[r])
         continue;
-      for (NodeId input : graph.inputsOf(r))
+      for (ItemId input : graph.inputsOf(r))
         consRecipes[cursor[input]++] = r;
     }
     
@@ -1023,11 +1022,11 @@ struct ReachQuery {
 
     aw::vector<uint8_t> obtainable(nItem, 0);
     // Holds reachable items and recipes.
-    aw::vector<NodeId> itemStack;
+    aw::vector<ItemId> itemStack;
     aw::vector<uint32_t> recipeStack;
     itemStack.reserve(nItem);
     recipeStack.reserve(nRecipe);
-    for (NodeId item = 0; item < nItem; item++) {
+    for (ItemId item = 0; item < nItem; item++) {
       if (held(item) > 0) {
         obtainable[item] = 1;
         itemStack.push_back_unchecked(item);
@@ -1041,7 +1040,7 @@ struct ReachQuery {
 
     while (!itemStack.empty() || !recipeStack.empty()) {
       while (!itemStack.empty()) {
-        const NodeId item = itemStack.back();
+        const ItemId item = itemStack.back();
         itemStack.pop_back();
         for (uint slot = consOffsets[item], end = consOffsets[item + 1]; slot < end; slot++) {
           const uint32_t r = consRecipes[slot];
@@ -1052,7 +1051,7 @@ struct ReachQuery {
       while (!recipeStack.empty()) {
         const uint32_t r = recipeStack.back();
         recipeStack.pop_back();
-        const NodeId out = graph.output[r];
+        const ItemId out = graph.output[r];
         if (!obtainable[out]) {
           obtainable[out] = 1;
           itemStack.push_back_unchecked(out);
@@ -1108,10 +1107,10 @@ void dropUnusedItems(aw::vector<uint8_t> &itemSeen, Handle output,
   used[CraftingGraph::itemNode(output)] = 1;
   for (const MutableRecipe &rec : built) {
     used[rec.out] = 1;
-    for (NodeId input : rec.inputs)
+    for (ItemId input : rec.inputs)
       used[input] = 1;
   }
-  for (NodeId item = 0; item < graph.nItem; item++)
+  for (ItemId item = 0; item < graph.nItem; item++)
     if (!used[item])
       itemSeen[item] = 0;
 }
@@ -1125,13 +1124,13 @@ Subgraph assembleSubgraph(const aw::vector<uint8_t> &itemSeen,
 
   // Fill the remapping between source graph and subgraph.
   // Use UINT32_MAX for empty entries.
-  aw::vector<NodeId> itemMap(nItem, UINT32_MAX);
+  aw::vector<ItemId> itemMap(nItem, UINT32_MAX);
   // At most one entry per source item.
   result.itemOrigin.reserve(nItem);
   // Note that we can compute the amount of real items in subgraph alongside
   // the way.
   uint subreal = 0;
-  for (NodeId item = 0; item < nItem; item++) {
+  for (ItemId item = 0; item < nItem; item++) {
     if (itemSeen[item]) {
       itemMap[item] = result.itemOrigin.size();
       result.itemOrigin.push_back_unchecked(item);
@@ -1163,7 +1162,7 @@ Subgraph assembleSubgraph(const aw::vector<uint8_t> &itemSeen,
     aw::vector<uint> cursor(sub.i2r.offsets.begin(), sub.i2r.offsets.end() - 1);
     for (uint i = 0; i < subRecipes; i++) {
       const uint slot = cursor[itemMap[built[i].out]]++;
-      sub.i2r.targets[slot] = sub.nItem + i;
+      sub.i2r.targets[slot] = i;
       sub.i2r.weights[slot] = built[i].outAmt;
     }
   }
@@ -1260,7 +1259,7 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
       graph.outputAmt[recipe] = outputAmt;
 
       uint itemSlot = itemCursor[output - 1]++;
-      graph.i2r.targets[itemSlot] = graph.recipeNode(recipe);
+      graph.i2r.targets[itemSlot] = recipe;
       graph.i2r.weights[itemSlot] = outputAmt;
 
       uint recipeSlot = graph.r2i.offsets[recipe];
@@ -1361,7 +1360,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
 }
 
 
-NodeId Subgraph::translate(NodeId sourceNode) const noexcept {
+ItemId Subgraph::translate(ItemId sourceNode) const noexcept {
   const auto begin = itemOrigin.begin();
   const auto end = itemOrigin.end();
   const auto it = std::lower_bound(begin, end, sourceNode);
