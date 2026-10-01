@@ -21,9 +21,13 @@ namespace {
 // so the last dependency to release a recipe is also the latest one, and its
 // tier is inherited by the recipe's output.
 struct Ready {
+  uint32_t item;
   int32_t tier;
   int32_t level;
-  uint32_t item;
+  uint64_t sortKey;
+
+  // std::priority_queue is a max-heap, so every comparison is inverted.
+  bool operator<(const Ready &other) const noexcept { return sortKey > other.sortKey; }
 };
 
 // Standard Tarjan algorithm.
@@ -177,20 +181,24 @@ RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
 
   const aw::vector<int32_t> &distance = view.distance;
   const aw::vector<int32_t> &orderIndex = view.orderIndex;
-  // Ascending (tier, level), then farthest from the target, then discovery
-  // order. std::priority_queue is a max-heap, so every comparison is inverted.
-  const auto compare = [&distance, &orderIndex](const Ready &lhs, const Ready &rhs) {
-    if (lhs.tier != rhs.tier)
-      return lhs.tier > rhs.tier;
-    if (lhs.level != rhs.level)
-      return lhs.level > rhs.level;
-    if (distance[lhs.item] != distance[rhs.item])
-      return distance[lhs.item] < distance[rhs.item];
-    return orderIndex[lhs.item] > orderIndex[rhs.item];
+  // Ascending (tier, level), then farthest from the target, then discovery order.
+  // Tier is determined by:
+  //   Tier 2. generated from nothing.
+  //   Tier 1. stocked.
+  //   Tier 0. others.
+  const auto makeSortKey = [&](uint32_t item, uint64_t tier, uint64_t level) noexcept -> uint64_t {
+    uint64_t dist = distance[item];
+    uint64_t idx  = orderIndex[item];
+    // Larger `dist` means better.
+    uint64_t inv_dist = (~dist) & 0x3FFFFF; // 22 bit
+    return (tier << 62) |
+           ((level & 0x3FFFF) << 44) |
+           (inv_dist << 22) |
+           (idx & 0x3FFFFF);
   };
-  std::priority_queue<Ready, std::vector<Ready>, decltype(compare)> ready(compare);
-  const auto push = [&ready](uint32_t item, int32_t tier, int32_t level) {
-    ready.push(Ready{tier, level, item});
+  std::priority_queue<Ready, std::vector<Ready>> ready;
+  const auto push = [&](uint32_t item, int32_t tier, int32_t level) {
+    ready.push(Ready{item, tier, level, makeSortKey(item, tier, level)});
   };
 
   // Seed the ready set. A raw leaf is fertile immediately. A stocked item is a

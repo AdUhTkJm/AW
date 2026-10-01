@@ -430,6 +430,12 @@ aw::vector<int64_t> greedyDagPlan(const Subgraph &sub, ItemId target, Amount amo
   best.consider(demandSweep(plainSweep, plainObtainable, Strategy::LargestBatch));
   best.consider(demandSweep(plainSweep, plainObtainable, Strategy::LeastInputMass));
 
+  // `rankProducible` needs this to be safe, since it's packing bits into a `uint64_t`.
+  // In real world we probably won't hit this.
+  [[unlikely]]
+  if (g.nItem >= 262144)
+    return std::move(best.exec);
+
   // Then try a more sophisticated cut.
   if (!best.found) {
     const ReachableView reachable(g, target);
