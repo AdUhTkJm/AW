@@ -159,6 +159,9 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
   // both the objective cap (a valid upper bound on the optimum) and a solution
   // hint.
   aw::vector<int64_t> greedy = greedyDagPlan(sub, target, amount, invSrc);
+  // Temp instrument
+  // for (int i = 0; i < 500; i++)
+  //   greedy = greedyDagPlan(sub, target, amount, invSrc);
   solver::Options solveOptions = options;
 
   // Startup barriers, added lazily after a rejected plan, so an ordinary

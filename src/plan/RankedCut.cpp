@@ -8,6 +8,7 @@
 // earlier, which is independent of how the DFS happens to walk the graph.
 
 #include "RankedCut.h"
+#include "aw/utils/LargeStackCall.h"
 
 #include <cstdint>
 #include <queue>
@@ -25,92 +26,94 @@ struct Ready {
   uint32_t item;
 };
 
-// Iterative Tarjan over the CSR adjacency `adjOffsets` / `adjTargets`.
-// `component` is filled with the component id of every vertex reachable from a
-// root in `roots`; every other entry keeps its -1 value.
-void computeComponents(std::span<const uint32_t> roots, const aw::vector<ItemId> &adjOffsets,
-                       const aw::vector<ItemId> &adjTargets,
-                       aw::vector<int32_t> &component) noexcept {
-  const size_t nItem = component.size();
+// Standard Tarjan algorithm.
+struct TarjanContext {
+  const aw::vector<ItemId> &adjOffsets;
+  const aw::vector<ItemId> &adjTargets;
   aw::vector<int32_t> index;
   aw::vector<int32_t> low;
-  index.assign(nItem, -1);
-  low.assign(nItem, -1);
-  aw::vector<uint8_t> onStack = aw::vector<uint8_t>::zeroes(nItem);
+  aw::vector<uint8_t> onStack;
   aw::vector<uint32_t> componentStack;
-  aw::vector<uint32_t> nodeStack;
-  aw::vector<ItemId> edgeStack;
-  componentStack.reserve(nItem);
-  nodeStack.reserve(nItem);
-  edgeStack.reserve(nItem);
-
+  aw::vector<int32_t> &component;
   int32_t timer = 0;
   int32_t nComponent = 0;
-  for (uint32_t root : roots) {
-    if (index[root] >= 0)
-      continue;
-    index[root] = low[root] = timer++;
-    onStack[root] = 1;
-    componentStack.push_back(root);
-    nodeStack.push_back(root);
-    edgeStack.push_back(adjOffsets[root]);
-    while (!nodeStack.empty()) {
-      const uint32_t node = nodeStack.back();
-      if (edgeStack.back() < adjOffsets[node + 1]) {
-        const uint32_t child = adjTargets[edgeStack.back()++];
-        if (index[child] < 0) {
-          index[child] = low[child] = timer++;
-          onStack[child] = 1;
-          componentStack.push_back(child);
-          nodeStack.push_back(child);
-          edgeStack.push_back(adjOffsets[child]);
-        } else if (onStack[child] && index[child] < low[node]) {
-          low[node] = index[child];
-        }
-        continue;
-      }
-      nodeStack.pop_back();
-      edgeStack.pop_back();
-      if (low[node] == index[node]) {
-        for (;;) {
-          const uint32_t member = componentStack.back();
-          componentStack.pop_back();
-          onStack[member] = 0;
-          component[member] = nComponent;
-          if (member == node)
-            break;
-        }
-        nComponent++;
-      }
-      if (!nodeStack.empty()) {
-        const uint32_t parent = nodeStack.back();
-        if (low[node] < low[parent])
-          low[parent] = low[node];
-      }
+
+  TarjanContext(const aw::vector<ItemId> &adjOffsets, const aw::vector<ItemId> &adjTargets, aw::vector<int32_t> &component, uint nItem):
+    adjOffsets(adjOffsets), adjTargets(adjTargets), index(nItem, -1), low(nItem, -1), onStack(nItem, 0), component(component)
+  {
+    componentStack.reserve(nItem);
+  }
+};
+
+void tarjanDFS(TarjanContext &ctx, uint32_t node) noexcept {
+  ctx.index[node] = ctx.low[node] = ctx.timer++;
+  ctx.onStack[node] = 1;
+  ctx.componentStack.push_back_unchecked(node);
+
+  const ItemId startEdge = ctx.adjOffsets[node];
+  const ItemId endEdge = ctx.adjOffsets[node + 1];
+
+  for (ItemId e = startEdge; e < endEdge; ++e) {
+    const uint32_t child = ctx.adjTargets[e];
+
+    if (ctx.index[child] < 0) {
+      tarjanDFS(ctx, child);
+      if (ctx.low[child] < ctx.low[node])
+        ctx.low[node] = ctx.low[child];
+    } else if (ctx.onStack[child]) {
+      if (ctx.index[child] < ctx.low[node])
+        ctx.low[node] = ctx.index[child];
     }
   }
+
+  if (ctx.low[node] == ctx.index[node]) {
+    for (;;) {
+      const uint32_t member = ctx.componentStack.back();
+      ctx.componentStack.pop_back();
+      ctx.onStack[member] = 0;
+      ctx.component[member] = ctx.nComponent;
+      if (member == node)
+        break;
+    }
+    ctx.nComponent++;
+  }
+}
+
+// Visits every root that no earlier root reached.
+void tarjanAll(TarjanContext &ctx, std::span<const uint32_t> roots) noexcept {
+  for (uint32_t root : roots) {
+    if (ctx.index[root] < 0)
+      tarjanDFS(ctx, root);
+  }
+}
+
+// Fills `component` in place; unreached entries keep their -1 value.
+void computeComponents(std::span<const uint32_t> roots,
+                       const aw::vector<ItemId> &adjOffsets,
+                       const aw::vector<ItemId> &adjTargets,
+                       aw::vector<int32_t> &component) noexcept {
+  TarjanContext ctx(adjOffsets, adjTargets, component, component.size());
+  // Entered on the large stack.
+  aw::ls::call(tarjanAll, ctx, roots);
 }
 
 }  // namespace
 
-ReachableView::ReachableView(const BaseCraftingGraph &g, ItemId target) noexcept {
+ReachableView::ReachableView(const BaseCraftingGraph &g, ItemId target) noexcept:
+  component(g.nItem, -1), distance(g.nItem, -1), orderIndex(g.nItem, -1)
+{
   const uint32_t nItem = g.nItem;
-  component.assign(nItem, -1);
-  distance.assign(nItem, -1);
-  orderIndex.assign(nItem, -1);
-
-  // BFS over the input cone. The first visit of an item is its shortest input
-  // distance because every edge costs one hop.
-  order.reserve(nItem);
   aw::vector<uint32_t> queue;
+  // Initialize `distance`: shortest distance from `target` based on BFS.
+  order.reserve(nItem);
   queue.reserve(nItem);
   const auto discover = [&](ItemId item, int32_t dist) {
     if (orderIndex[item] >= 0)
       return;
-    orderIndex[item] = (int32_t) order.size();
+    orderIndex[item] = order.size();
     distance[item] = dist;
-    order.push_back(item);
-    queue.push_back(item);
+    order.push_back_unchecked(item);
+    queue.push_back_unchecked(item);
   };
   discover(target, 0);
   for (size_t head = 0; head < queue.size(); head++) {
@@ -122,12 +125,14 @@ ReachableView::ReachableView(const BaseCraftingGraph &g, ItemId target) noexcept
     }
   }
 
-  // One pass counts the two CSRs so they can be sized exactly: `adjacency`
-  // walks from an item to the inputs of its producers (the Tarjan graph), and
-  // `consumers` walks from an item to the recipes that consume it (the Kahn
-  // reverse graph). Only reachable items contribute.
-  aw::vector<ItemId> adjOffsets = aw::vector<ItemId>::zeroes(nItem + 1);
-  aw::vector<ItemId> consumerOffsets = aw::vector<ItemId>::zeroes(nItem + 1);
+  // This is formed by projecting items out of `g`.
+  // In other words, `i -> j` means item `i` needs item `j` in one of its recipes.
+  aw::vector<ItemId> adjOffsets(nItem + 1, 0);
+  // This is a reversed graph of `g.r2i`.
+  // `i -> r` means recipe `r` needs item `i` as input.
+  aw::vector<ItemId> consumerOffsets(nItem + 1, 0);
+
+  // First compute offsets.
   size_t nEdge = 0;
   for (uint32_t item : order) {
     uint32_t count = 0;
@@ -145,14 +150,15 @@ ReachableView::ReachableView(const BaseCraftingGraph &g, ItemId target) noexcept
     consumerOffsets[item] += consumerOffsets[item - 1];
   }
 
+  // Then fill in the data.
   aw::vector<ItemId> adjTargets(nEdge);
   aw::vector<ItemId> consumerTargets(nEdge);
-  aw::vector<ItemId> adjCursor(adjOffsets);
   aw::vector<ItemId> consumerCursor(consumerOffsets);
   for (uint32_t item : order) {
+    uint adjCursor = adjOffsets[item];
     for (RecipeId recipe : g.producersOf(item)) {
       for (ItemId input : g.inputsOf(recipe)) {
-        adjTargets[adjCursor[item]++] = input;
+        adjTargets[adjCursor++] = input;
         consumerTargets[consumerCursor[input]++] = recipe;
       }
     }
@@ -166,10 +172,8 @@ ReachableView::ReachableView(const BaseCraftingGraph &g, ItemId target) noexcept
 
 RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
                          std::span<const Amount> stock, bool stockSeeded) noexcept {
-  RankOrder order;
-  order.assign(g.nItem, -1);
-  aw::vector<int32_t> pending;
-  pending.assign(g.nRecipe, 0);
+  RankOrder order(g.nItem, -1);
+  aw::vector<int32_t> pending(g.nRecipe, 0);
 
   const aw::vector<int32_t> &distance = view.distance;
   const aw::vector<int32_t> &orderIndex = view.orderIndex;
