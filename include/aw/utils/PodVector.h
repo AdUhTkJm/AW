@@ -20,7 +20,7 @@ namespace aw {
 // The C++20 way of testing POD.
 template<typename T>
 inline constexpr bool isPodElement =
-  std::is_trivial_v<T> && std::is_standard_layout_v<T>;
+  (std::is_trivial_v<T> && std::is_standard_layout_v<T>);
 
 // Cannot hold more than 2^32 elements, but we never need that much.
 template<typename T>

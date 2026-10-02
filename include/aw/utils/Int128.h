@@ -37,9 +37,11 @@ class int128 {
   }
 
 public:
+  int128() = default;
+
   // Implicit on purpose: `(aw::int128) amount * times` and comparisons against
   // plain int64_t values have to keep the shape they have with the native type.
-  constexpr int128(int64_t value = 0) noexcept
+  constexpr int128(int64_t value) noexcept
       : lo_((uint64_t) value), hi_(value < 0 ? UINT64_MAX : 0) {}
 
   friend int128 operator*(int128 a, int128 b) noexcept {

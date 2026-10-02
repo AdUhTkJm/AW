@@ -46,7 +46,7 @@ VSWHERE="/mnt/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.ex
 # only ever builds Windows x86-64 with MSVC.
 NATIVES_PLATFORM="windows-x86_64"
 
-MOD_ROOT="${AW_MOD_DIR:-/mnt/d/IdeaProjects/AppliedWheelchair}"
+MOD_ROOT="${AW_MOD_DIR:-/mnt/d/IdeaProjects/AppliedWorktable}"
 ARTIFACT_ARG=""
 
 usage() {
@@ -55,9 +55,9 @@ Usage: scripts/build-windows.sh [artifact-dir] [--mod-dir DIR]
 
   artifact-dir   where to copy aw_jni.dll and the OR-Tools runtime it links
                  against (default: <aw>/build/windows)
-  --mod-dir DIR  the AppliedWheelchair checkout to stage a development bundle
+  --mod-dir DIR  the AppliedWorktable checkout to stage a development bundle
                  into (default: $AW_MOD_DIR, else /mnt/d/IdeaProjects/
-                 AppliedWheelchair; a Windows path is accepted too)
+                 AppliedWorktable; a Windows path is accepted too)
 
 Staging writes the layout the mod bundles, natives/<platform>/ plus an index.txt
 naming every file, into <mod>/build/natives. The mod reads that directory as a
