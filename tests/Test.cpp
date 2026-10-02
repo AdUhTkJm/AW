@@ -149,6 +149,24 @@ aw::vector<std::byte> buildSeedSample() {
   return w.out;
 }
 
+// A byproduct carries the only route to a needed input:
+//
+//   item 1 (A) <- r0 (x1, workstations [1], input item 2 (B) x1)
+//   item 3 (C) <- r1 (x1, workstations [1], no inputs, byproduct item 2 (B) x1)
+//
+// B has no recipe of its own; r1 makes it as a byproduct. Seed pruning has to
+// credit every output row of a fireable recipe, or nothing produces B and the
+// target's only recipe is dropped. Recipe ids in file order: r0=0, r1=1.
+aw::vector<std::byte> buildByproductSeedSample() {
+  AwrWriter w;
+  w.header(3, 2);
+  w.item(1, 1);
+  w.recipe(1, {1}, {{2, 1}});
+  w.item(3, 1);
+  w.recipe(1, {1}, {{2, 1}}, {});
+  return w.out;
+}
+
 // A two item cycle that only balances when the second recipe produces twice
 // what it eats. With no inventory the only feasible plan is 2*a of r0 and a of
 // r1, for 3*a total executions.
@@ -1828,6 +1846,24 @@ void testSeedUnreachablePruning() {
     expect(fullPlan.status == prunedPlan.status, "seed: status agrees");
     expect(fullPlan.status != aw::PlanStatus::OK || total(fullPlan) == total(prunedPlan),
            "seed: optimum agrees");
+  }
+
+  // A byproduct that is the only source of a needed input. With nothing in
+  // stock the closure only fires r1 (it has no inputs); crediting its byproduct
+  // row is what makes r0's input reachable, so both recipes must survive.
+  aw::registerCraftingGraph(buildByproductSeedSample());
+  expect(aw::getCraftingError() == nullptr, "byproduct seed sample parses");
+  {
+    aw::vector<aw::Amount> empty(3, 0);
+    const aw::Subgraph sub = aw::reachableSubgraph(1, onlyT, empty);
+    expect(sub.graph.nItem == 3 && sub.graph.nRecipe == 2,
+           "a byproduct keeps its consumer's branch alive");
+    expect(subgraphHasRecipe(sub, 0), "the target recipe survives");
+    expect(subgraphHasRecipe(sub, 1), "the byproduct producer survives");
+    const aw::PlanResult plan = aw::planCrafting(sub, sub.translate(0), 1, empty);
+    expect(plan.status == aw::PlanStatus::OK, "the byproduct route plans");
+    if (plan.status == aw::PlanStatus::OK)
+      expect(plan.exec[1] == 1, "one execution of the byproduct recipe");
   }
 
   aw::options.tagPruning = true;

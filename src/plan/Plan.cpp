@@ -82,9 +82,11 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
   A.cols = n;
   A.colStart.reserve((size_t) n + 1);
   A.colStart.push_back_unchecked(0);
-  // Each recipe contributes its output row plus one row per input, before the
-  // per-column merge; the merge can only drop rows, so this bounds the total.
-  const size_t entryCap = (size_t) n + g.r2i.targets.size();
+  // Each recipe contributes one row per output (anchor and byproducts) plus
+  // one per input, before the per-column merge; the merge can only drop rows,
+  // so this bounds the total. Counting one output per recipe would under-count
+  // every byproduct recipe and overflow the two vectors below.
+  const size_t entryCap = g.r2o.targets.size() + g.r2i.targets.size();
   A.rowIndex.reserve(entryCap);
   A.value.reserve(entryCap);
   aw::vector<ColumnEntry> column;

@@ -1217,10 +1217,14 @@ struct ReachQuery {
       while (!recipeStack.empty()) {
         const uint32_t r = recipeStack.back();
         recipeStack.pop_back();
-        const ItemId out = graph.output[r];
-        if (!obtainable[out]) {
-          obtainable[out] = 1;
-          itemStack.push_back_unchecked(out);
+        // Every output of a fireable recipe is obtained, not just the anchor:
+        // a byproduct comes from the same execution, and missing it would
+        // disable every consumer of that byproduct.
+        for (ItemId out : graph.outputsOf(r)) {
+          if (!obtainable[out]) {
+            obtainable[out] = 1;
+            itemStack.push_back_unchecked(out);
+          }
         }
       }
     }
