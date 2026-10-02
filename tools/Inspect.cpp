@@ -880,6 +880,7 @@ int main(int argc, char** argv) {
   std::string treeArg;
   std::string planArg;
   std::string invArg;
+  std::string invFilePath;
   std::string profilePath;
   std::string inlineTags = "off";
   ProfileGuard profileGuard;
@@ -1030,6 +1031,15 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
       }
       invArg = argv[++i];
+    } else if (arg == "--inv-file") {
+      // The same inventory, read from a plan stock table (handle<TAB>amount).
+      // The inline --inv cannot carry recipes-atm's random20 set: one argv
+      // string is capped at MAX_ARG_STRLEN (128 KiB) and that one is 134 KiB.
+      if (i + 1 >= argc) {
+        std::cerr << "--inv-file needs a path\n";
+        return EXIT_FAILURE;
+      }
+      invFilePath = argv[++i];
     } else if (arg == "--ws") {
       if (i + 1 >= argc || !parseHandleList(argv[++i], workstations)) {
         std::cerr << "--ws needs a comma-separated list of resource handles\n";
@@ -1063,6 +1073,7 @@ int main(int argc, char** argv) {
                    "                   [--no-seed-prune] [--optimal] [--flash] [--no-cycle-retries]\n"
                    "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
+                   "                   [--inv-file <stock.tsv>]\n"
                    "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
                    "                   [--names <table.tsv>] [--subgraph <name|handle>]\n"
                    "                   [--profile <out.prof>] <recipes.awr>\n";
@@ -1084,6 +1095,7 @@ int main(int argc, char** argv) {
                  "                   [--no-seed-prune] [--optimal] [--flash] [--no-cycle-retries]\n"
                  "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
+                 "                   [--inv-file <stock.tsv>]\n"
                  "                   [--time-limit <s>] [--gap <f>] [--workers <n>] [--ub <n>]\n"
                  "                   [--names <table.tsv>] [--subgraph <name|handle>] [--dump-ws]\n"
                  "                   [--profile <out.prof>] <recipes.awr>\n";
@@ -1302,6 +1314,32 @@ int main(int argc, char** argv) {
         if (comma == std::string::npos)
           break;
         start = comma + 1;
+      }
+    }
+    if (!invFilePath.empty()) {
+      std::ifstream in(invFilePath);
+      if (!in) {
+        std::cerr << "cannot read --inv-file " << invFilePath << '\n';
+        return EXIT_FAILURE;
+      }
+      std::string line;
+      while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+          line.pop_back();
+        if (line.empty() || line[0] == '#')
+          continue;
+        const size_t tab = line.find('\t');
+        if (tab == std::string::npos)
+          continue;
+        aw::Handle handle = 0;
+        uint64_t amount = 0;
+        if (!parseHandle(line.substr(0, tab), handle) ||
+            !parseU64(line.substr(tab + 1), amount) || handle == 0 ||
+            handle > graph.nItem) {
+          std::cerr << "bad --inv-file entry: " << line << '\n';
+          return EXIT_FAILURE;
+        }
+        inventory[aw::CraftingGraph::itemNode(handle)] += (aw::Amount) amount;
       }
     }
 

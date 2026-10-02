@@ -349,8 +349,10 @@ s.t. produced(i) - consumed(i) >= b_i,  x_r ∈ ℤ≥0
 
 AW reports it as the solver objective. The baselines' `cost` is recomputed by the harness
 from the firing vector each engine returned, so a "cheap" plan and a "wrong" plan are
-distinguishable. **Only compare `cost` on rows where `feasible` is true and the ground
-truth is `proven_optimal`; otherwise the ratio is meaningless.** `summarize.py` already
+distinguishable. `amount` is the contract amount; the Java harnesses also record
+`request_amount`, the amount actually handed to the engine after the per-engine translation
+of §7.2. **Only compare `cost` on rows where `feasible` is true and the ground truth is
+`proven_optimal`; otherwise the ratio is meaningless.** `summarize.py` already
 enforces this and leaves `cost_ratio_median` (or `cost_ratio_mean` / `cost_ratio_max` under
 `--mean` / `--max`) blank when no instance qualifies.
 
@@ -472,11 +474,20 @@ without the later prunings AW stops answering rather than answering slowly.
    tallies, and cost ratios additionally require `proven_optimal`.
 2. **`balance_ok` is the false-positive detector.** Each Java harness recomputes
    `produced - consumed >= rhs` in `BigInteger` from the engine's own firing vector, using
-   the same `rhs` AW's solver gets. `feasible && !balance_ok` is a plan that claims to be
-   complete and does not balance; no timing analysis can find it, and `summarize.py` counts
-   it as `false_positive`. The smoke test yields 2 such rows per small corpus from AE2VM.
-   In the smoke test that catches 2 AE2VM rows per corpus while Thunderbolt and AW stay at
-   0, which is the positive control: those two are self-consistent here.
+   the same `rhs` AW's solver gets: `rhs(target) = amount`, `rhs(i) = -stock(i)` otherwise.
+   `feasible && !balance_ok` is a plan that claims to be complete and does not balance; no
+   timing analysis can find it, and `summarize.py` counts it as `false_positive`.
+   **The request each engine is handed differs, because the engines disagree on what a
+   stocked target means.** AW and AE2's production calculation always craft `amount` new
+   units and ignore the target's own stock (`ignore(output)`). Thunderbolt's planners
+   instead let the target's stock satisfy the request, so the harness asks them for
+   `amount + stock(target)`; the net deliverable is still `amount`, and the target-in-pool
+   path stays exercised (it shows up as an inflated `cost`, not as a false positive).
+   AE2VM never draws the target from stock, so it is handed `amount` with the target zeroed
+   in its inventory. Every row records the engine-facing `request_amount` next to the
+   contract `amount`.
+   The smoke test yields 2 such rows per small corpus from AE2VM while Thunderbolt and AW
+   stay at 0, which is the positive control for the AE2VM defects of §7.3.
 3. **AE2VM is a heuristic, in two distinct ways.**
    *One recipe per output item*: its resolver is `Function<AEKey, IPatternDetails>` and the
    production policy is `AE2VMCrafting.pickBestPattern` (smallest per-craft output amount),
