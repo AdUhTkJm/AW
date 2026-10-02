@@ -60,7 +60,7 @@ using uint = uint32_t;
 namespace aw::detail {
 
 // For a recipe:
-//   +outputAmt at output rows;
+//   +outputAmt at every output row (anchor and byproducts);
 //   -inputAmt at input rows.
 //
 // Equal rows are summed, so a recipe that eats its own output collapses that row.
@@ -70,7 +70,10 @@ RecipeVectors::RecipeVectors(const BaseCraftingGraph &graph) noexcept {
   aw::vector<std::pair<ItemId, Amount>> scratch;
   for (uint r = 0; r < nRecipe; r++) {
     scratch.clear();
-    scratch.emplace_back(graph.output[r], graph.outputAmt[r]);
+    const auto outs = graph.outputsOf(r);
+    const auto outAmts = graph.outputAmountsOf(r);
+    for (size_t k = 0; k < outs.size(); k++)
+      scratch.emplace_back(outs[k], outAmts[k]);
     const auto inputs = graph.inputsOf(r);
     const auto weights = graph.inputAmountsOf(r);
     for (size_t k = 0; k < inputs.size(); k++)
@@ -347,7 +350,9 @@ void computeDirectDominancePruning(CraftingGraph &graph,
     outAmt.reserve(siblings.size());
     for (RecipeId r : siblings) {
       recs.push_back_unchecked(r);
-      outAmt.push_back_unchecked(graph.outputAmt[r]);
+      // The comparison normalizes and filters by the amount of the shared item,
+      // which is not the anchor when the recipe outputs it as a byproduct.
+      outAmt.push_back_unchecked(graph.producedAmountOf(r, X));
     }
     const uint k = (uint) recs.size();
 

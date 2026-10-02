@@ -85,6 +85,10 @@ struct PlanRequest {
 struct PlanRecipeUse {
   Handle outputHandle = 0;
   Amount outputAmount = 0;
+  // Byproducts, ascending handles, parallel to `byproductAmounts`. Empty for a
+  // single-output recipe.
+  aw::vector<Handle> byproductHandles;
+  aw::vector<Amount> byproductAmounts;
   // Inputs, ascending handles, parallel to `inputAmounts`.
   aw::vector<Handle> inputHandles;
   aw::vector<Amount> inputAmounts;

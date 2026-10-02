@@ -1,8 +1,10 @@
 #include "aw/plan/Options.h"
 #include "Prune.h"
 
+#include <algorithm>
 #include <array>
 #include <climits>
+#include <utility>
 
 
 namespace aw {
@@ -13,7 +15,12 @@ const char *error;
 
 namespace {
 
-constexpr std::array<uint8_t, 4> kMagic = {'A', 'W', 'R', 0x01};
+constexpr std::array<uint8_t, 3> kMagic = {'A', 'W', 'R'};
+// Schema version, the fourth magic byte. v1 is a single anchor output per
+// recipe. v2 adds a byproduct list, which is how a real multi-output recipe is
+// represented without splitting it into independent single-output copies.
+constexpr uint8_t kSchemaV1 = 0x01;
+constexpr uint8_t kSchemaV2 = 0x02;
 
 #define fail(msg, ...) { error = msg; return __VA_ARGS__; }
 
@@ -71,11 +78,17 @@ public:
   }
 };
 
-void checkMagic(ByteReader& in) noexcept {
+// Reads the magic and returns the schema version. v1 blobs keep loading so
+// existing dumps and the hand-built test fixtures stay valid.
+uint8_t checkMagic(ByteReader& in) noexcept {
   for (std::uint8_t expected : kMagic) {
     if (in.readByte() != expected)
-      fail("invalid magic bits");
+      fail("invalid magic bits", 0);
   }
+  const uint8_t version = in.readByte();
+  if (version != kSchemaV1 && version != kSchemaV2)
+    fail("unsupported recipe schema version", 0);
+  return version;
 }
 
 // Everything the first pass learns, used to size the arrays the second pass
@@ -88,6 +101,8 @@ struct Layout {
   aw::vector<uint> rpi;
   // Maps `recipe` to its number of items (items per recipe).
   aw::vector<uint> ipr;
+  // Maps `recipe` to its number of outputs (anchor plus byproducts).
+  aw::vector<uint> opr;
   // Maps `recipe` to its number of workstations.
   aw::vector<uint> wpr;
 
@@ -129,8 +144,9 @@ Layout scan(std::span<const std::byte> bytes) noexcept {
   ByteReader in(bytes);
   Layout layout;
 
-  // Check magic bits.
-  checkMagic(in);
+  // Check magic bits. The version decides whether a byproduct list follows the
+  // workstations of every recipe.
+  const uint8_t version = checkMagic(in);
 
   // Check header.
   layout.nReal = in.readVarInt();
@@ -151,8 +167,30 @@ Layout scan(std::span<const std::byte> bytes) noexcept {
     layout.rpi[output - 1] += nRecipe;
 
     for (uint i = 0; i < nRecipe; i++) {
-      in.readVarLong();  // output amount
+      in.readVarLong();  // anchor amount
       layout.wpr.push_back(readWorkstations(in, layout));
+
+      // Byproducts are extra outputs of the same recipe. The first handle is
+      // absolute and the rest are ascending deltas, exactly like the input
+      // list below.
+      uint nOutputs = 1;
+      if (version >= kSchemaV2) {
+        const uint nByproduct = in.readVarInt();
+        nOutputs += nByproduct;
+        uint byproduct = 0;
+        for (uint j = 0; j < nByproduct; j++) {
+          in.readVarLong();  // byproduct amount
+          const uint delta = in.readVarInt();
+          if (byproduct > UINT_MAX - delta)
+            fail("byproduct handle overflow", layout);
+          byproduct += delta;
+          if (byproduct == 0)
+            fail("resource handle 0 is not valid", layout);
+          layout.noteHandle(byproduct);
+          layout.rpi[byproduct - 1]++;
+        }
+      }
+      layout.opr.push_back(nOutputs);
 
       uint nInput = in.readVarInt();
       layout.ipr.push_back(nInput);
@@ -192,6 +230,20 @@ struct RecipeKeyLess {
       return g.output[a] < g.output[b];
     if (g.outputAmt[a] != g.outputAmt[b])
       return g.outputAmt[a] < g.outputAmt[b];
+
+    const auto oa = g.outputsOf(a);
+    const auto ob = g.outputsOf(b);
+    const auto owa = g.outputAmountsOf(a);
+    const auto owb = g.outputAmountsOf(b);
+    const size_t sharedOut = oa.size() < ob.size() ? oa.size() : ob.size();
+    for (size_t i = 0; i < sharedOut; i++) {
+      if (oa[i] != ob[i])
+        return oa[i] < ob[i];
+      if (owa[i] != owb[i])
+        return owa[i] < owb[i];
+    }
+    if (oa.size() != ob.size())
+      return oa.size() < ob.size();
 
     const auto ta = g.inputsOf(a);
     const auto tb = g.inputsOf(b);
@@ -276,27 +328,60 @@ void canonicalizeRecipes() noexcept {
   graph.workstations.offsets = std::move(newWsOffsets);
   graph.workstations.targets = std::move(newWsTargets);
 
-  // Rebuild item -> recipe edges.
+  // Rebuild item -> recipe edges. One edge per output, so a recipe appears in
+  // the producer list of every item it outputs.
   aw::vector<uint> itemOffsets(graph.nItem, 0);
   for (uint r = 0; r < nRecipe; r++) {
-    if (rep[r] == r)
-      itemOffsets[graph.output[r]]++;
+    if (rep[r] != r)
+      continue;
+    for (ItemId item : graph.outputsOf(r))
+      itemOffsets[item]++;
   }
   prefixSum(itemOffsets);
 
-  aw::vector<ItemId> itemTargets(newNRecipe, 0);
-  aw::vector<Amount> itemWeights(newNRecipe, 0);
+  aw::vector<ItemId> itemTargets(itemOffsets.back(), 0);
+  aw::vector<Amount> itemWeights(itemOffsets.back(), 0);
   aw::vector<uint> itemCursor(itemOffsets.begin(), itemOffsets.end() - 1);
   for (uint r = 0; r < nRecipe; r++) {
     if (rep[r] != r)
       continue;
-    const uint slot = itemCursor[graph.output[r]]++;
-    itemTargets[slot] = newId[r];
-    itemWeights[slot] = graph.outputAmt[r];
+    const auto outs = graph.outputsOf(r);
+    const auto amounts = graph.outputAmountsOf(r);
+    for (size_t k = 0; k < outs.size(); k++) {
+      const uint slot = itemCursor[outs[k]]++;
+      itemTargets[slot] = newId[r];
+      itemWeights[slot] = amounts[k];
+    }
   }
   graph.i2r.offsets = std::move(itemOffsets);
   graph.i2r.targets = std::move(itemTargets);
   graph.i2r.weights = std::move(itemWeights);
+
+  // Rebuild recipe -> output edges.
+  aw::vector<uint> outOffsets(newNRecipe, 0);
+  for (uint r = 0; r < nRecipe; r++) {
+    if (rep[r] == r)
+      outOffsets[newId[r]] = (uint) graph.outputsOf(r).size();
+  }
+  prefixSum(outOffsets);
+
+  aw::vector<ItemId> outTargets(outOffsets.back(), 0);
+  aw::vector<Amount> outWeights(outOffsets.back(), 0);
+  for (uint r = 0; r < nRecipe; r++) {
+    if (rep[r] != r)
+      continue;
+    uint slot = outOffsets[newId[r]];
+    const auto targets = graph.outputsOf(r);
+    const auto weights = graph.outputAmountsOf(r);
+    for (size_t k = 0; k < targets.size(); k++) {
+      outTargets[slot] = targets[k];
+      outWeights[slot] = weights[k];
+      slot++;
+    }
+  }
+  graph.r2o.offsets = std::move(outOffsets);
+  graph.r2o.targets = std::move(outTargets);
+  graph.r2o.weights = std::move(outWeights);
 
   // Rebuild recipe -> item edges.
   aw::vector<uint> inputOffsets(newNRecipe, 0);
@@ -363,12 +448,39 @@ void canonicalizeRecipes() noexcept {
 struct MutableRecipe {
   ItemId out = 0;
   Amount outAmt = 0;
+  // Extra outputs beyond the anchor, ascending by item and never containing
+  // the anchor. The anchor stays in `out`/`outAmt` so the prefix invariant and
+  // the recipe identity survive every rewrite.
+  aw::vector<ItemId> outs;
+  aw::vector<Amount> outAmts;
   aw::vector<ItemId> ws;
   aw::vector<ItemId> inputs;
   aw::vector<Amount> amounts;
   // Source recipe id, or UINT32_MAX for a recipe the query-time inliner made.
   uint32_t origin = UINT32_MAX;
 };
+
+// Writes one recipe's outputs -- anchor merged with the sorted byproduct list
+// -- into a CSR slot, keeping the list ascending by item.
+void writeRecipeOutputs(const MutableRecipe &rec, ItemId *targets, Amount *weights,
+                        uint slot) noexcept {
+  size_t k = 0;
+  while (k < rec.outs.size() && rec.outs[k] < rec.out) {
+    targets[slot] = rec.outs[k];
+    weights[slot] = rec.outAmts[k];
+    slot++;
+    k++;
+  }
+  targets[slot] = rec.out;
+  weights[slot] = rec.outAmt;
+  slot++;
+  while (k < rec.outs.size()) {
+    targets[slot] = rec.outs[k];
+    weights[slot] = rec.outAmts[k];
+    slot++;
+    k++;
+  }
+}
 
 // The core fixpoint. `allowed` is consulted once, while the member sets are
 // collected, and receives the index of a recipe in `recipes`. The query-time
@@ -552,6 +664,8 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
       MutableRecipe copy;
       copy.out = recipes[i].out;
       copy.outAmt = recipes[i].outAmt;
+      copy.outs = recipes[i].outs;
+      copy.outAmts = recipes[i].outAmts;
       copy.ws = recipes[i].ws;
       copy.inputs = newInputs;
       copy.amounts = newAmounts;
@@ -579,6 +693,16 @@ void extractRecipes(const CraftingGraph& graph, aw::vector<MutableRecipe> &out) 
     MutableRecipe rec;
     rec.out = graph.output[r];
     rec.outAmt = graph.outputAmt[r];
+    const auto outs = graph.outputsOf(r);
+    const auto outAmts = graph.outputAmountsOf(r);
+    rec.outs.reserve(outs.size());
+    rec.outAmts.reserve(outAmts.size());
+    for (size_t k = 0; k < outs.size(); k++) {
+      if (outs[k] == rec.out)
+        continue;
+      rec.outs.push_back_unchecked(outs[k]);
+      rec.outAmts.push_back_unchecked(outAmts[k]);
+    }
     const auto ws = graph.workstations.targetsOf(r);
     rec.ws.assign(ws.begin(), ws.end());
     const auto inputs = graph.inputsOf(r);
@@ -595,22 +719,41 @@ void rebuildFromRecipes(CraftingGraph& graph, aw::vector<MutableRecipe> &recipes
   const uint nItem = graph.nItem;
   const uint newNRecipe = (uint) recipes.size();
 
-  // Rebuild item -> recipe.
+  // Rebuild item -> recipe. One edge per output.
   aw::vector<uint> itemOffsets(nItem, 0);
-  for (const MutableRecipe& rec : recipes)
+  for (const MutableRecipe& rec : recipes) {
     itemOffsets[rec.out]++;
+    for (ItemId o : rec.outs)
+      itemOffsets[o]++;
+  }
   prefixSum(itemOffsets);
   graph.i2r.offsets = std::move(itemOffsets);
-  graph.i2r.targets.resize(newNRecipe);
-  graph.i2r.weights.resize(newNRecipe);
+  graph.i2r.targets.resize(graph.i2r.offsets.back());
+  graph.i2r.weights.resize(graph.i2r.offsets.back());
   {
     aw::vector<uint> cursor(graph.i2r.offsets.begin(), graph.i2r.offsets.end() - 1);
     for (uint r = 0; r < newNRecipe; r++) {
-      const uint slot = cursor[recipes[r].out]++;
-      graph.i2r.targets[slot] = r;
-      graph.i2r.weights[slot] = recipes[r].outAmt;
+      const uint anchorSlot = cursor[recipes[r].out]++;
+      graph.i2r.targets[anchorSlot] = r;
+      graph.i2r.weights[anchorSlot] = recipes[r].outAmt;
+      for (size_t k = 0; k < recipes[r].outs.size(); k++) {
+        const uint slot = cursor[recipes[r].outs[k]]++;
+        graph.i2r.targets[slot] = r;
+        graph.i2r.weights[slot] = recipes[r].outAmts[k];
+      }
     }
   }
+
+  // Rebuild recipe -> output.
+  aw::vector<uint> outOffsets(newNRecipe + 1, 0);
+  for (uint r = 0; r < newNRecipe; r++)
+    outOffsets[r + 1] = outOffsets[r] + 1 + (uint) recipes[r].outs.size();
+  graph.r2o.offsets = std::move(outOffsets);
+  graph.r2o.targets.resize(graph.r2o.offsets.back());
+  graph.r2o.weights.resize(graph.r2o.offsets.back());
+  for (uint r = 0; r < newNRecipe; r++)
+    writeRecipeOutputs(recipes[r], graph.r2o.targets.data(), graph.r2o.weights.data(),
+                       graph.r2o.offsets[r]);
 
   // Rebuild recipe -> item.
   graph.r2i.offsets.assign(newNRecipe + 1, 0);
@@ -650,24 +793,45 @@ void rebuildFromRecipes(CraftingGraph& graph, aw::vector<MutableRecipe> &recipes
   canonicalizeRecipes();
 }
 
-// The amount of a recipe's own output that the recipe also consumes.
-Amount selfConsumption(const MutableRecipe& rec) noexcept {
-  Amount self = 0;
-  for (size_t k = 0; k < rec.inputs.size(); k++)
-    if (rec.inputs[k] == rec.out)
-      self += rec.amounts[k];
-  return self;
+// True when every balance row of the recipe's column is <= 0: for each output
+// `o`, the recipe consumes at least as much of `o` as it produces. A row that
+// is not an output is a pure input, hence <= 0 already. Such a column is
+// dominated by doing nothing -- deleting one execution keeps every balance at
+// least as high and strictly lowers the step count -- so no optimal plan uses
+// it. With byproducts the test has to cover every output row, not just the
+// anchor: a recipe can be a net loss on its anchor and a net gain on a
+// byproduct.
+bool columnIsNonPositive(const MutableRecipe& rec) noexcept {
+  const auto consumed = [&](ItemId item) noexcept {
+    Amount sum = 0;
+    for (size_t k = 0; k < rec.inputs.size(); k++)
+      if (rec.inputs[k] == item)
+        sum += rec.amounts[k];
+    return sum;
+  };
+  if (rec.outAmt > consumed(rec.out))
+    return false;
+  for (size_t k = 0; k < rec.outs.size(); k++)
+    if (rec.outAmts[k] > consumed(rec.outs[k]))
+      return false;
+  return true;
 }
 
-// The same quantity read off the CSR form, without materializing the recipes.
-Amount selfConsumptionAt(const CraftingGraph& graph, uint r) noexcept {
+// The same test read off the CSR form, without materializing the recipes.
+bool columnIsNonPositiveAt(const CraftingGraph& graph, uint r) noexcept {
+  const auto outs = graph.outputsOf(r);
+  const auto outAmts = graph.outputAmountsOf(r);
   const auto inputs = graph.inputsOf(r);
   const auto amounts = graph.inputAmountsOf(r);
-  Amount self = 0;
-  for (size_t k = 0; k < inputs.size(); k++)
-    if (inputs[k] == graph.output[r])
-      self += amounts[k];
-  return self;
+  for (size_t o = 0; o < outs.size(); o++) {
+    Amount consumed = 0;
+    for (size_t k = 0; k < inputs.size(); k++)
+      if (inputs[k] == outs[o])
+        consumed += amounts[k];
+    if (outAmts[o] > consumed)
+      return false;
+  }
+  return true;
 }
 
 // Flow normalization, before any pass reads an amount: an input that consumes
@@ -723,13 +887,11 @@ bool dropNonPositiveInputs(CraftingGraph& graph) noexcept {
 // Drops the recipes that can never appear in an optimal plan, before any pass
 // sees the graph. Two classes of real recipe qualify:
 //
-//   * A recipe that consumes at least as much of its own output as it produces
-//     has a column v_r <= 0: the output row is `p - c <= 0` and every other row
-//     is a consumption. It is therefore dominated by doing nothing -- deleting
-//     one of its executions from any feasible plan keeps the plan feasible and
-//     strictly cheaper -- so no optimal plan uses it, for any target and any
-//     inventory. This needs no stock or workstation guard. It covers the
-//     synthetic self-loops and the per-output copies of multi-output recipes.
+//   * A recipe whose whole column is <= 0 -- on every output it produces no
+//     more than it consumes -- is dominated by doing nothing, so no optimal
+//     plan uses it, for any target and any inventory. This needs no stock or
+//     workstation guard. It covers the synthetic self-loops and any real
+//     recipe that eats its own output at least as fast as it makes it.
 //   * A recipe with no workstation can never be entered by the reachability
 //     walk, so it is unreachable.
 //
@@ -740,11 +902,10 @@ bool dropNonPositiveInputs(CraftingGraph& graph) noexcept {
 // canonicalizeRecipes(), so the caller can skip its own call in that case.
 bool dropUselessRecipes(CraftingGraph& graph) noexcept {
   const auto netLoss = [&](const MutableRecipe& rec) noexcept {
-    return rec.out < graph.nReal && selfConsumption(rec) >= rec.outAmt;
+    return rec.out < graph.nReal && columnIsNonPositive(rec);
   };
   const auto netLossAt = [&](uint r) noexcept {
-    return graph.output[r] < graph.nReal &&
-           selfConsumptionAt(graph, r) >= graph.outputAmt[r];
+    return graph.output[r] < graph.nReal && columnIsNonPositiveAt(graph, r);
   };
 
   bool any = false;
@@ -915,6 +1076,11 @@ struct ReachQuery {
           continue;
 
         recipeSeen[recipe] = 1;
+        // A recipe reached through one of its byproducts still outputs its
+        // anchor. Put every output row in the subgraph, but do not enqueue it:
+        // a surplus output must not pull in its other producers.
+        for (ItemId out : graph.outputsOf(recipe))
+          itemSeen[out] = 1;
         for (ItemId input : graph.inputsOf(recipe)) {
           if (!itemSeen[input]) {
             itemSeen[input] = 1;
@@ -1084,6 +1250,16 @@ aw::vector<MutableRecipe> collectSurvivingRecipes(const aw::vector<uint8_t> &rec
     rec.origin = r;
     rec.out = graph.output[r];
     rec.outAmt = graph.outputAmt[r];
+    const auto outs = graph.outputsOf(r);
+    const auto outAmts = graph.outputAmountsOf(r);
+    rec.outs.reserve(outs.size());
+    rec.outAmts.reserve(outAmts.size());
+    for (size_t k = 0; k < outs.size(); k++) {
+      if (outs[k] == rec.out)
+        continue;
+      rec.outs.push_back_unchecked(outs[k]);
+      rec.outAmts.push_back_unchecked(outAmts[k]);
+    }
     // Workstations are not kept in a Subgraph: reachability already filtered
     // by the caller's station set, and every synthesized variant inherits
     // them. They are still copied here so the inliner can tell a synthetic
@@ -1107,6 +1283,8 @@ void dropUnusedItems(aw::vector<uint8_t> &itemSeen, Handle output,
   used[CraftingGraph::itemNode(output)] = 1;
   for (const MutableRecipe &rec : built) {
     used[rec.out] = 1;
+    for (ItemId outs : rec.outs)
+      used[outs] = 1;
     for (ItemId input : rec.inputs)
       used[input] = 1;
   }
@@ -1150,20 +1328,28 @@ Subgraph assembleSubgraph(const aw::vector<uint8_t> &itemSeen,
   sub.nItem = subItems;
   sub.nRecipe = subRecipes;
 
-  // Fill item -> recipe. One edge per recipe, grouped by output item.
+  // Fill item -> recipe. One edge per output, grouped by output item.
   sub.i2r.offsets.assign(subItems + 1, 0);
-  for (const MutableRecipe &rec : built)
+  for (const MutableRecipe &rec : built) {
     sub.i2r.offsets[itemMap[rec.out] + 1]++;
+    for (ItemId o : rec.outs)
+      sub.i2r.offsets[itemMap[o] + 1]++;
+  }
   for (uint i = 0; i + 1 < sub.i2r.offsets.size(); i++)
     sub.i2r.offsets[i + 1] += sub.i2r.offsets[i];
-  sub.i2r.targets.resize(subRecipes);
-  sub.i2r.weights.resize(subRecipes);
+  sub.i2r.targets.resize(sub.i2r.offsets.back());
+  sub.i2r.weights.resize(sub.i2r.offsets.back());
   {
     aw::vector<uint> cursor(sub.i2r.offsets.begin(), sub.i2r.offsets.end() - 1);
     for (uint i = 0; i < subRecipes; i++) {
-      const uint slot = cursor[itemMap[built[i].out]]++;
-      sub.i2r.targets[slot] = i;
-      sub.i2r.weights[slot] = built[i].outAmt;
+      const uint anchorSlot = cursor[itemMap[built[i].out]]++;
+      sub.i2r.targets[anchorSlot] = i;
+      sub.i2r.weights[anchorSlot] = built[i].outAmt;
+      for (size_t k = 0; k < built[i].outs.size(); k++) {
+        const uint slot = cursor[itemMap[built[i].outs[k]]]++;
+        sub.i2r.targets[slot] = i;
+        sub.i2r.weights[slot] = built[i].outAmts[k];
+      }
     }
   }
 
@@ -1172,6 +1358,35 @@ Subgraph assembleSubgraph(const aw::vector<uint8_t> &itemSeen,
   for (uint i = 0; i < subRecipes; i++) {
     sub.output[i] = itemMap[built[i].out];
     sub.outputAmt[i] = built[i].outAmt;
+  }
+
+  // Fill recipe -> output. `itemMap` is monotonic, so mapping the sorted
+  // byproduct list preserves the ascending order the accessors rely on.
+  sub.r2o.offsets.assign(subRecipes + 1, 0);
+  for (uint i = 0; i < subRecipes; i++)
+    sub.r2o.offsets[i + 1] = sub.r2o.offsets[i] + 1 + (uint) built[i].outs.size();
+  sub.r2o.targets.resize(sub.r2o.offsets.back());
+  sub.r2o.weights.resize(sub.r2o.offsets.back());
+  for (uint i = 0; i < subRecipes; i++) {
+    const MutableRecipe &rec = built[i];
+    const ItemId anchor = itemMap[rec.out];
+    uint slot = sub.r2o.offsets[i];
+    size_t k = 0;
+    while (k < rec.outs.size() && itemMap[rec.outs[k]] < anchor) {
+      sub.r2o.targets[slot] = itemMap[rec.outs[k]];
+      sub.r2o.weights[slot] = rec.outAmts[k];
+      slot++;
+      k++;
+    }
+    sub.r2o.targets[slot] = anchor;
+    sub.r2o.weights[slot] = rec.outAmt;
+    slot++;
+    while (k < rec.outs.size()) {
+      sub.r2o.targets[slot] = itemMap[rec.outs[k]];
+      sub.r2o.weights[slot] = rec.outAmts[k];
+      slot++;
+      k++;
+    }
   }
 
   // Fill recipe -> item.
@@ -1208,8 +1423,13 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
 
   prefixSum(layout.rpi);
   graph.i2r.offsets = std::move(layout.rpi);
-  graph.i2r.targets.resize(nRecipe);
-  graph.i2r.weights.resize(nRecipe);
+  graph.i2r.targets.resize(graph.i2r.offsets.back());
+  graph.i2r.weights.resize(graph.i2r.offsets.back());
+
+  prefixSum(layout.opr);
+  graph.r2o.offsets = std::move(layout.opr);
+  graph.r2o.targets.resize(graph.r2o.offsets.back());
+  graph.r2o.weights.resize(graph.r2o.offsets.back());
 
   prefixSum(layout.ipr);
   graph.r2i.offsets = std::move(layout.ipr);
@@ -1225,13 +1445,18 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
 
   // Start filling the grpah.
   ByteReader in(bytes);
-  checkMagic(in);
+  const uint8_t version = checkMagic(in);
   [[maybe_unused]]
   const uint nReal = in.readVarInt();
   const uint nOutput = in.readVarInt();
 
   // This tracks the next free slot in each row.
   aw::vector<uint> itemCursor(graph.i2r.offsets.begin(), graph.i2r.offsets.end() - 1);
+
+  // Scratch for one recipe's outputs (anchor plus byproducts) before they are
+  // sorted, deduplicated and written to `r2o`.
+  aw::vector<std::pair<ItemId, Amount>> outputs;
+  outputs.reserve(4);
 
   uint output = 0;
   uint recipe = 0;
@@ -1240,7 +1465,7 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
     const uint nRecipe = in.readVarInt();
 
     for (uint i = 0; i < nRecipe; ++i) {
-      Amount outputAmt = in.readVarLong();
+      const Amount anchorAmt = in.readVarLong();
 
       uint nWs = in.readVarInt();
       uint wsSlot = graph.workstations.offsets[recipe];
@@ -1253,14 +1478,48 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
         graph.workstations.targets[wsSlot++] = ws - 1;
       }
 
-      uint nInput = in.readVarInt();
+      outputs.clear();
+      outputs.emplace_back(output - 1, anchorAmt);
+      if (version >= kSchemaV2) {
+        const uint nByproduct = in.readVarInt();
+        uint byproduct = 0;
+        for (uint j = 0; j < nByproduct; j++) {
+          const Amount amt = in.readVarLong();
+          byproduct += in.readVarInt();
+          outputs.emplace_back(byproduct - 1, amt);
+        }
+      }
+
+      // Sort by item and merge a repeated row (an input may also be an output,
+      // and a malformed blob may name the anchor twice).
+      std::sort(outputs.begin(), outputs.end());
+      size_t kept = 0;
+      for (size_t k = 0; k < outputs.size();) {
+        const ItemId item = outputs[k].first;
+        Amount sum = 0;
+        while (k < outputs.size() && outputs[k].first == item) {
+          sum += outputs[k].second;
+          k++;
+        }
+        outputs[kept++] = {item, sum};
+      }
+      outputs.resize(kept);
 
       graph.output[recipe] = output - 1;
-      graph.outputAmt[recipe] = outputAmt;
+      graph.outputAmt[recipe] = anchorAmt;
 
-      uint itemSlot = itemCursor[output - 1]++;
-      graph.i2r.targets[itemSlot] = recipe;
-      graph.i2r.weights[itemSlot] = outputAmt;
+      uint r2oSlot = graph.r2o.offsets[recipe];
+      for (const auto &[item, amt] : outputs) {
+        graph.r2o.targets[r2oSlot] = item;
+        graph.r2o.weights[r2oSlot] = amt;
+        r2oSlot++;
+
+        const uint itemSlot = itemCursor[item]++;
+        graph.i2r.targets[itemSlot] = recipe;
+        graph.i2r.weights[itemSlot] = amt;
+      }
+
+      uint nInput = in.readVarInt();
 
       uint recipeSlot = graph.r2i.offsets[recipe];
       uint input = 0;
@@ -1318,6 +1577,16 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   query.pruneSatellites();
 
   aw::vector<MutableRecipe> built = collectSurvivingRecipes(query.recipeSeen);
+
+  // A recipe reached through one of its byproducts still outputs its anchor,
+  // and every output row has to exist in the subgraph. The walk only visits
+  // items it needs, so mark the remaining outputs of the surviving recipes
+  // here, before any assembly or inlining reads `itemSeen`.
+  for (const MutableRecipe &rec : built) {
+    query.itemSeen[rec.out] = 1;
+    for (ItemId o : rec.outs)
+      query.itemSeen[o] = 1;
+  }
 
   // Query-time single-use inlining. At this point `recipeSeen` already
   // reflects tag pruning and the inventory guard, so a tag's surviving member

@@ -21,8 +21,8 @@ signatures.
 * **The plan is one blob-in / blob-out call.** The whole query is therefore
   atomic with respect to the status flag, and the JNI surface stays at five
   methods.
-* **The response is self-describing.** Every executed recipe carries its output
-  handle, output amount and inputs. It has to: registration canonicalization
+* **The response is self-describing.** Every executed recipe carries its anchor
+  output, its byproducts and its inputs. It has to: registration canonicalization
   renumbers and merges recipes, so a subgraph recipe id is *not* an index into
   the blob the mod sent, and query-time tag inlining can synthesize recipes that
   were never in the blob at all. `Subgraph::itemOrigin` / `recipeOrigin` cannot
@@ -119,8 +119,11 @@ varlong      numBranches
 varint       fixedColumns
 varint       nUses
   varlong    count               recipe executions, always >= 1
-  varint     outputHandle
-  varlong    outputAmount        units produced per execution
+  varint     outputHandle        anchor output of the recipe
+  varlong    outputAmount        units of the anchor produced per execution
+  varint     nByproducts
+    varint   byproductHandleDelta ascending
+    varlong  byproductAmount     units produced per execution
   varint     nInputs
     varint   inputHandleDelta    ascending
     varlong  inputAmount         units consumed per execution
@@ -128,6 +131,8 @@ varint       nUses
 
 Only recipes the plan actually executes appear: the solver returns one value per
 subgraph recipe and most are zero. Entries come in subgraph recipe order.
+`byproductHandleDelta` is relative to the previous byproduct, exactly like the
+input list; the anchor is never repeated in it.
 `provenOptimal` is false when the solver stopped on its gap or time budget rather
 than proving optimality; the plan is still a real plan, just not certified
 cheapest. It is also false for `cycle unfulfilled`.

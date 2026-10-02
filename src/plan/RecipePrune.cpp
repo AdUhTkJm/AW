@@ -253,7 +253,7 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
         }
 
         for (RecipeId r : producers) {
-          const Amount p = graph.outputAmt[r];
+          const Amount p = graph.producedAmountOf(r, Y);
           if (p <= 0) {
             candidates.clear();
             break;

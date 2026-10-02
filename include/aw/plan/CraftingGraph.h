@@ -1,6 +1,7 @@
 #ifndef CRAFTING_GRAPH_H
 #define CRAFTING_GRAPH_H
 
+#include <algorithm>
 #include <span>
 #include "aw/utils/PodVector.h"
 
@@ -74,16 +75,55 @@ struct BaseCraftingGraph {
   // Maps recipe to all items that it needs as input. Targets are item ids.
   SparseGraph r2i;
 
-  // Output item id per recipe. Non-decreasing: the decoder emits recipes in
-  // ascending output-handle order, and every path that rewrites the recipe list
-  // (canonicalizeRecipes, rebuildFromRecipes, inlineSingleUseTagsCore,
+  // Anchor output item id per recipe. Non-decreasing: the decoder emits recipes
+  // in ascending anchor-handle order, and every path that rewrites the recipe
+  // list (canonicalizeRecipes, rebuildFromRecipes, inlineSingleUseTagsCore,
   // assembleSubgraph) preserves or restores that order instead of sorting, so
   // the real recipes (output < nReal) are a prefix and the synthetic tag edges
   // a suffix. A loop that only handles real recipes may therefore `break` at
   // the first recipe with `output[r] >= nReal`, and one that only handles tag
   // edges may start at that boundary.
+  //
+  // The anchor is the recipe's identity, its sort key and the row the plan
+  // response names it under. It is not necessarily the only output; see r2o.
   aw::vector<ItemId> output;
   aw::vector<Amount> outputAmt;
+
+  // Every gross output per recipe, CSR over recipes: recipe `r` outputs
+  // `r2o.targets[offsets[r] .. offsets[r + 1])` at the parallel amounts in
+  // `weights`. Entries are sorted ascending by item and deduplicated. The
+  // anchor is always present; the remaining entries are byproducts. A recipe
+  // that consumes an item it also outputs keeps both rows here and in `r2i`,
+  // and only the net column merges them.
+  //
+  // `i2r` carries one edge per output, so a recipe appears in the producer list
+  // of every item it outputs, not just its anchor.
+  SparseGraph r2o;
+
+  [[nodiscard]]
+  std::span<const ItemId> outputsOf(RecipeId recipe) const noexcept {
+    return r2o.targetsOf(recipe);
+  }
+
+  [[nodiscard]]
+  std::span<const Amount> outputAmountsOf(RecipeId recipe) const noexcept {
+    return r2o.weightsOf(recipe);
+  }
+
+  [[nodiscard]]
+  bool hasByproducts(RecipeId recipe) const noexcept {
+    return r2o.offsets[recipe + 1] - r2o.offsets[recipe] > 1;
+  }
+
+  // Gross amount of `item` one execution outputs, 0 when it outputs none.
+  // Binary search over the sorted output list.
+  [[nodiscard]]
+  Amount producedAmountOf(RecipeId recipe, ItemId item) const noexcept {
+    const ItemId *begin = r2o.targets.data() + r2o.offsets[recipe];
+    const ItemId *end = r2o.targets.data() + r2o.offsets[recipe + 1];
+    const ItemId *it = std::lower_bound(begin, end, item);
+    return it != end && *it == item ? r2o.weights[(size_t) (it - r2o.targets.data())] : 0;
+  }
 
   [[nodiscard]]
   bool isRealItem(ItemId node) const noexcept {

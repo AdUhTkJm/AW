@@ -165,6 +165,38 @@ aw::vector<std::byte> buildPlanSample() {
   return w.out;
 }
 
+// A genuine multi-output recipe in schema v2:
+//
+//   item 1 (A) <- r0 (x1, workstation [1], byproduct item 2 (B) x1, no inputs)
+//
+// r0 is the only producer of B, so requesting B must reach the recipe through
+// its byproduct edge and the response must name B as a byproduct of r0.
+aw::vector<std::byte> buildByproductSample() {
+  AwrWriter w;
+  w.header(2, 1);
+  w.item(1, 1);
+  w.recipe(1, {1}, {{2, 1}}, {});
+  return w.out;
+}
+
+// A byproduct feeds the next recipe:
+//
+//   item 1 (A) <- r0 (x2, ws [1], byproduct item 2 (B) x1, input item 3 (C) x1)
+//   item 2 (B) <- r1 (x1, ws [1], input item 1 (A) x1)
+//   item 3 (C) is a raw leaf.
+//
+// With C in stock, r0 makes 2 A and one B, then r1 turns one A into the second
+// B: cost two, and it proves the balance matrix credits the byproduct row.
+aw::vector<std::byte> buildByproductChainSample() {
+  AwrWriter w;
+  w.header(3, 2);
+  w.item(1, 1);
+  w.recipe(2, {1}, {{2, 1}}, {{3, 1}});
+  w.item(2, 1);
+  w.recipe(1, {1}, {{1, 1}});
+  return w.out;
+}
+
 // item 1 <- r0 consumes item 2, which has no recipe at all.
 aw::vector<std::byte> buildPlanLeafSample() {
   AwrWriter w;
@@ -3339,6 +3371,8 @@ struct DecodedUse {
   aw::Amount count = 0;
   aw::Handle output = 0;
   aw::Amount outputAmount = 0;
+  aw::vector<aw::Handle> byproducts;
+  aw::vector<aw::Amount> byproductAmounts;
   aw::vector<aw::Handle> inputs;
   aw::vector<aw::Amount> inputAmounts;
 };
@@ -3368,6 +3402,13 @@ DecodedResponse decodePlanResponse(const aw::vector<std::byte>& blob) {
     use.count = (aw::Amount) in.var();
     use.output = (aw::Handle) in.var();
     use.outputAmount = (aw::Amount) in.var();
+    const std::uint64_t byproducts = in.var();
+    std::uint32_t byproductHandle = 0;
+    for (std::uint64_t k = 0; k < byproducts && in.ok; k++) {
+      byproductHandle += (std::uint32_t) in.var();
+      use.byproducts.push_back(byproductHandle);
+      use.byproductAmounts.push_back((aw::Amount) in.var());
+    }
     const std::uint64_t inputs = in.var();
     std::uint32_t handle = 0;
     for (std::uint64_t k = 0; k < inputs && in.ok; k++) {
@@ -3456,6 +3497,60 @@ void testPlanProtocol() {
   rejects(encodePlanRequest(1, 4, {1, 2}, {{99, 1}}), "an out-of-range stock handle is rejected");
 
   aw::options.tagInlining = savedInlining;
+}
+
+void testByproducts() {
+  std::cout << "[Test] multi-output recipes\n";
+  aw::registerCraftingGraph(buildByproductSample());
+  expect(aw::getCraftingError() == nullptr, "byproduct sample parses");
+
+  std::string error;
+  // Request the byproduct: r0 is reachable only through that edge.
+  const auto response = aw::planBlob(encodePlanRequest(2, 1, {1}, {}), error);
+  expect(error.empty(), "a byproduct request is accepted");
+
+  const DecodedResponse decoded = decodePlanResponse(response);
+  expect(decoded.ok, "the byproduct response decodes exactly");
+  expect(decoded.status == (int) aw::PlanStatus::OK, "the byproduct plan is feasible");
+  expect(decoded.uses.size() == 1, "one recipe is executed");
+  if (decoded.uses.size() == 1) {
+    expect(decoded.uses[0].count == 1 && decoded.uses[0].output == 1 &&
+               decoded.uses[0].outputAmount == 1,
+           "r0 anchors on item 1");
+    expect(decoded.uses[0].byproducts.size() == 1 && decoded.uses[0].byproducts[0] == 2 &&
+               decoded.uses[0].byproductAmounts[0] == 1,
+           "r0 names item 2 as a byproduct");
+    expect(decoded.uses[0].inputs.empty(), "r0 has no inputs");
+  }
+
+  // The anchor request reaches the same row, again with the byproduct attached.
+  error.clear();
+  const auto anchored = aw::planBlob(encodePlanRequest(1, 1, {1}, {}), error);
+  const DecodedResponse anchoredDecoded = decodePlanResponse(anchored);
+  expect(anchoredDecoded.ok && anchoredDecoded.uses.size() == 1,
+         "the anchor request uses the same recipe");
+  if (anchoredDecoded.uses.size() == 1)
+    expect(anchoredDecoded.uses[0].byproducts.size() == 1 &&
+               anchoredDecoded.uses[0].byproducts[0] == 2,
+           "the anchor plan still reports the byproduct");
+
+  // A byproduct consumed by a second recipe. Both rows of r0 appear in the
+  // balance: the anchor (A x2) and the byproduct (B x1).
+  aw::registerCraftingGraph(buildByproductChainSample());
+  expect(aw::getCraftingError() == nullptr, "byproduct chain parses");
+  error.clear();
+  const auto chain = aw::planBlob(encodePlanRequest(2, 2, {1}, {{3, 1}}), error);
+  expect(error.empty(), "the chain request is accepted");
+  const DecodedResponse chainDecoded = decodePlanResponse(chain);
+  expect(chainDecoded.ok && chainDecoded.status == (int) aw::PlanStatus::OK,
+         "the byproduct chain plan is feasible");
+  if (chainDecoded.ok && chainDecoded.status == (int) aw::PlanStatus::OK) {
+    expect(chainDecoded.uses.size() == 2, "both recipes are executed");
+    long total = 0;
+    for (const DecodedUse& use : chainDecoded.uses)
+      total += use.count;
+    expect(total == 2, "the chain costs two executions");
+  }
 }
 
 void testOptionsJson() {
@@ -3555,6 +3650,7 @@ int main() {
   testSatelliteLeakPruning();
   testSatellitePruningParity();
   testPlanProtocol();
+  testByproducts();
   testOptionsJson();
 
   if (failures == 0) {

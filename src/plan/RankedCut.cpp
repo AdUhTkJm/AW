@@ -136,35 +136,54 @@ ReachableView::ReachableView(const BaseCraftingGraph &g, ItemId target) noexcept
   // `i -> r` means recipe `r` needs item `i` as input.
   aw::vector<ItemId> consumerOffsets(nItem + 1, 0);
 
-  // First compute offsets.
+  // First compute offsets. `adj` stays item-level (one entry per output row of
+  // a recipe), which is what the item SCC test wants. `consumers` counts each
+  // recipe once, so a multi-output recipe is released once when the last of its
+  // dependencies is ranked.
   size_t nEdge = 0;
   for (uint32_t item : order) {
     uint32_t count = 0;
     for (RecipeId recipe : g.producersOf(item)) {
       const auto inputs = g.inputsOf(recipe);
       count += (uint32_t) inputs.size();
-      for (ItemId input : inputs)
-        consumerOffsets[input + 1]++;
     }
     adjOffsets[item + 1] = count;
     nEdge += count;
   }
-  for (uint32_t item = 1; item <= nItem; item++) {
+  for (uint32_t item = 1; item <= nItem; item++)
     adjOffsets[item] += adjOffsets[item - 1];
-    consumerOffsets[item] += consumerOffsets[item - 1];
+
+  aw::vector<uint8_t> recipeSeen(g.nRecipe, 0);
+  for (uint32_t item : order) {
+    for (RecipeId recipe : g.producersOf(item)) {
+      if (recipeSeen[recipe])
+        continue;
+      recipeSeen[recipe] = 1;
+      for (ItemId input : g.inputsOf(recipe))
+        consumerOffsets[input + 1]++;
+    }
   }
+  for (uint32_t item = 1; item <= nItem; item++)
+    consumerOffsets[item] += consumerOffsets[item - 1];
 
   // Then fill in the data.
   aw::vector<ItemId> adjTargets(nEdge);
-  aw::vector<ItemId> consumerTargets(nEdge);
+  aw::vector<ItemId> consumerTargets(consumerOffsets.back());
   aw::vector<ItemId> consumerCursor(consumerOffsets);
   for (uint32_t item : order) {
     uint adjCursor = adjOffsets[item];
-    for (RecipeId recipe : g.producersOf(item)) {
-      for (ItemId input : g.inputsOf(recipe)) {
+    for (RecipeId recipe : g.producersOf(item))
+      for (ItemId input : g.inputsOf(recipe))
         adjTargets[adjCursor++] = input;
+  }
+  std::fill(recipeSeen.begin(), recipeSeen.end(), 0);
+  for (uint32_t item : order) {
+    for (RecipeId recipe : g.producersOf(item)) {
+      if (recipeSeen[recipe])
+        continue;
+      recipeSeen[recipe] = 1;
+      for (ItemId input : g.inputsOf(recipe))
         consumerTargets[consumerCursor[input]++] = recipe;
-      }
     }
   }
 
@@ -229,10 +248,15 @@ RankOrder rankProducible(const BaseCraftingGraph &g, const ReachableView &view,
       continue;
     order[entry.item] = next++;
     // Pops are monotone in (tier, level), so the last dependency to release a
-    // recipe is the latest one; the output inherits its tier.
+    // recipe is the latest one; every output of the recipe inherits its tier.
+    // A byproduct that is not itself in the target's input cone is skipped: it
+    // has no rank of its own and nothing reads it through this view.
     for (ItemId consumer : view.consumers.targetsOf(entry.item)) {
-      if (--pending[consumer] == 0)
-        push(g.output[consumer], entry.tier, entry.level + 1);
+      if (--pending[consumer] != 0)
+        continue;
+      for (ItemId out : g.outputsOf(consumer))
+        if (view.orderIndex[out] >= 0)
+          push(out, entry.tier, entry.level + 1);
     }
   }
   return order;

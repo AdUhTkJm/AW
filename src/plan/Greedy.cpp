@@ -166,8 +166,8 @@ aw::vector<uint8_t> computeObtainable(const BaseCraftingGraph &g, const AcyclicV
   return obtainable;
 }
 
-// The number of outputs that `recipe` can craft, given `cap`.
-int64_t producibleVia(const BaseCraftingGraph &g, uint32_t recipe,
+// How many units of `item` `recipe` can craft, given `cap`.
+int64_t producibleVia(const BaseCraftingGraph &g, uint32_t recipe, ItemId item,
                       std::span<const int64_t> cap) noexcept {
   const auto inputs = g.inputsOf(recipe);
   const auto weights = g.inputAmountsOf(recipe);
@@ -177,7 +177,7 @@ int64_t producibleVia(const BaseCraftingGraph &g, uint32_t recipe,
     if (firings == 0)
       return 0;
   }
-  return satMul(firings, g.outputAmt[recipe]);
+  return satMul(firings, g.producedAmountOf(recipe, item));
 }
 
 // A candidate recipe to craft an item.
@@ -207,7 +207,7 @@ aw::vector<int64_t> SweepContext::capacityFromOrder() const noexcept {
     for (RecipeId recipe : g.producersOf(item)) {
       if (!view.usable[recipe])
         continue;
-      best = std::max(best, producibleVia(g, recipe, cap));
+      best = std::max(best, producibleVia(g, recipe, item, cap));
     }
     cap[item] = satAdd(stock[item], best);
   }
@@ -236,7 +236,7 @@ aw::vector<int64_t> capacitySweep(const SweepContext &ctx, Strategy strategy) no
     for (RecipeId recipe : g.producersOf(item)) {
       if (!view.usable[recipe])
         continue;
-      routes.push_back(Route{recipe, producibleVia(g, recipe, cap)});
+      routes.push_back(Route{recipe, producibleVia(g, recipe, item, cap)});
     }
     
     // Sort them under heuristic.
@@ -249,10 +249,10 @@ aw::vector<int64_t> capacitySweep(const SweepContext &ctx, Strategy strategy) no
     for (const Route &route : routes) {
       if (deficit <= 0)
         break;
-      const int64_t craftable = producibleVia(g, route.recipe, cap);
+      const int64_t craftable = producibleVia(g, route.recipe, item, cap);
       if (craftable <= 0)
         continue;
-      const int64_t batch = g.outputAmt[route.recipe];
+      const int64_t batch = g.producedAmountOf(route.recipe, item);
       const int64_t make = std::min(deficit, craftable);
       const int64_t times = ceilDiv(make, batch);
       // When the plan is saturated, we cannot tell.
@@ -313,7 +313,7 @@ aw::vector<int64_t> demandSweep(const SweepContext &ctx, const aw::vector<uint8_
     if (best == UINT32_MAX)
       return {};
     
-    const int64_t times = ceilDiv(deficit, g.outputAmt[best]);
+    const int64_t times = ceilDiv(deficit, g.producedAmountOf(best, item));
     exec[best] += times;
     const auto inputs = g.inputsOf(best);
     const auto weights = g.inputAmountsOf(best);

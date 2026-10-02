@@ -92,7 +92,10 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
   for (uint32_t r = 0; r < n; r++) {
     // Push "produced(i) - consumed(i)".
     column.clear();
-    column.push_back({g.output[r], g.outputAmt[r]});
+    const auto outs = g.outputsOf(r);
+    const auto outAmts = g.outputAmountsOf(r);
+    for (size_t k = 0; k < outs.size(); k++)
+      column.push_back({outs[k], outAmts[k]});
     const auto inputs = g.inputsOf(r);
     const auto weights = g.inputAmountsOf(r);
     for (size_t k = 0; k < inputs.size(); k++)

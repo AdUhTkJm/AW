@@ -163,8 +163,14 @@ void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput)
   // Recipes per amount-qualified input. Skip tags: only real recipes can be
   // replaced, and they are a prefix of the recipe list, so both passes stop at
   // the first tag edge. See the ordering note on BaseCraftingGraph::output.
+  //
+  // A byproduct recipe is skipped too: `out` is the amount of one particular
+  // output, so a single scalar cannot qualify its inputs. Leaving it out only
+  // makes the cost relation smaller, which is the conservative direction.
   qualOffsets.assign(g.nItem, 0);
   for (uint r = 0; r < g.nRecipe && g.output[r] < g.nReal; r++) {
+    if (g.hasByproducts(r))
+      continue;
     const Amount out = g.outputAmt[r];
     const auto inputs = g.inputsOf(r);
     const auto weights = g.inputAmountsOf(r);
@@ -177,6 +183,8 @@ void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput)
   qualRecipes.resize(qualOffsets.back());
   aw::vector<uint32_t> cursor(qualOffsets.begin(), qualOffsets.end() - 1);
   for (uint r = 0; r < g.nRecipe && g.output[r] < g.nReal; r++) {
+    if (g.hasByproducts(r))
+      continue;
     const Amount out = g.outputAmt[r];
     const auto inputs = g.inputsOf(r);
     const auto weights = g.inputAmountsOf(r);
@@ -482,7 +490,7 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
     unitOutput.assign(nItem, 1);
     for (ItemId m = 0; m < nReal; m++) {
       for (RecipeId r : graph.producersOf(m)) {
-        if (graph.outputAmt[r] != 1) {
+        if (graph.hasByproducts(r) || graph.producedAmountOf(r, m) != 1) {
           unitOutput[m] = 0;
           break;
         }
@@ -582,6 +590,10 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
 
     for (uint i = 0; i < k; i++) {
       if (keep[i])
+        continue;
+      // A byproduct recipe is never dropped: the cost relation above ignored
+      // it, so it carries no certificate.
+      if (graph.hasByproducts(recs[i]))
         continue;
       const aw::vector<ItemId> &guards = compGuards[comp[i]];
       // A path union wider than the per-recipe cap would make the query-time

@@ -373,6 +373,7 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
 
   check(graph.i2r, graph.nItem, graph.nRecipe, "itemToRecipe");
   check(graph.r2i, graph.nRecipe, graph.nItem, "recipeToItem");
+  check(graph.r2o, graph.nRecipe, graph.nItem, "recipeToOutput");
 
   // The workstation sets have one row per recipe and only ever name real
   // resources, which is what makes the intersection test in reachableSubgraph
@@ -474,9 +475,12 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
     }
     auto kept = aw::vector<uint8_t>::zeroes(graph.nItem);
     // Real recipes are a prefix, so the scan stops at the first tag edge.
-    for (size_t r = 0; r < graph.nRecipe && graph.output[r] < graph.nReal; ++r)
-      if (!graph.recipeDominated[r])
-        kept[graph.output[r]] = 1;
+    for (size_t r = 0; r < graph.nRecipe && graph.output[r] < graph.nReal; ++r) {
+      if (graph.recipeDominated[r])
+        continue;
+      for (aw::ItemId o : graph.outputsOf(r))
+        kept[o] = 1;
+    }
     for (size_t item = 0; item < graph.nReal; ++item) {
       if (!graph.producersOf(item).empty() && !kept[item]) {
         report("composite pruning removed every recipe of a real item");
@@ -517,10 +521,12 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
     // Real recipes are a prefix, so the scan stops at the first tag edge.
     for (size_t r = 0; r < graph.nRecipe && graph.output[r] < graph.nReal; ++r) {
       if (!graph.recipeDirectDominated[r])
-        kept[graph.output[r]] = 1;
+        for (aw::ItemId o : graph.outputsOf(r))
+          kept[o] = 1;
       if (!graph.recipeDirectDominated[r] && !graph.recipeDominated[r] &&
           !(r < graph.recipeSubstituted.size() && graph.recipeSubstituted[r]))
-        keptEither[graph.output[r]] = 1;
+        for (aw::ItemId o : graph.outputsOf(r))
+          keptEither[o] = 1;
     }
     for (size_t item = 0; item < graph.nReal; ++item) {
       if (graph.producersOf(item).empty())
@@ -632,11 +638,19 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
           net[item] += delta;
         };
         int64_t product = 0;
-        if (mulOverflowInt(graph.outputAmt[s], count, product)) {
-          overflow = true;
-          break;
+        {
+          const auto outs = graph.outputsOf(s);
+          const auto outAmts = graph.outputAmountsOf(s);
+          for (size_t o = 0; o < outs.size(); ++o) {
+            if (mulOverflowInt(outAmts[o], count, product)) {
+              overflow = true;
+              break;
+            }
+            addNet(outs[o], product);
+          }
+          if (overflow)
+            break;
         }
-        addNet(graph.output[s], product);
         const auto inputs = graph.inputsOf(s);
         const auto weights = graph.inputAmountsOf(s);
         for (size_t e = 0; e < inputs.size(); ++e) {
@@ -700,11 +714,15 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
       break;
     }
   }
-  if (graph.i2r.numEdges() != graph.nRecipe) {
-    report("i2r must contain exactly one edge per recipe");
+  size_t totalOutputs = 0;
+  for (size_t r = 0; r < graph.nRecipe; ++r)
+    totalOutputs += graph.outputsOf(r).size();
+  if (graph.i2r.numEdges() != totalOutputs) {
+    report("i2r must contain exactly one edge per recipe output");
   }
 
-  // Every recipe must appear exactly once, in the row of the item it outputs.
+  // Every output of every recipe must appear in the row of that item, and the
+  // edge weight must be the amount the recipe produces of it.
   auto seen = aw::vector<uint32_t>::zeroes(graph.nRecipe);
   for (size_t item = 0; item < graph.nItem; ++item) {
     auto targets = graph.producersOf(item);
@@ -715,11 +733,8 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         report("i2r points at an out-of-range recipe");
         continue;
       }
-      if (++seen[recipe] > 1) report("recipe listed more than once");
-      if (graph.output[recipe] != item) {
-        report("recipe is in the wrong item row");
-      }
-      if (graph.outputAmt[recipe] != weights[k]) {
+      seen[recipe]++;
+      if (graph.producedAmountOf(recipe, item) != weights[k]) {
         report("recipe output amount disagrees with the edge weight");
       }
     }
@@ -727,6 +742,8 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
   for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
     if (seen[recipe] == 0)
       report("recipe is not reachable from any item");
+    else if (seen[recipe] != (uint32_t) graph.outputsOf(recipe).size())
+      report("a recipe has a different number of producer edges than outputs");
   }
 
   // Check that there's no duplication.
@@ -740,6 +757,19 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
         return graph.output[a] < graph.output[b];
       if (graph.outputAmt[a] != graph.outputAmt[b])
         return graph.outputAmt[a] < graph.outputAmt[b];
+      const auto oa = graph.outputsOf(a);
+      const auto ob = graph.outputsOf(b);
+      const auto owa = graph.outputAmountsOf(a);
+      const auto owb = graph.outputAmountsOf(b);
+      const size_t sharedOut = oa.size() < ob.size() ? oa.size() : ob.size();
+      for (size_t i = 0; i < sharedOut; ++i) {
+        if (oa[i] != ob[i])
+          return oa[i] < ob[i];
+        if (owa[i] != owb[i])
+          return owa[i] < owb[i];
+      }
+      if (oa.size() != ob.size())
+        return oa.size() < ob.size();
       const auto ta = graph.inputsOf(a);
       const auto tb = graph.inputsOf(b);
       const auto wa = graph.inputAmountsOf(a);

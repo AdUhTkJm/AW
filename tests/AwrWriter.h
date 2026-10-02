@@ -25,8 +25,12 @@ inline void emitVarInt(aw::vector<std::byte> &out, std::uint64_t value) {
 // ascending handle order; the writer stores deltas. A real recipe with no
 // workstation is dropped by registerCraftingGraph, so every real recipe here
 // names one.
+//
+// Emits schema v2 by default, so every existing sample also exercises the
+// byproduct-aware parser; the three-argument `recipe` writes an empty
+// byproduct list.
 struct AwrWriter {
-  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{1}};
+  aw::vector<std::byte> out = {std::byte{'A'}, std::byte{'W'}, std::byte{'R'}, std::byte{2}};
   std::uint32_t previousHandle = 0;
 
   void header(std::uint32_t nReal, std::uint32_t entries) {
@@ -42,12 +46,25 @@ struct AwrWriter {
 
   void recipe(std::int64_t amount, std::initializer_list<std::uint32_t> ws,
               std::initializer_list<std::pair<std::uint32_t, std::int64_t>> inputs) {
+    recipe(amount, ws, {}, inputs);
+  }
+
+  void recipe(std::int64_t amount, std::initializer_list<std::uint32_t> ws,
+              std::initializer_list<std::pair<std::uint32_t, std::int64_t>> byproducts,
+              std::initializer_list<std::pair<std::uint32_t, std::int64_t>> inputs) {
     emitVarInt(out, (std::uint64_t) amount);
     emitVarInt(out, ws.size());
     std::uint32_t previous = 0;
     for (std::uint32_t w : ws) {
       emitVarInt(out, w - previous);
       previous = w;
+    }
+    emitVarInt(out, byproducts.size());
+    previous = 0;
+    for (const auto& [handle, byproductAmount] : byproducts) {
+      emitVarInt(out, (std::uint64_t) byproductAmount);
+      emitVarInt(out, handle - previous);
+      previous = handle;
     }
     emitVarInt(out, inputs.size());
     previous = 0;

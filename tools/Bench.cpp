@@ -271,7 +271,10 @@ aw::vector<MissingItem> deriveMissing(const aw::Subgraph &sub, aw::ItemId target
   for (uint32_t r = 0; r < g.nRecipe; r++) {
     const aw::int128 times = exec[r];
     if (times == 0) continue;
-    balance[g.output[r]] += (aw::int128) g.outputAmt[r] * times;
+    const auto outputs = g.outputsOf(r);
+    const auto outputAmounts = g.outputAmountsOf(r);
+    for (size_t o = 0; o < outputs.size(); o++)
+      balance[outputs[o]] += (aw::int128) outputAmounts[o] * times;
     const auto inputs = g.inputsOf(r);
     const auto weights = g.inputAmountsOf(r);
     for (size_t k = 0; k < inputs.size(); k++)

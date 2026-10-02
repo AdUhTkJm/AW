@@ -15,15 +15,20 @@ alike. Only recipe ids shift.
 
 Format (see src/CraftingGraph.cpp, `ByteReader` / `scan`):
 
-    magic "AWR\\x01"
+    magic "AWR" + version byte (0x01 or 0x02)
     varint nReal
     varint nOutput
     repeat nOutput:
         varint outputHandleDelta          # ascending, so handles are 1-based
         varint nRecipe
         repeat nRecipe:
-            varlong outputAmount
+            varlong outputAmount           # anchor amount
             varint nWorkstation; if >0: varint absolute, then nWorkstation-1 deltas
+            # v2 only; v1 has no byproduct list:
+            varint nByproduct
+            repeat nByproduct:
+                varlong byproductAmount
+                varint byproductHandleDelta  # ascending within the recipe
             varint nInput
             repeat nInput:
                 varlong inputAmount
@@ -66,31 +71,54 @@ def _varlong(data, pos):
 
 
 class Recipe:
-    """One recipe. `out` and `inputs[i][0]` are 0-based item nodes (handle - 1)."""
+    """One recipe. `out` and `inputs[i][0]` are 0-based item nodes (handle - 1).
 
-    __slots__ = ("out", "out_amt", "ws", "inputs")
+    `byproducts` holds the extra outputs as `(item, amount)` pairs, ascending and
+    never containing the anchor, exactly like the C++ `r2o` rows.
+    """
 
-    def __init__(self, out, out_amt, ws, inputs):
+    __slots__ = ("out", "out_amt", "byproducts", "ws", "inputs")
+
+    def __init__(self, out, out_amt, ws, inputs, byproducts=()):
         self.out = out
         self.out_amt = out_amt
+        self.byproducts = list(byproducts)
         self.ws = ws
         self.inputs = inputs
 
+    def outputs(self):
+        """`(item, amount)` for the anchor and every byproduct. Not sorted."""
+        return [(self.out, self.out_amt)] + list(self.byproducts)
+
     def key(self):
-        """The canonicalization key: output, output amount, inputs. Workstations
-        are deliberately excluded, exactly like `RecipeKeyLess` in C++."""
-        return (self.out, self.out_amt, tuple(self.inputs))
+        """The canonicalization key: anchor, anchor amount, byproducts, inputs.
+        Workstations are deliberately excluded, exactly like `RecipeKeyLess` in
+        C++. The anchor is compared first, so this matches the C++ ordering of
+        the full sorted output list."""
+        return (self.out, self.out_amt, tuple(self.byproducts), tuple(self.inputs))
 
     def self_consumption(self):
-        """The amount of its own output the recipe also consumes."""
+        """The amount of its own anchor output the recipe also consumes."""
         return sum(amt for (item, amt) in self.inputs if item == self.out)
+
+    def column_is_nonpositive(self):
+        """`columnIsNonPositive`: on every output row the recipe consumes at
+        least as much as it produces, so the whole column is <= 0 and no optimal
+        plan executes it."""
+        consumed = defaultdict(int)
+        for (item, amt) in self.inputs:
+            consumed[item] += amt
+        return all(amt <= consumed[item] for (item, amt) in self.outputs())
 
 
 class Graph:
     def __init__(self, path):
         data = open(path, "rb").read()
-        if data[:4] != b"AWR\x01":
+        if data[:3] != b"AWR":
             raise ValueError("bad magic %r" % data[:4])
+        version = data[3]
+        if version not in (1, 2):
+            raise ValueError("unsupported schema version %d" % version)
 
         pos = 4
         self.n_real, pos = _varint(data, pos)
@@ -114,6 +142,21 @@ class Graph:
                     w = d if k == 0 else w + d
                     max_handle = max(max_handle, w)
                     ws.append(w - 1)
+
+                anchor = output - 1
+                merged = {anchor: out_amt}
+                if version >= 2:
+                    n_by, pos = _varint(data, pos)
+                    byproduct = 0
+                    for _ in range(n_by):
+                        amt, pos = _varlong(data, pos)
+                        d, pos = _varint(data, pos)
+                        byproduct += d
+                        max_handle = max(max_handle, byproduct)
+                        merged[byproduct - 1] = merged.get(byproduct - 1, 0) + amt
+                anchor_amt = merged.pop(anchor, 0)
+                byproducts = sorted(merged.items())
+
                 n_input, pos = _varint(data, pos)
                 inputs = []
                 inp = 0
@@ -123,7 +166,7 @@ class Graph:
                     inp += d
                     max_handle = max(max_handle, inp)
                     inputs.append((inp - 1, amt))
-                recipes.append(Recipe(output - 1, out_amt, ws, inputs))
+                recipes.append(Recipe(anchor, anchor_amt, ws, inputs, byproducts))
 
         if pos != len(data):
             raise ValueError("trailing bytes after the last entry")
@@ -137,12 +180,12 @@ class Graph:
     # ---- C++ parity -----------------------------------------------------
 
     def drop_useless_recipes(self):
-        """`dropUselessRecipes`: real recipes that are a net loss on their own
-        output, and real recipes with no workstation, can never be used."""
+        """`dropUselessRecipes`: real recipes whose whole column is <= 0, and
+        real recipes with no workstation, can never be used."""
         kept = []
         for rec in self.recipes:
             real = rec.out < self.n_real
-            if real and (rec.self_consumption() >= rec.out_amt or not rec.ws):
+            if real and (rec.column_is_nonpositive() or not rec.ws):
                 continue
             kept.append(rec)
         self.recipes = kept
@@ -172,7 +215,7 @@ class Graph:
         for survivor in sorted(groups):
             rec = self.recipes[survivor]
             ws = sorted({w for r in groups[survivor] for w in self.recipes[r].ws})
-            merged.append(Recipe(rec.out, rec.out_amt, ws, rec.inputs))
+            merged.append(Recipe(rec.out, rec.out_amt, ws, rec.inputs, rec.byproducts))
         self.recipes = merged
         self.i2r = _index(merged)
 
@@ -229,6 +272,7 @@ class Graph:
             "n_produced": len(self.produced_items()),
             "n_leaf": len(self.leaf_items()),
             "r2i_edges": sum(len(r.inputs) for r in self.recipes),
+            "r2o_edges": sum(1 + len(r.byproducts) for r in self.recipes),
             "ws_edges": sum(len(r.ws) for r in self.recipes),
         }
 
@@ -236,7 +280,8 @@ class Graph:
 def _index(recipes):
     index = defaultdict(list)
     for r, rec in enumerate(recipes):
-        index[rec.out].append(r)
+        for (item, _amt) in rec.outputs():
+            index[item].append(r)
     return index
 
 

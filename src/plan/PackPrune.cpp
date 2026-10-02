@@ -240,15 +240,19 @@ struct PackSearch {
       support.push_back(p);
     }
 
-    // Update the pack's net production incrementally.
-    int64_t produced = 0;
-    int64_t next = 0;
-    if (mulOverflow(graph.outputAmt[p], delta, produced) ||
-        addOverflow(net[graph.output[p]], produced, next)) {
-      aborted = true;
-      return false;
+    // Update the pack's net production incrementally, over every output row.
+    const auto outputs = graph.outputsOf(p);
+    const auto outputAmounts = graph.outputAmountsOf(p);
+    for (size_t o = 0; o < outputs.size(); o++) {
+      int64_t produced = 0;
+      int64_t next = 0;
+      if (mulOverflow(outputAmounts[o], delta, produced) ||
+          addOverflow(net[outputs[o]], produced, next)) {
+        aborted = true;
+        return false;
+      }
+      netWrite(outputs[o], next);
     }
-    netWrite(graph.output[p], next);
 
     const auto inputs = graph.inputsOf(p);
     const auto weights = graph.inputAmountsOf(p);
@@ -344,7 +348,7 @@ struct PackSearch {
         raw.clear();
         uint32_t usable = 0;
         for (RecipeId p : producers) {
-          const int64_t a = graph.outputAmt[p];
+          const int64_t a = graph.producedAmountOf(p, i);
           if (a <= 0)
             continue;
           usable++;
@@ -380,7 +384,7 @@ struct PackSearch {
               sum = next;
               e++;
             }
-            const int64_t a = graph.outputAmt[p];
+            const int64_t a = graph.producedAmountOf(p, i);
             if (!have || compareRatio(sum, a, bestNum, bestDen) < 0) {
               bestNum = sum;
               bestDen = a;
@@ -441,7 +445,7 @@ struct PackSearch {
         if (producers.size() != 1)
           continue;
         const RecipeId p = producers[0];
-        const int64_t a = graph.outputAmt[p];
+        const int64_t a = graph.producedAmountOf(p, i);
         if (a <= 0)
           continue;
         const int64_t t = ceilDiv(need[i], a);
@@ -506,7 +510,7 @@ struct PackSearch {
     const auto producers = graph.producersOf(i);
     const uint32_t m = (uint32_t) producers.size();
     for (RecipeId p : producers) {
-      const int64_t a = graph.outputAmt[p];
+      const int64_t a = graph.producedAmountOf(p, i);
       if (a <= 0)
         continue;
       if (share(need[i], m, a) > z[p])
@@ -577,7 +581,7 @@ struct PackSearch {
 
     bool recorded = false;
     for (RecipeId p : producers) {
-      const int64_t a = graph.outputAmt[p];
+      const int64_t a = graph.producedAmountOf(p, branchItem);
       if (a <= 0)
         continue;
       const int64_t target = share(demand, m, a);
@@ -636,12 +640,16 @@ struct PackSearch {
     for (const auto &entry : positive) {
       const uint32_t r = entry.first;
       const int64_t count = entry.second;
-      int64_t produced = 0;
-      if (mulOverflow(graph.outputAmt[r], count, produced)) {
-        netClear();
-        return false;
+      const auto outputs = graph.outputsOf(r);
+      const auto outputAmounts = graph.outputAmountsOf(r);
+      for (size_t o = 0; o < outputs.size(); o++) {
+        int64_t produced = 0;
+        if (mulOverflow(outputAmounts[o], count, produced)) {
+          netClear();
+          return false;
+        }
+        netAdd(outputs[o], produced);
       }
-      netAdd(graph.output[r], produced);
       const auto inputs = graph.inputsOf(r);
       const auto weights = graph.inputAmountsOf(r);
       for (size_t k = 0; k < inputs.size(); k++) {
@@ -744,8 +752,14 @@ void computePackPruning(CraftingGraph &graph) noexcept {
     if (graph.recipeDirectDominated.size() == graph.nRecipe &&
         graph.recipeDirectDominated[r])
       continue;
-    // A recipe whose output nothing consumes can never close A z <= 0.
-    if (search.unconsumed[graph.output[r]])
+    // A recipe that outputs anything nothing consumes can never close A z <= 0.
+    bool unconsumedOutput = false;
+    for (ItemId o : graph.outputsOf(r))
+      if (search.unconsumed[o]) {
+        unconsumedOutput = true;
+        break;
+      }
+    if (unconsumedOutput)
       continue;
     if (options.pack.maxSeconds > 0.0 && search.timedOut())
       break;

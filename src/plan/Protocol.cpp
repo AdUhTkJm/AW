@@ -283,6 +283,16 @@ PlanResponse runPlan(const PlanRequest &request) noexcept {
     use.outputHandle = CraftingGraph::itemHandle(sub.itemOrigin[sub.graph.output[r]]);
     use.outputAmount = sub.graph.outputAmt[r];
 
+    const auto outputs = sub.graph.outputsOf(r);
+    const auto outputAmounts = sub.graph.outputAmountsOf(r);
+    for (size_t k = 0; k < outputs.size(); k++) {
+      if (outputs[k] == sub.graph.output[r])
+        continue;
+      use.byproductHandles.push_back_unchecked(
+          CraftingGraph::itemHandle(sub.itemOrigin[outputs[k]]));
+      use.byproductAmounts.push_back_unchecked(outputAmounts[k]);
+    }
+
     const auto inputs = sub.graph.inputsOf(r);
     const auto amounts = sub.graph.inputAmountsOf(r);
     use.inputHandles.reserve(inputs.size());
@@ -314,6 +324,14 @@ aw::vector<std::byte> encodePlanResponse(const PlanResponse &response) noexcept 
     writeVarUInt(out, (uint64_t) use.count);
     writeVarUInt(out, use.outputHandle);
     writeVarUInt(out, (uint64_t) use.outputAmount);
+
+    writeVarUInt(out, (uint64_t) use.byproductHandles.size());
+    uint32_t previousByproduct = 0;
+    for (size_t k = 0; k < use.byproductHandles.size(); k++) {
+      writeVarUInt(out, use.byproductHandles[k] - previousByproduct);
+      previousByproduct = use.byproductHandles[k];
+      writeVarUInt(out, (uint64_t) use.byproductAmounts[k]);
+    }
 
     writeVarUInt(out, (uint64_t) use.inputHandles.size());
     uint32_t previous = 0;

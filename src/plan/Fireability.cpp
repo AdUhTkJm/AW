@@ -88,10 +88,14 @@ void applyDelta(Amount &avail, aw::int128 change) noexcept {
 void aggregateRecipe(const BaseCraftingGraph &g, uint32_t r, aw::vector<Amount> &acc,
                      aw::vector<int32_t> &stamp, aw::vector<ItemId> &touched) noexcept {
   touched.clear();
-  const ItemId out = g.output[r];
-  stamp[out] = (int32_t) r;
-  acc[out] = g.outputAmt[r];
-  touched.push_back(out);
+  const auto outs = g.outputsOf(r);
+  const auto outAmts = g.outputAmountsOf(r);
+  for (size_t k = 0; k < outs.size(); k++) {
+    const ItemId item = outs[k];
+    stamp[item] = (int32_t) r;
+    acc[item] = outAmts[k];
+    touched.push_back(item);
+  }
   const auto inputs = g.inputsOf(r);
   const auto amounts = g.inputAmountsOf(r);
   for (size_t k = 0; k < inputs.size(); k++) {
@@ -142,7 +146,7 @@ RecipeDeltas buildRecipeDeltas(const BaseCraftingGraph &g,
     aggregateRecipe(g, r, acc, stamp, touched);
     uint cursor = deltas.offsets[r];
     for (ItemId item : touched) {
-      const Amount produced = item == g.output[r] ? g.outputAmt[r] : 0;
+      const Amount produced = g.producedAmountOf(r, item);
       deltas.entries[cursor].item = item;
       deltas.entries[cursor].delta = acc[item];
       deltas.entries[cursor].consume = produced - acc[item];

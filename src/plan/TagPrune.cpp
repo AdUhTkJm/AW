@@ -413,6 +413,11 @@ void TagPruner::buildConsumerIndex() noexcept {
   // note on BaseCraftingGraph::output.
   tagConsumerOffsets.assign(nItem, 0);
   for (uint r = 0; r < nRecipe && graph.output[r] < nReal; r++) {
+    // A byproduct recipe names several outputs, so the tag substitution
+    // relation has no single item to attach it to. Leaving it out is
+    // conservative: it only shrinks the relation.
+    if (graph.hasByproducts(r))
+      continue;
     for (ItemId j : graph.inputsOf(r)) {
       if (j >= nReal && allowedTags[j])
         tagConsumerOffsets[j]++;
@@ -423,6 +428,8 @@ void TagPruner::buildConsumerIndex() noexcept {
   aw::vector<uint> cursor(tagConsumerOffsets.begin(),
                           tagConsumerOffsets.end() - 1);
   for (uint r = 0; r < nRecipe && graph.output[r] < nReal; r++) {
+    if (graph.hasByproducts(r))
+      continue;
     const ItemId m = graph.output[r];
     for (ItemId j : graph.inputsOf(r))
       if (j >= nReal && allowedTags[j])
@@ -439,6 +446,8 @@ void TagPruner::buildConsumerIndex() noexcept {
 void TagPruner::buildQualifiedInputs() noexcept {
   qualInputOffsets.assign(nRecipe, 0);
   for (uint r = 0; r < nRecipe; r++) {
+    if (graph.hasByproducts(r))
+      continue;
     const auto inputs = graph.inputsOf(r);
     const auto weights = graph.inputAmountsOf(r);
     const Amount out = graph.outputAmt[r];
@@ -451,6 +460,8 @@ void TagPruner::buildQualifiedInputs() noexcept {
 
   aw::vector<uint> cursor(qualInputOffsets.begin(), qualInputOffsets.end() - 1);
   for (uint r = 0; r < nRecipe; r++) {
+    if (graph.hasByproducts(r))
+      continue;
     const auto inputs = graph.inputsOf(r);
     const auto weights = graph.inputAmountsOf(r);
     const Amount out = graph.outputAmt[r];
@@ -494,7 +505,7 @@ void TagPruner::computeUnitOutputs() noexcept {
   unitOutput.assign(nItem, 1);
   for (ItemId m = 0; m < nReal; m++) {
     for (RecipeId r : graph.producersOf(m))
-      if (graph.outputAmt[r] != 1) {
+      if (graph.hasByproducts(r) || graph.producedAmountOf(r, m) != 1) {
         unitOutput[m] = 0;
         break;
       }
@@ -709,6 +720,8 @@ bool TagPruner::covers(uint s, uint r) noexcept {
   if (coverBudget == 0)
     return false;
   coverBudget--;
+  if (graph.hasByproducts(s) || graph.hasByproducts(r))
+    return false;
   if (graph.outputAmt[s] < graph.outputAmt[r])
     return false;
 
