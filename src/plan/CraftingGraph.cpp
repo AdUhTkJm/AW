@@ -18,9 +18,17 @@ namespace {
 constexpr std::array<uint8_t, 3> kMagic = {'A', 'W', 'R'};
 // Schema version, the fourth magic byte. v1 is a single anchor output per
 // recipe. v2 adds a byproduct list, which is how a real multi-output recipe is
-// represented without splitting it into independent single-output copies.
+// represented without splitting it into independent single-output copies. v3
+// adds the per-recipe cost, which is what lets a chanced recipe be folded into
+// a batch of executions without the planner counting the batch as one step.
 constexpr uint8_t kSchemaV1 = 0x01;
 constexpr uint8_t kSchemaV2 = 0x02;
+constexpr uint8_t kSchemaV3 = 0x03;
+
+// The cost of a real recipe has to be at least one execution (a free real
+// column would be unbounded under the objective cap), and an int is all the
+// Java generator can produce. Anything outside that range is a corrupt blob.
+constexpr int64_t kMaxRecipeCost = INT_MAX;
 
 #define fail(msg, ...) { error = msg; return __VA_ARGS__; }
 
@@ -78,15 +86,16 @@ public:
   }
 };
 
-// Reads the magic and returns the schema version. v1 blobs keep loading so
-// existing dumps and the hand-built test fixtures stay valid.
+// Reads the magic and returns the schema version. Older blobs keep loading so
+// existing dumps and the hand-built test fixtures stay valid: before v3 every
+// real recipe cost exactly one execution and every tag edge was free.
 uint8_t checkMagic(ByteReader& in) noexcept {
   for (std::uint8_t expected : kMagic) {
     if (in.readByte() != expected)
       fail("invalid magic bits", 0);
   }
   const uint8_t version = in.readByte();
-  if (version != kSchemaV1 && version != kSchemaV2)
+  if (version != kSchemaV1 && version != kSchemaV2 && version != kSchemaV3)
     fail("unsupported recipe schema version", 0);
   return version;
 }
@@ -144,8 +153,8 @@ Layout scan(std::span<const std::byte> bytes) noexcept {
   ByteReader in(bytes);
   Layout layout;
 
-  // Check magic bits. The version decides whether a byproduct list follows the
-  // workstations of every recipe.
+  // Check magic bits. The version decides whether a cost precedes the anchor
+  // amount and whether a byproduct list follows the workstations.
   const uint8_t version = checkMagic(in);
 
   // Check header.
@@ -167,6 +176,16 @@ Layout scan(std::span<const std::byte> bytes) noexcept {
     layout.rpi[output - 1] += nRecipe;
 
     for (uint i = 0; i < nRecipe; i++) {
+      if (version >= kSchemaV3) {
+        // Only a real recipe is costed; the synthetic member edge of a
+        // pseudo-resource is free, and the parser zeroes it below whatever
+        // this holds. A pseudo anchor's value is therefore ignored, but it
+        // still has to be readable.
+        const int64_t cost = in.readVarLong();
+        if (cost < 0 || cost > kMaxRecipeCost)
+          fail("recipe cost out of range", layout);
+      }
+
       in.readVarLong();  // anchor amount
       layout.wpr.push_back(readWorkstations(in, layout));
 
@@ -221,7 +240,9 @@ void prefixSum(aw::vector<uint> &v) noexcept {
 }
 
 // Total order on recipes by the only thing the planner can see: the output
-// item, the output amount and the amounts of every input.
+// item, the output amount, the amounts of every input and the cost. The cost is
+// the last key so the order stays dominated by the column, as the prefix
+// invariant on `output` expects.
 struct RecipeKeyLess {
   const BaseCraftingGraph &g;
 
@@ -256,7 +277,15 @@ struct RecipeKeyLess {
       if (wa[i] != wb[i])
         return wa[i] < wb[i];
     }
-    return ta.size() < tb.size();
+    if (ta.size() != tb.size())
+      return ta.size() < tb.size();
+    // The cost is part of the recipe's identity: two recipes with the same
+    // column but different costs are not interchangeable, and merging them
+    // would keep an arbitrary one of the two -- silently charging the folded
+    // batch level as a plain recipe, or the other way round. Keeping both is
+    // always sound; the direct-dominance pass drops the expensive twin for
+    // free, because their columns are equal.
+    return g.cost[a] < g.cost[b];
   }
 };
 
@@ -411,14 +440,19 @@ void canonicalizeRecipes() noexcept {
 
   aw::vector<ItemId> output(newNRecipe, 0);
   aw::vector<Amount> outputAmt(newNRecipe, 0);
+  // The cost is part of the survival key, so every recipe merged into one
+  // survivor agrees on it; copying the survivor's is exact, not a choice.
+  aw::vector<Amount> cost(newNRecipe, 1);
   for (uint r = 0; r < nRecipe; r++) {
     if (rep[r] != r)
       continue;
     output[newId[r]] = graph.output[r];
     outputAmt[newId[r]] = graph.outputAmt[r];
+    cost[newId[r]] = graph.cost[r];
   }
   graph.output = std::move(output);
   graph.outputAmt = std::move(outputAmt);
+  graph.cost = std::move(cost);
   graph.nRecipe = newNRecipe;
 }
 
@@ -448,6 +482,10 @@ void canonicalizeRecipes() noexcept {
 struct MutableRecipe {
   ItemId out = 0;
   Amount outAmt = 0;
+  // Underlying Minecraft executions per execution, exactly as
+  // `BaseCraftingGraph::cost` describes. Every rewrite below copies it, so a
+  // batch level keeps being charged its batch size after inlining.
+  Amount cost = 1;
   // Extra outputs beyond the anchor, ascending by item and never containing
   // the anchor. The anchor stays in `out`/`outAmt` so the prefix invariant and
   // the recipe identity survive every rewrite.
@@ -664,6 +702,7 @@ bool inlineSingleUseTagsCore(aw::vector<MutableRecipe> &recipes, uint nReal,
       MutableRecipe copy;
       copy.out = recipes[i].out;
       copy.outAmt = recipes[i].outAmt;
+      copy.cost = recipes[i].cost;
       copy.outs = recipes[i].outs;
       copy.outAmts = recipes[i].outAmts;
       copy.ws = recipes[i].ws;
@@ -693,6 +732,7 @@ void extractRecipes(const CraftingGraph& graph, aw::vector<MutableRecipe> &out) 
     MutableRecipe rec;
     rec.out = graph.output[r];
     rec.outAmt = graph.outputAmt[r];
+    rec.cost = graph.cost[r];
     const auto outs = graph.outputsOf(r);
     const auto outAmts = graph.outputAmountsOf(r);
     rec.outs.reserve(outs.size());
@@ -784,9 +824,11 @@ void rebuildFromRecipes(CraftingGraph& graph, aw::vector<MutableRecipe> &recipes
 
   graph.output.resize(newNRecipe);
   graph.outputAmt.resize(newNRecipe);
+  graph.cost.resize(newNRecipe);
   for (uint r = 0; r < newNRecipe; r++) {
     graph.output[r] = recipes[r].out;
     graph.outputAmt[r] = recipes[r].outAmt;
+    graph.cost[r] = recipes[r].cost;
   }
   graph.nRecipe = newNRecipe;
 
@@ -1254,6 +1296,7 @@ aw::vector<MutableRecipe> collectSurvivingRecipes(const aw::vector<uint8_t> &rec
     rec.origin = r;
     rec.out = graph.output[r];
     rec.outAmt = graph.outputAmt[r];
+    rec.cost = graph.cost[r];
     const auto outs = graph.outputsOf(r);
     const auto outAmts = graph.outputAmountsOf(r);
     rec.outs.reserve(outs.size());
@@ -1359,9 +1402,11 @@ Subgraph assembleSubgraph(const aw::vector<uint8_t> &itemSeen,
 
   sub.output.resize(subRecipes);
   sub.outputAmt.resize(subRecipes);
+  sub.cost.resize(subRecipes);
   for (uint i = 0; i < subRecipes; i++) {
     sub.output[i] = itemMap[built[i].out];
     sub.outputAmt[i] = built[i].outAmt;
+    sub.cost[i] = built[i].cost;
   }
 
   // Fill recipe -> output. `itemMap` is monotonic, so mapping the sorted
@@ -1446,6 +1491,7 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
 
   graph.output.resize(nRecipe);
   graph.outputAmt.resize(nRecipe);
+  graph.cost.resize(nRecipe);
 
   // Start filling the grpah.
   ByteReader in(bytes);
@@ -1469,6 +1515,13 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
     const uint nRecipe = in.readVarInt();
 
     for (uint i = 0; i < nRecipe; ++i) {
+      // Cost part. Before v3 every real recipe cost exactly one execution and
+      // every tag edge was free, which is the default the assignment below
+      // keeps.
+      Amount cost = 1;
+      if (version >= kSchemaV3)
+        cost = in.readVarLong();
+
       const Amount anchorAmt = in.readVarLong();
 
       uint nWs = in.readVarInt();
@@ -1511,6 +1564,13 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
 
       graph.output[recipe] = output - 1;
       graph.outputAmt[recipe] = anchorAmt;
+      // A real column is charged at least one execution: a free producer would
+      // not be bounded by the objective cap, and the whole solver relies on
+      // `costed column => c_r x_r <= cap`. A tag edge is free by construction,
+      // whatever the blob claims, so its stored value is discarded rather than
+      // trusted.
+      graph.cost[recipe] =
+          output - 1 < layout.nReal ? std::max<Amount>(cost, 1) : 0;
 
       uint r2oSlot = graph.r2o.offsets[recipe];
       for (const auto &[item, amt] : outputs) {

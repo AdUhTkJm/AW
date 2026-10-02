@@ -64,10 +64,6 @@ uint64_t satMul(uint64_t a, uint64_t b) {
   return a != 0 && b > UINT64_MAX / a ? UINT64_MAX : a * b;
 }
 
-int64_t ceilDiv(int64_t numerator, int64_t denominator) {
-  return numerator / denominator + (numerator % denominator != 0 ? 1 : 0);
-}
-
 // The largest value any variable may take to keep everything in range of int64_t.
 int64_t absoluteCap(const Matrix &A, std::span<const int64_t> c) {
   auto rowAbs = aw::vector<uint64_t>::zeroes(A.rows);
@@ -89,26 +85,53 @@ int64_t absoluteCap(const Matrix &A, std::span<const int64_t> c) {
   return (int64_t) std::max<uint64_t>(bound, 1);
 }
 
-// A valid lower bound on sum(x): row i needs b_i, and no coefficient exceeds
-// maxPositive[i], so at least ceil(b_i / maxPositive[i]) executions are needed
-// (negative coefficients only make the row harder to satisfy).
+// A valid lower bound on the objective c^T x: row i needs b_i, and no
+// coefficient exceeds maxPositive[i], so at least ceil(b_i / maxPositive[i])
+// executions of producers of i are needed, each costing at least
+// minCost[i] = min over those producers of c_r (negative coefficients only make
+// the row harder to satisfy). With a uniform cost this is exactly the old
+// `ceil(b_i / maxPositive[i])`.
 //
 // This is deliberately weak. A tighter estimate would need the LP relaxation:
 // these graphs contain cycles that amplify (four planks from one log) with no
 // "raw" base item, so a Bellman-Ford style cost relaxation, which needs
 // something to seed from, reports the whole graph unreachable. The cap is
 // therefore grown empirically instead.
-int64_t lowerBoundOnTotal(const Matrix &A, std::span<const int64_t> b) {
+int64_t lowerBoundOnCost(const Matrix &A, std::span<const int64_t> b,
+                         std::span<const int64_t> c) {
   auto maxPositive = aw::vector<int64_t>::zeroes(A.rows);
-  for (size_t k = 0; k < A.rowIndex.size(); k++) {
-    const int64_t value = A.value[k];
-    if (value > 0)
-      maxPositive[A.rowIndex[k]] = std::max(maxPositive[A.rowIndex[k]], value);
+  auto minCost = aw::vector<int64_t>::zeroes(A.rows);
+  auto freeRow = aw::vector<uint8_t>::zeroes(A.rows);
+  for (uint32_t r = 0; r < A.cols; r++) {
+    for (uint32_t k = A.colStart[r]; k < A.colStart[r + 1]; k++) {
+      const int64_t value = A.value[k];
+      if (value <= 0)
+        continue;
+      const uint32_t row = A.rowIndex[k];
+      if (value > maxPositive[row])
+        maxPositive[row] = value;
+      // A free producer fills its row at no cost, so the row bounds nothing.
+      if (c[r] <= 0)
+        freeRow[row] = 1;
+      else if (minCost[row] == 0 || c[r] < minCost[row])
+        minCost[row] = c[r];
+    }
   }
   int64_t bound = 1;
   for (uint32_t i = 0; i < A.rows; i++) {
-    if (b[i] > 0 && maxPositive[i] > 0)
-      bound = std::max(bound, ceilDiv(b[i], maxPositive[i]));
+    if (b[i] <= 0 || maxPositive[i] <= 0 || freeRow[i] || minCost[i] <= 0)
+      continue;
+    // The most output one unit of cost can buy in this row is
+    // maxPositive[i] / minCost[i], so the row costs at least
+    // ceil(b[i] * minCost[i] / maxPositive[i]). With a uniform cost this is the
+    // old ceil(b[i] / maxPositive[i]).
+    const uint64_t numerator = satMul((uint64_t) b[i], (uint64_t) minCost[i]);
+    const uint64_t divisor = (uint64_t) maxPositive[i];
+    const uint64_t perRow = numerator / divisor + (numerator % divisor != 0);
+    if (perRow > (uint64_t) INT64_MAX / 2)
+      continue;
+    if ((int64_t) perRow > bound)
+      bound = (int64_t) perRow;
   }
   return bound;
 }
@@ -262,7 +285,7 @@ aw::vector<int64_t> expandSolution(std::span<const int64_t> reduced,
 
 // Upper bound for every column.
 //
-// A costed column obeys c_r x_r <= c^T x <= cap, so `cap` bounds it. A
+// A costed column obeys c_r x_r <= c^T x <= cap, so `cap / c_r` bounds it. A
 // zero-cost column is not bounded by the objective. It is still bounded in any
 // optimum, though: producing more of a tag than the plan consumes is waste, so
 // there is always an optimal solution with
@@ -280,7 +303,11 @@ aw::vector<int64_t> columnDomains(const Matrix &A, const RowMajor &rows,
                                    std::span<const int64_t> upper) {
   aw::vector<int64_t> domain((size_t) A.cols);
   for (uint32_t r = 0; r < A.cols; r++) {
-    int64_t hi = c[r] != 0 ? cap : ceiling;
+    // A cost of 1 -- an ordinary recipe -- reproduces the old domain exactly; a
+    // batched column is narrowed by its batch size.
+    int64_t hi = c[r] > 0 ? cap / c[r] : ceiling;
+    if (hi < 0)
+      hi = 0;
     if (!upper.empty() && upper[r] < hi)
       hi = upper[r];
     domain[r] = hi;
@@ -594,8 +621,8 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
 
 }  // namespace
 
-// `c` is always all-ones currently, kept for possible later refactoring.
-// TODO: Remove it when the design stabilizes.
+// `c` is the per-recipe cost: 1 for an ordinary recipe, the batch size for a
+// level of a chanced recipe, 0 for a tag edge. See BaseCraftingGraph::cost.
 Result solve(const Matrix &A, std::span<const int64_t> b,
              std::span<const int64_t> c, const Options &options) {
   // Check validity of A.
@@ -649,7 +676,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
     // it, hence the `+ max(64, lp/8)`.
     cap = (int64_t) std::ceil(lp.value) + std::max<int64_t>(64, (int64_t) lp.value / 8);
   } else {
-    cap = lowerBoundOnTotal(A, b);
+    cap = lowerBoundOnCost(A, b, c);
   }
   cap = std::clamp<int64_t>(cap, 1, ceiling);
 
@@ -719,7 +746,8 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
             // Costed columns are bounded by the objective; zero-cost columns
             // are not, so their neutral value is the absolute ceiling. The
             // natural cap in `columnDomains` only tightens them further.
-            const int64_t natural = c[r] != 0 ? probe.objective : ceiling;
+            const int64_t natural =
+                c[r] > 0 ? std::max<int64_t>(probe.objective / c[r], 0) : ceiling;
             int64_t bound = natural;
             if (d > threshold + REDUCED_COST_EPSILON) {
               bound = 0;
@@ -730,8 +758,8 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
               if (bound < 1)
                 bound = 1;
               // `probe.objective` bounds a costed column, but not a free one.
-              if (c[r] != 0)
-                bound = std::min(bound, probe.objective);
+              if (c[r] > 0)
+                bound = std::min(bound, natural);
             }
             if (bound <= 0) {
               fixed++;

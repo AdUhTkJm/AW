@@ -23,6 +23,8 @@
 // which is what lets the preprocessing half of an existing file be refreshed
 // without re-running the queries. See bench/README.md.
 
+#include <climits>
+
 #include "aw/utils/Int128.h"
 #include "aw/plan/Options.h"
 #include "aw/plan/Plan.h"
@@ -822,14 +824,29 @@ int main(int argc, char **argv) {
             if (ok && !plan.provenOptimal) unprovenCount++;
             if (plan.status == aw::PlanStatus::INFEASIBLE) infeasible++;
 
-            long long cost = 0, tagExec = 0, distinct = 0;
+            // The plan's cost is the solver's objective: one execution of a
+            // real recipe costs `graph.cost`, which is 1 for an ordinary
+            // recipe and the batch size for a level of a chanced recipe. The
+            // raw execution count is kept beside it so the two readings stay
+            // distinguishable, and so a comparison against an engine that has
+            // no notion of a batch is at least possible by hand. See
+            // bench/README.md, section 5.1.
+            long long cost = 0, realExec = 0, tagExec = 0, distinct = 0;
             if (ok) {
               for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
                 const int64_t times = plan.exec[r];
                 if (times == 0) continue;
                 distinct++;
-                if (sub.graph.output[r] < sub.graph.nReal) cost += times;
-                else tagExec += times;
+                if (sub.graph.output[r] < sub.graph.nReal) {
+                  realExec += times;
+                  // The solver caps the weighted sum at absoluteCap, so this
+                  // cannot overflow in practice; saturate rather than wrap.
+                  const long long weighted =
+                      (long long) sub.graph.cost[r] * times;
+                  cost = cost > LLONG_MAX - weighted ? LLONG_MAX : cost + weighted;
+                } else {
+                  tagExec += times;
+                }
               }
             }
 
@@ -889,6 +906,7 @@ int main(int argc, char **argv) {
                 .real("gap", plan.gap)
                 .real("bound", plan.bestBound)
                 .num("cost", cost)
+                .num("real_exec", realExec)
                 .num("tag_exec", tagExec)
                 .num("distinct_recipes", distinct)
                 .num("conflicts", plan.numConflicts)

@@ -702,9 +702,19 @@ size_t checkGraph(const aw::CraftingGraph& graph) {
   }
 
   if (graph.output.size() != graph.nRecipe ||
-    graph.outputAmt.size() != graph.nRecipe) {
-    report("output/outputAmt size does not match the recipe count");
+    graph.outputAmt.size() != graph.nRecipe ||
+    graph.cost.size() != graph.nRecipe) {
+    report("output/outputAmt/cost size does not match the recipe count");
     return problems;
+  }
+  // One execution of a real recipe has to cost at least one underlying
+  // execution, otherwise the objective would not bound its column; a tag edge
+  // is free. See BaseCraftingGraph::cost.
+  for (size_t r = 0; r < graph.nRecipe; ++r) {
+    if (graph.output[r] < graph.nReal ? graph.cost[r] < 1 : graph.cost[r] != 0) {
+      report("a recipe's cost contradicts its output kind");
+      break;
+    }
   }
   // The real recipes must be a prefix of the recipe list: that order is what
   // lets the passes stop at the first tag edge. See BaseCraftingGraph::output.
@@ -812,7 +822,17 @@ void dumpGraph(const aw::CraftingGraph& graph) {
   std::cout << "recipe -> item\n";
   for (size_t recipe = 0; recipe < graph.nRecipe; ++recipe) {
     std::cout << "  r" << recipe << " -> item " << graph.itemHandle(graph.output[recipe])
-          << " x" << graph.outputAmt[recipe] << " <-";
+          << " x" << graph.outputAmt[recipe] << " (cost " << graph.cost[recipe] << ")";
+    // Every other output, so a catalyst recipe that returns an input it also
+    // consumes is visible as one.
+    for (size_t k = 0; k < graph.outputsOf(recipe).size(); k++) {
+      const aw::ItemId item = graph.outputsOf(recipe)[k];
+      if (item == graph.output[recipe])
+        continue;
+      std::cout << " + item " << graph.itemHandle(item) << " x"
+                << graph.outputAmountsOf(recipe)[k];
+    }
+    std::cout << " <-";
     auto targets = graph.inputsOf(recipe);
     auto weights = graph.inputAmountsOf(recipe);
     for (size_t k = 0; k < targets.size(); ++k) {
@@ -871,7 +891,20 @@ void dumpSubgraph(const aw::Subgraph &sub, const aw::CraftingGraph &graph,
               << " real recipes have no workstation and are never reachable\n";
 
   for (uint32_t r = 0; r < g.nRecipe; r++) {
-    std::cout << item(g.output[r]) << " x" << g.outputAmt[r] << " <- ";
+    // The cost is how many underlying recipe executions one execution of this
+    // column is, so a batched chanced level shows its batch size here.
+    std::cout << item(g.output[r]) << " x" << g.outputAmt[r] << " (cost " << g.cost[r]
+              << ")";
+    // The other outputs, which a plain "a <- b" reading would hide: a recipe
+    // that consumes an item it also outputs is a catalyst, and the display has
+    // to say so or the plan looks impossible.
+    for (size_t k = 0; k < g.outputsOf(r).size(); k++) {
+      const aw::ItemId out = g.outputsOf(r)[k];
+      if (out == g.output[r])
+        continue;
+      std::cout << " + " << item(out) << " x" << g.outputAmountsOf(r)[k];
+    }
+    std::cout << " <- ";
     const auto targets = g.inputsOf(r);
     const auto weights = g.inputAmountsOf(r);
     if (targets.empty()) {
@@ -1424,15 +1457,56 @@ int main(int argc, char** argv) {
           realExec += plan.exec[r];
       }
 
-      std::cout << "  total executions: " << totalExec
-                << ", real: " << realExec << '\n';
+      std::cout << "  exec: " << totalExec
+                << ", real: " << realExec;
+      // The objective, which is what the planner minimises and what a chanced
+      // batch level is charged for: one execution of a cost-8 column is eight
+      // real executions. The raw counts above say nothing about it.
+      if (!plan.exec.empty()) {
+        aw::int128 cost = 0;
+        for (uint32_t r = 0; r < sub.graph.nRecipe; r++)
+          if (sub.graph.output[r] < sub.graph.nReal)
+            cost += (aw::int128) sub.graph.cost[r] * (aw::int128) plan.exec[r];
+        std::cout << ", cost: " << (long long) (cost > (aw::int128) INT64_MAX ? INT64_MAX : cost);
+      }
+      std::cout << '\n';
+      // A rejected plan is the interesting case: say which recipe could not
+      // start and what it was missing, or the status reads like a mystery.
+      if (plan.status == aw::PlanStatus::CYCLE_UNFULFILLED) {
+        aw::FireabilityWitness witness;
+        aw::planIsFireable(sub, inventory,
+                           std::span<const int64_t>(plan.exec.data(), plan.exec.size()),
+                           &witness);
+        for (size_t k = 0; k < witness.recipe.size(); k++) {
+          const uint32_t r = witness.recipe[k];
+          const aw::ItemId item = witness.item[k];
+          const aw::Amount stock = sub.itemOrigin[item] < inventory.size()
+                                       ? inventory[sub.itemOrigin[item]]
+                                       : 0;
+          std::cout << "  cannot start " << itemLabel(graph, names, sub.itemOrigin[sub.graph.output[r]])
+                    << " <- " << itemLabel(graph, names, sub.itemOrigin[item]) << " x"
+                    << witness.need[k] << ": only " << stock
+                    << " in stock";
+          std::cout << '\n';
+        }
+      }
       for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
         const int64_t count = plan.exec[r];
         if (count == 0)
           continue;
         std::cout << "  " << count << " x "
                   << itemLabel(graph, names, sub.itemOrigin[sub.graph.output[r]]) << " x"
-                  << sub.graph.outputAmt[r] << " <- ";
+                  << sub.graph.outputAmt[r];
+        // Every other output, so a catalyst recipe -- one that returns an item
+        // it also consumes -- is not mistaken for an impossible one.
+        for (size_t k = 0; k < sub.graph.outputsOf(r).size(); k++) {
+          const aw::ItemId out = sub.graph.outputsOf(r)[k];
+          if (out == sub.graph.output[r])
+            continue;
+          std::cout << " + " << itemLabel(graph, names, sub.itemOrigin[out]) << " x"
+                    << sub.graph.outputAmountsOf(r)[k];
+        }
+        std::cout << " <- ";
         const auto inputs = sub.graph.inputsOf(r);
         const auto weights = sub.graph.inputAmountsOf(r);
         if (inputs.empty()) {

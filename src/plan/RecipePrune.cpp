@@ -150,10 +150,17 @@ bool buildComposite(int64_t alpha, const RecipeVectors &vec, uint r, uint R,
 //   c_r = ceil(q / p_r) * v_r + v_R
 //
 // satisfies c_r <= v_S (replace the pair r, R by one S) or c_r <= 0 (the pair
-// is a net loss). The keep set is one representative per sink SCC of the edge
-// graph, exactly as in the tag pass, so every item keeps at least one recipe.
-// A dominated recipe is only dropped by reachability when its witness input has
-// no inventory and a replacement can actually be run.
+// is a net loss). One execution of S stands in for `alpha` executions of r plus
+// one of R, so it must also obey
+//
+//   cost(S) <= alpha * cost(r) + cost(R).
+//
+// With a uniform cost that inequality holds for every pair (alpha >= 0), so the
+// pass keeps exactly the recipes it used to. The keep set is one representative
+// per sink SCC of the edge graph, exactly as in the tag pass, so every item
+// keeps at least one recipe. A dominated recipe is only dropped by reachability
+// when its witness input has no inventory and a replacement can actually be
+// run.
 void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexcept {
   graph.recipeDominated.assign(graph.nRecipe, 0);
   graph.recipeGuardInput.assign(graph.nRecipe, UINT32_MAX);
@@ -267,6 +274,14 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
           }
 
           const bool loss = leZero(cCoeffs);
+          // One execution of S stands in for `alpha` executions of r plus one
+          // of R, so it must not cost more than they do. The products need 128
+          // bits: a batch size and an input amount can both be large.
+          const aw::int128 allowance =
+              (aw::int128) alpha * (aw::int128) graph.cost[r] + (aw::int128) graph.cost[R];
+          // A net-loss composite only removes executions, whose cost is never
+          // negative, so it needs no cost condition and bypasses the material
+          // comparison as before.
           size_t kept = 0;
           for (size_t c = 0; c < candidates.size(); c++) {
             const uint32_t j = candidates[c];
@@ -274,7 +289,10 @@ void computeRecipePruning(CraftingGraph &graph, const RecipeVectors &vec) noexce
             auto sBegin = vec.items.data() + vec.offsets[S];
             auto sCoeffBegin = vec.coeffs.data() + vec.offsets[S];
             const auto size = vec.offsets[S + 1] - vec.offsets[S];
-            if (loss || leVectorRaw(cItems.data(), cCoeffs.data(), cItems.size(), sBegin, sCoeffBegin, size))
+            const bool noWorse = (aw::int128) graph.cost[S] <= allowance;
+            if (loss || (noWorse &&
+                         leVectorRaw(cItems.data(), cCoeffs.data(), cItems.size(),
+                                     sBegin, sCoeffBegin, size)))
               candidates[kept++] = j;
           }
           candidates.resize(kept);

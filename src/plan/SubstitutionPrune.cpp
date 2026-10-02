@@ -547,6 +547,12 @@ void computeSubstitutionPruning(CraftingGraph &graph, const RecipeVectors &vec) 
         if (i == j)
           continue;
         const uint S = recs[j];
+        // One execution of S replaces one of R, and the collapse only removes
+        // executions (the input that was moved onto the dominator no longer has
+        // to be crafted), so S must not cost more than R. With a uniform cost
+        // this is vacuous.
+        if (graph.cost[S] > graph.cost[R])
+          continue;
         collapses.clear();
         if (!substitutionDominates(ctx, ColumnView(uItems, uCoeffs),
                                    ColumnView(vec.itemsOf(S), vec.coeffsOf(S)),

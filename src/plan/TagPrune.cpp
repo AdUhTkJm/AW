@@ -6,6 +6,13 @@
 // is never part of an optimal plan, so it is marked dominated here and the
 // query-time subgraph drops it. See docs/algorithm.typ.
 //
+// The pass is material, not cost-based: dropping `T <- m` in favour of `T <- w`
+// is paid for by the executions that used to craft the m, so the objective only
+// ever loses executions, all of which cost at least nothing. The one rule that
+// does compare two executions -- the column-cover escape hatch in `covers` --
+// requires the replacement not to cost more than what it replaces, which under
+// a uniform cost always holds.
+//
 // The pass computes the greatest fixpoint of a candidate relation over pairs
 // (x, w), read "x is dominated by w", where x is a real item or a simple tag
 // and w is always a real item. `TagPruner` holds the pass state; each stage is
@@ -715,12 +722,16 @@ Amount consume(aw::vector<std::pair<ItemId, Amount>> &pool, ItemId item,
 // Besides consuming a dominator (directly or through a tag), a recipe of m
 // can also be replaced by a recipe of the candidate dominator: it must yield
 // at least as much and consume no more of every item, with a simple tag it
-// consumes allowed to pick any member.
+// consumes allowed to pick any member. One execution of s then stands in for
+// one of r, so it must not cost more than r either; under a uniform cost that
+// is always true.
 bool TagPruner::covers(uint s, uint r) noexcept {
   if (coverBudget == 0)
     return false;
   coverBudget--;
   if (graph.hasByproducts(s) || graph.hasByproducts(r))
+    return false;
+  if (graph.cost[s] > graph.cost[r])
     return false;
   if (graph.outputAmt[s] < graph.outputAmt[r])
     return false;

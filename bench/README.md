@@ -342,10 +342,17 @@ python3 bench/run.py --datasets recipes-atm --configs tb-cpsat --preprocess-only
 `cost` is the shared objective, and it is the same one `src/Plan.cpp` optimises:
 
 ```
-min  Σ_{real recipes} x_r        # tag/pseudo-item recipes cost 0
+min  Σ_{real recipes} c_r · x_r        # tag/pseudo-item recipes cost c = 0
 s.t. produced(i) - consumed(i) >= b_i,  x_r ∈ ℤ≥0
      b_target = amount,  b_i = -stock(i) otherwise
 ```
+
+`c_r` is the recipe's cost in *real Minecraft executions*: 1 for an ordinary recipe, 0 for
+the free member edge of a pseudo-resource, and the batch size for a level of a chanced
+recipe, which the mod folds into one deterministic column. `cost` therefore counts
+executions of the underlying game recipe, not planner steps: one firing of a batch-64 level
+costs 64. Schema v3 of the `.awr` blob carries the number; see `BaseCraftingGraph::cost` in
+`include/aw/plan/CraftingGraph.h` and the doc comment on the format in `src/plan/CraftingGraph.cpp`.
 
 AW reports it as the solver objective. The baselines' `cost` is recomputed by the harness
 from the firing vector each engine returned, so a "cheap" plan and a "wrong" plan are
@@ -355,6 +362,18 @@ of §7.2. **Only compare `cost` on rows where `feasible` is true and the ground 
 `proven_optimal`; otherwise the ratio is meaningless.** `summarize.py` already
 enforces this and leaves `cost_ratio_median` (or `cost_ratio_mean` / `cost_ratio_max` under
 `--mean` / `--max`) blank when no instance qualifies.
+
+`real_exec` is the same plan counted the other way: one per executed real recipe, ignoring
+`c_r`, plus `tag_exec` for the free tag edges. The two agree on a dataset with no chanced
+recipe (vanilla) and diverge exactly by where a batch level was used.
+
+> **The baselines are still unweighted.** The reference engines have no notion of a chanced
+> batch: they see the batched column as an ordinary recipe, so their own `cost` adds 1 per
+> real execution where AW adds `c_r`. On a dataset that contains batched chanced recipes
+> (anything but the vanilla pack) a `cost` comparison against them is therefore *not* a
+> like-for-like comparison, and only the `proven_optimal` AW rows say anything. Compare
+> `real_exec` across engines instead, or weight the reference harnesses too: the number is
+> in the firing vector they already return, matched against `Recipe.cost` in `awrlib.py`.
 
 ### 5.2 Time
 

@@ -89,6 +89,20 @@ struct BaseCraftingGraph {
   aw::vector<ItemId> output;
   aw::vector<Amount> outputAmt;
 
+  // What one execution of the recipe costs the planner, counted in executions
+  // of the underlying Minecraft recipe. It is 1 for an ordinary real recipe, 0
+  // for a synthetic tag edge (picking a member is free in game), and the batch
+  // size for a level of a chanced recipe: the Java side folds `batch`
+  // executions into one deterministic recipe that consumes `batch` input sets
+  // (see ChanceBatching), so one execution of that column *is* `batch` real
+  // executions and has to be charged as many steps. A real recipe is never
+  // free -- the reader clamps it to at least 1 -- because a zero-cost real
+  // column is unbounded under the objective cap.
+  //
+  // Same order as `output`: real recipes are a prefix and tag edges the suffix,
+  // so a loop that only handles real recipes may `break` here as well.
+  aw::vector<Amount> cost;  // nRecipe entries
+
   // Every gross output per recipe, CSR over recipes: recipe `r` outputs
   // `r2o.targets[offsets[r] .. offsets[r + 1])` at the parallel amounts in
   // `weights`. Entries are sorted ascending by item and deduplicated. The

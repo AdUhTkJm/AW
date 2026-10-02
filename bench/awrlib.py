@@ -15,16 +15,18 @@ alike. Only recipe ids shift.
 
 Format (see src/CraftingGraph.cpp, `ByteReader` / `scan`):
 
-    magic "AWR" + version byte (0x01 or 0x02)
+    magic "AWR" + version byte (0x01, 0x02 or 0x03)
     varint nReal
     varint nOutput
     repeat nOutput:
         varint outputHandleDelta          # ascending, so handles are 1-based
         varint nRecipe
         repeat nRecipe:
+            # v3 only; v1/v2 are all-cost-1 datasets:
+            varlong cost                   # underlying executions per execution
             varlong outputAmount           # anchor amount
             varint nWorkstation; if >0: varint absolute, then nWorkstation-1 deltas
-            # v2 only; v1 has no byproduct list:
+            # v2 and v3 only; v1 has no byproduct list:
             varint nByproduct
             repeat nByproduct:
                 varlong byproductAmount
@@ -33,6 +35,15 @@ Format (see src/CraftingGraph.cpp, `ByteReader` / `scan`):
             repeat nInput:
                 varlong inputAmount
                 varint inputHandleDelta   # ascending within the recipe
+
+`cost` is how many times the underlying Minecraft recipe runs per execution of
+this entry: 1 for an ordinary recipe, 0 for the free member edge of a
+pseudo-resource, and the batch size for a level of a chanced recipe, which the
+mod folds into one deterministic column. It is parsed and carried through
+canonicalization, because it is part of the recipe identity in `RecipeKeyLess`
+-- but the harness's `cost` column still counts one per real execution, so a
+dataset with chanced batches reports an unweighted objective until that model
+learns to weight by `Recipe.cost`.
 
 `inputAmount` is a flow, not a flag: the file may still spell a degenerate
 input as `0` (AE2's entropy recipes carry a fluid ingredient with no amount at
@@ -77,25 +88,30 @@ class Recipe:
     never containing the anchor, exactly like the C++ `r2o` rows.
     """
 
-    __slots__ = ("out", "out_amt", "byproducts", "ws", "inputs")
+    __slots__ = ("out", "out_amt", "byproducts", "ws", "inputs", "cost")
 
-    def __init__(self, out, out_amt, ws, inputs, byproducts=()):
+    def __init__(self, out, out_amt, ws, inputs, byproducts=(), cost=1):
         self.out = out
         self.out_amt = out_amt
         self.byproducts = list(byproducts)
         self.ws = ws
         self.inputs = inputs
+        self.cost = cost
 
     def outputs(self):
         """`(item, amount)` for the anchor and every byproduct. Not sorted."""
         return [(self.out, self.out_amt)] + list(self.byproducts)
 
     def key(self):
-        """The canonicalization key: anchor, anchor amount, byproducts, inputs.
-        Workstations are deliberately excluded, exactly like `RecipeKeyLess` in
-        C++. The anchor is compared first, so this matches the C++ ordering of
-        the full sorted output list."""
-        return (self.out, self.out_amt, tuple(self.byproducts), tuple(self.inputs))
+        """The canonicalization key: anchor, anchor amount, byproducts, inputs
+        and cost. Workstations are deliberately excluded, exactly like
+        `RecipeKeyLess` in C++. The anchor is compared first, so this matches
+        the C++ ordering of the full sorted output list, and the cost is last so
+        the order stays dominated by the column. Two recipes with the same
+        column but different costs are not interchangeable -- merging them would
+        keep an arbitrary one -- so the cost is part of the identity."""
+        return (self.out, self.out_amt, tuple(self.byproducts), tuple(self.inputs),
+                self.cost)
 
     def self_consumption(self):
         """The amount of its own anchor output the recipe also consumes."""
@@ -117,7 +133,7 @@ class Graph:
         if data[:3] != b"AWR":
             raise ValueError("bad magic %r" % data[:4])
         version = data[3]
-        if version not in (1, 2):
+        if version not in (1, 2, 3):
             raise ValueError("unsupported schema version %d" % version)
 
         pos = 4
@@ -133,6 +149,14 @@ class Graph:
             max_handle = max(max_handle, output)
             n_recipe, pos = _varint(data, pos)
             for _ in range(n_recipe):
+                # A real recipe costs at least one underlying execution, and a
+                # pseudo-resource's member edge is free, whatever the blob
+                # spells. Before v3 every real recipe cost exactly one.
+                cost = 1
+                if version >= 3:
+                    cost, pos = _varlong(data, pos)
+                cost = max(cost, 1) if output <= self.n_real else 0
+
                 out_amt, pos = _varlong(data, pos)
                 n_ws, pos = _varint(data, pos)
                 ws = []
@@ -166,7 +190,7 @@ class Graph:
                     inp += d
                     max_handle = max(max_handle, inp)
                     inputs.append((inp - 1, amt))
-                recipes.append(Recipe(anchor, anchor_amt, ws, inputs, byproducts))
+                recipes.append(Recipe(anchor, anchor_amt, ws, inputs, byproducts, cost))
 
         if pos != len(data):
             raise ValueError("trailing bytes after the last entry")
@@ -215,7 +239,8 @@ class Graph:
         for survivor in sorted(groups):
             rec = self.recipes[survivor]
             ws = sorted({w for r in groups[survivor] for w in self.recipes[r].ws})
-            merged.append(Recipe(rec.out, rec.out_amt, ws, rec.inputs, rec.byproducts))
+            merged.append(Recipe(rec.out, rec.out_amt, ws, rec.inputs, rec.byproducts,
+                                 rec.cost))
         self.recipes = merged
         self.i2r = _index(merged)
 

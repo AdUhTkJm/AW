@@ -36,9 +36,9 @@ def main():
     for recipe in graph.recipes[:shown]:
         inputs = ", ".join("%s x%d" % (name_of(names, item, graph.n_real), amount)
                            for (item, amount) in recipe.inputs)
-        print("  %d x %s  <- %s   (%d workstation(s))"
+        print("  %d x %s  <- %s   (%d workstation(s), cost %d)"
               % (recipe.out_amt, name_of(names, recipe.out, graph.n_real), inputs or "(nothing)",
-                 len(recipe.ws)))
+                 len(recipe.ws), recipe.cost))
 
     if export:
         payload = {
@@ -48,6 +48,7 @@ def main():
                 {
                     "out": recipe.out + 1,
                     "outAmt": recipe.out_amt,
+                    "cost": recipe.cost,
                     "inputs": [[item + 1, amount] for (item, amount) in recipe.inputs],
                     "workstations": [station + 1 for station in recipe.ws],
                 }

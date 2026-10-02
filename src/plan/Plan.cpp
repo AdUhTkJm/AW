@@ -25,39 +25,71 @@ int64_t ceilDiv(int64_t numerator, int64_t denominator) {
   return numerator / denominator + (numerator % denominator != 0 ? 1 : 0);
 }
 
-// A valid lower bound on the optimum: row i needs b_i, so at least
-// ceil(b_i / maxPositive[i]) executions are needed. Same bound as the solver's
-// own `lowerBoundOnTotal`.
-int64_t trivialLowerBound(const solver::Matrix &A, std::span<const int64_t> b) {
-  aw::vector<int64_t> maxPositive = aw::vector<int64_t>::zeroes(A.rows);
-  for (uint32_t k = 0; k < A.rowIndex.size(); k++) {
-    const int64_t value = A.value[k];
-    if (value > 0 && value > maxPositive[A.rowIndex[k]])
-      maxPositive[A.rowIndex[k]] = value;
-  }
-  int64_t bound = 1;
-  for (uint32_t i = 0; i < A.rows; i++)
-    if (b[i] > 0 && maxPositive[i] > 0) {
-      const int64_t candidate = ceilDiv(b[i], maxPositive[i]);
-      if (candidate > bound)
-        bound = candidate;
+// A valid lower bound on the objective c^T x: row i needs b_i, so firing
+// producers of it costs at least `min over producers r of ceil(b_i / A[i][r])
+// * c_r`. Every term is at least the single-row LP optimum b_i * min_r
+// (c_r / A[i][r]), so the minimum of the terms is too, and the integer optimum
+// is at least that LP optimum. With a uniform cost the minimum is attained by
+// the largest producer and this is exactly `ceil(b_i / maxPositive[i])`.
+//
+// This is deliberately weak. A tighter estimate would need the LP relaxation:
+// these graphs contain cycles that amplify (four planks from one log) with no
+// "raw" base item, so a Bellman-Ford style cost relaxation, which needs
+// something to seed from, reports the whole graph unreachable. The cap is
+// therefore grown empirically instead.
+int64_t costLowerBound(const solver::Matrix &A, std::span<const int64_t> b,
+                       std::span<const int64_t> c) {
+  // A free producer fills its row at no cost, so the row contributes nothing.
+  aw::vector<uint8_t> freeRow = aw::vector<uint8_t>::zeroes(A.rows);
+  aw::vector<aw::int128> best(A.rows, 0);
+  aw::vector<uint8_t> seen = aw::vector<uint8_t>::zeroes(A.rows);
+  for (uint32_t r = 0; r < A.cols; r++) {
+    for (uint32_t k = A.colStart[r]; k < A.colStart[r + 1]; k++) {
+      const int64_t value = A.value[k];
+      if (value <= 0)
+        continue;
+      const uint32_t row = A.rowIndex[k];
+      if (b[row] <= 0)
+        continue;
+      if (c[r] <= 0) {
+        freeRow[row] = 1;
+        continue;
+      }
+      const aw::int128 candidate = (aw::int128) ceilDiv(b[row], value) * (aw::int128) c[r];
+      if (!seen[row] || candidate < best[row]) {
+        seen[row] = 1;
+        best[row] = candidate;
+      }
     }
-  return bound;
+  }
+
+  aw::int128 bound = 1;
+  for (uint32_t i = 0; i < A.rows; i++) {
+    if (freeRow[i] || !seen[i])
+      continue;
+    if (best[i] > bound)
+      bound = best[i];
+  }
+  return bound > (aw::int128) INT64_MAX ? INT64_MAX : (int64_t) bound;
 }
 
 }  // namespace
 
 // The problem is
 //
-//   min   sum_{real r} x_r
+//   min   sum_{real r} c_r x_r
 //   s.t.  produced(i) - consumed(i) >= b_i        for every item i
 //         x_r >= 0, x_r integer
 //
-// Here x_r is the number of times recipe `r` is executed. A tag edge (a recipe
-// whose output is a synthetic tag node) costs nothing: choosing which member
-// fills a tag slot is free in-game. It is given a natural upper bound by the
-// solver instead -- it can never usefully exceed what the plan consumes of its
-// tag -- so the free column stays finite under the `>=` row above.
+// Here x_r is the number of times recipe `r` is executed, and c_r is what one
+// execution of it costs, counted in executions of the underlying Minecraft
+// recipe: 1 for an ordinary recipe, the batch size for a level of a chanced
+// recipe (the mod folds a batch into one deterministic column, see
+// ChanceBatching), and 0 for a tag edge. A tag edge (a recipe whose output is a
+// synthetic tag node) costs nothing: choosing which member fills a tag slot is
+// free in-game. It is given a natural upper bound by the solver instead -- it
+// can never usefully exceed what the plan consumes of its tag -- so the free
+// column stays finite under the `>=` row above.
 //
 // b_target = amount and b_i = -inventory(i) for every other item.
 PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
@@ -149,14 +181,15 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
 
   // Tag edges are free. A recipe is a tag edge when it produces a non-real
   // node; those are exactly the synthetic member edges. Everything else costs
-  // one crafting step. See include/aw/Solver.h for how the solver keeps the
-  // free columns bounded without an equality.
+  // what the blob said it costs, which is the batch size for a level of a
+  // chanced recipe and 1 for an ordinary one. See BaseCraftingGraph::cost for
+  // how the solver keeps a free column bounded without an equality.
   //
   // The real recipes are a prefix, so the rest of the vector stays at its
   // default zero cost. See the ordering note on BaseCraftingGraph::output.
   aw::vector<int64_t> objective = aw::vector<int64_t>::zeroes(n);
   for (uint32_t r = 0; r < n && g.output[r] < g.nReal; r++)
-    objective[r] = 1;
+    objective[r] = g.cost[r];
 
   // Greedy DAG pre-pass. It is cheap (O(V + E)) and either returns a
   // balance-checked plan or nothing, so it is always run before the solver.
@@ -201,7 +234,7 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
         result.status = PlanStatus::CYCLE_UNFULFILLED;
       return result;
     }
-    if (greedyCost <= (aw::int128) trivialLowerBound(A, rhs) * GREEDY_QUALITY_FACTOR) {
+    if (greedyCost <= (aw::int128) costLowerBound(A, rhs, objective) * GREEDY_QUALITY_FACTOR) {
       solveOptions.objectiveUpperBound = (int64_t) greedyCost;
       solveOptions.solutionHint = std::span<const int64_t>(greedy.data(), greedy.size());
     }

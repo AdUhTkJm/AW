@@ -295,9 +295,10 @@ void compareNormalized(std::span<const ItemId> ii, std::span<const Amount> ic,
 // A recipe r producing a real item X is dominated when a sibling recipe s of X
 // has a componentwise larger column: v_s >= v_r over every item. Because both
 // produce X, that is exactly `out_s >= out_r` and `in_s(j) <= in_r(j)` for
-// every input j. Replacing one execution of r by one of s keeps every balance
-// at least as high while the step count is unchanged, so no optimal plan needs
-// r.
+// every input j, plus `c_s <= c_r`: replacing one execution of r by one of s
+// keeps every balance at least as high and the objective no larger, so no
+// optimal plan needs r. With a uniform cost the extra condition always holds,
+// so nothing is dropped that the old test kept.
 //
 // In nonoptimal mode the columns are compared after normalizing
 // their output amount to 1 instead of per execution (`compareNormalized`). That
@@ -305,6 +306,9 @@ void compareNormalized(std::span<const ItemId> ii, std::span<const Amount> ic,
 // but it compares fractional executions: a slow recipe that is cheaper per unit
 // can then dominate a fast one that consumes more per unit. For the player this
 // trades steps for materials, so it is a deliberate deviation from optimality.
+// The deviation is a material one only: the relaxed rule still requires the
+// dominator to cost no more per execution, so a heterogeneous cost cannot turn
+// it into "drop the cheap route for the expensive one".
 //
 // Unlike the composite pass nothing is inlined, so no guard input is recorded
 // and held stock never makes r preferable. The comparison is a partial order on
@@ -377,16 +381,21 @@ void computeDirectDominancePruning(CraftingGraph &graph,
           // the finer batch (a wall x1 and a wall x6 from the same per-unit
           // ratio are not interchangeable when one wall is wanted), so they
           // stay incomparable and both survive.
-          if (iLeJ && !jLeI)
+          //
+          // One execution of j stands in for one of i, so it must not cost
+          // more; with a uniform cost both flags are always true.
+          if (iLeJ && !jLeI && graph.cost[j] <= graph.cost[i])
             adj[i].push_back(j);
-          if (jLeI && !iLeJ)
+          if (jLeI && !iLeJ && graph.cost[i] <= graph.cost[j])
             adj[j].push_back(i);
         } else {
           // out_i <= out_j is necessary for v_i <= v_j, so it skips most pairs
           // when the outputs differ; it is not sufficient on its own.
-          if (outAmt[i] <= outAmt[j] && leVector(ii, ic, ji, jc))
+          if (graph.cost[j] <= graph.cost[i] && outAmt[i] <= outAmt[j] &&
+              leVector(ii, ic, ji, jc))
             adj[i].push_back(j);
-          if (outAmt[j] <= outAmt[i] && leVector(ji, jc, ii, ic))
+          if (graph.cost[i] <= graph.cost[j] && outAmt[j] <= outAmt[i] &&
+              leVector(ji, jc, ii, ic))
             adj[j].push_back(i);
         }
       }

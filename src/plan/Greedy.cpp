@@ -69,10 +69,19 @@ enum class Strategy : uint8_t {
 
 // True when producer `rhs` is strictly better than producer `lhs` under
 // `strategy`.
+//
+// Both strategies are a heuristic on which producer to fire, so the cost enters
+// as another term to prefer less of, never as a hard condition: a route that
+// costs more is still a valid route, it is only ranked lower.
 bool better(const BaseCraftingGraph &g, Strategy strategy, uint32_t lhs, uint32_t rhs) {
   if (strategy == Strategy::LargestBatch) {
-    if (g.outputAmt[rhs] != g.outputAmt[lhs])
-      return g.outputAmt[rhs] > g.outputAmt[lhs];
+    // Fewest executions, of the cheapest kind: compare the cost per unit
+    // produced. Cross multiplying keeps it exact in integers and needs no
+    // division, and with a uniform cost it reduces to the larger batch.
+    const aw::int128 lhsPerUnit = (aw::int128) g.cost[lhs] * (aw::int128) g.outputAmt[rhs];
+    const aw::int128 rhsPerUnit = (aw::int128) g.cost[rhs] * (aw::int128) g.outputAmt[lhs];
+    if (lhsPerUnit != rhsPerUnit)
+      return rhsPerUnit < lhsPerUnit;
     return g.inputsOf(rhs).size() < g.r2i.targetsOf(lhs).size();
   }
   int64_t lhsMass = 0;
@@ -83,6 +92,10 @@ bool better(const BaseCraftingGraph &g, Strategy strategy, uint32_t lhs, uint32_
     rhsMass += weight;
   if (lhsMass != rhsMass)
     return rhsMass < lhsMass;
+  // Equal input mass: the cheaper execution wins, then the larger batch. With
+  // a uniform cost this is the old batch tie-break.
+  if (g.cost[lhs] != g.cost[rhs])
+    return g.cost[rhs] < g.cost[lhs];
   return g.outputAmt[rhs] > g.outputAmt[lhs];
 }
 
@@ -328,11 +341,14 @@ aw::vector<int64_t> demandSweep(const SweepContext &ctx, const aw::vector<uint8_
   return exec;
 }
 
-// The solver's objective, as a hint on search direction.
+// The solver's objective, as a hint on search direction. One execution of a
+// recipe costs `graph.cost`, which is the batch size for a level of a chanced
+// recipe, so a plan that leans on a coarse batch is charged for the real
+// executions it stands for.
 aw::int128 executionCost(const BaseCraftingGraph &g, std::span<const int64_t> exec) noexcept {
   aw::int128 cost = 0;
   for (uint32_t recipe = 0; recipe < g.nRecipe && g.output[recipe] < g.nReal; recipe++)
-    cost += exec[recipe];
+    cost += (aw::int128) g.cost[recipe] * (aw::int128) exec[recipe];
   return cost;
 }
 
