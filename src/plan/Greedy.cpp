@@ -351,15 +351,11 @@ struct BestPlan {
   BestPlan(const BaseCraftingGraph &g, std::span<const Amount> stock, ItemId target, Amount amount):
     g(g), stock(stock), amount(amount), target(target) {}
 
-  bool balanced(const aw::vector<int64_t> &exec) const noexcept;
-
   void consider(aw::vector<int64_t> &&candidate) noexcept;
 };
 
 void BestPlan::consider(aw::vector<int64_t> &&candidate) noexcept {
   if (candidate.empty())
-    return;
-  if (!balanced(candidate))
     return;
   const aw::int128 candidateCost = executionCost(g, candidate);
   if (found && candidateCost >= cost)
@@ -367,28 +363,6 @@ void BestPlan::consider(aw::vector<int64_t> &&candidate) noexcept {
   exec = std::move(candidate);
   cost = candidateCost;
   found = true;
-}
-
-// Check whether `exec` is balanced.
-bool BestPlan::balanced(const aw::vector<int64_t> &exec) const noexcept {
-  const uint32_t nItem = g.nItem;
-  aw::vector<aw::int128> balance(nItem, 0);
-  for (uint32_t recipe = 0; recipe < g.nRecipe; recipe++) {
-    const int64_t times = exec[recipe];
-    if (times == 0)
-      continue;
-    balance[g.output[recipe]] += (aw::int128) g.outputAmt[recipe] * times;
-    const auto inputs = g.inputsOf(recipe);
-    const auto weights = g.inputAmountsOf(recipe);
-    for (size_t k = 0; k < inputs.size(); k++)
-      balance[inputs[k]] -= (aw::int128) weights[k] * times;
-  }
-  for (uint32_t item = 0; item < nItem; item++) {
-    const aw::int128 required = item == target ? (aw::int128) amount : -(aw::int128) stock[item];
-    if (balance[item] < required)
-      return false;
-  }
-  return true;
 }
 
 }  // namespace
