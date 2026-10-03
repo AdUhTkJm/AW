@@ -967,6 +967,13 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
     return best;
 
   if (infeasibleAttempts == attempts && attempts > 0 && cap >= ceiling) {
+    // This proves only the *capped* model infeasible. `ceiling` is the
+    // numerical safety bound from absoluteCap, not a bound on the true
+    // optimum: a plan whose cost exceeds it is not representable at all (the
+    // column domains are `cap / cost`), so a feasible instance can land here
+    // with no plan under the cap. A caller that holds a feasible incumbent
+    // must keep it rather than report this as a proof; planCrafting keeps its
+    // greedy DAG plan for exactly this case.
     result.status = PlanStatus::INFEASIBLE;
     return result;
   }

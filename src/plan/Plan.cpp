@@ -255,6 +255,28 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
     }
   }
 
+  // The greedy DAG pre-pass returned a real plan. It is acyclic, so it passes
+  // the fireability check, and it is a valid answer even when it is far above
+  // the optimum. The optimizer prefers a cheaper plan and can spend its whole
+  // cycle-retry budget on balance-feasible but unrealizable ones, or come back
+  // INFEASIBLE from a cap-limited model, while this plan is sitting right here.
+  // Keep it as the fallback so a rejected solve degrades to a worse plan
+  // instead of to "no plan". Returns false when there is nothing to fall back
+  // to, leaving `result` untouched.
+  const auto adoptGreedyFallback = [&]() -> bool {
+    if (!greedyUsable)
+      return false;
+    if (!planIsFireable(sub, invSrc,
+                        std::span<const int64_t>(greedy.data(), greedy.size())))
+      return false;
+    result.status = PlanStatus::OK;
+    result.provenOptimal = false;
+    result.gap = 0.0;
+    result.bestBound = 0.0;
+    result.exec = greedy;
+    return true;
+  };
+
   // Eager startup cuts: every 1- and 2-cycle of the subgraph gets a group that
   // makes its first firing pay for itself out of the stock and the world
   // outside the cycle, and a two-recipe component also gets the joint seed cut
@@ -289,8 +311,10 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
   for (int retry = 0;; retry++) {
     if (budgetLimited) {
       const double left = budgetLeft();
-      if (left <= 0.0)
+      if (left <= 0.0) {
+        adoptGreedyFallback();
         return result;
+      }
       solveOptions.maxTimeSeconds = left;
     }
     const solver::Result solved = solver::solve(A, rhs, objective, solveOptions);
@@ -304,10 +328,11 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
       // INFEASIBLE (or ITER_LIMIT) says nothing about the rest. Keep the last
       // rejection, with its plan, instead of overwriting it. Only a first-solve
       // failure is reported with the solver's own status.
-      if (result.status == PlanStatus::CYCLE_UNFULFILLED)
-        return result;
-      result.status = solved.status;
-      result.bestBound = solved.bestBound;
+      if (result.status != PlanStatus::CYCLE_UNFULFILLED) {
+        result.status = solved.status;
+        result.bestBound = solved.bestBound;
+      }
+      adoptGreedyFallback();
       return result;
     }
     result.status = PlanStatus::OK;
@@ -337,8 +362,10 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
 
     result.status = PlanStatus::CYCLE_UNFULFILLED;
     result.provenOptimal = false;
-    if (retry >= solveOptions.maxCycleRetries)
+    if (retry >= solveOptions.maxCycleRetries) {
+      adoptGreedyFallback();
       return result;
+    }
 
     // Record one startup cut per blocked recipe: a sound cut that makes the
     // re-solve pay that recipe's seed. The eager pass has already posted the

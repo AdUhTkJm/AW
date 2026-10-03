@@ -1484,8 +1484,9 @@ void testFireability() {
   // The no-good retry, and the cut that makes it unnecessary: the cheapest
   // balance-feasible plan recycles with no seed and cannot fire. The 2-cycle
   // cut forces the seed before the first solve, so a single solve returns the
-  // seeded runner-up; with the cuts off the plan has to be rejected first and
-  // the no-good retry has to find the same answer.
+  // seeded runner-up. With both the cuts and the retries off, the greedy DAG
+  // pre-pass still knows the seeded route, and planCrafting falls back to it
+  // instead of returning CYCLE_UNFULFILLED with nothing usable.
   aw::registerCraftingGraph(buildCycleRetrySample());
   expect(aw::getCraftingError() == nullptr, "cycle retry sample parses");
   {
@@ -1500,10 +1501,10 @@ void testFireability() {
 
     aw::solver::Options off;
     off.maxCycleRetries = 0;
-    off.maxStartupGroups = 0;  // exercise the no-good path, not the cuts
+    off.maxStartupGroups = 0;  // exercise the fallback, not the cuts
     const aw::PlanResult rejected = aw::planCrafting(sub, target, 1, inventory, off);
-    expect(rejected.status == aw::PlanStatus::CYCLE_UNFULFILLED,
-           "the unseeded recycle plan is rejected when retries are off");
+    expect(rejected.status == aw::PlanStatus::OK,
+           "the greedy fallback answers when the cuts and retries are off");
 
     aw::solver::Options cutOnly;
     cutOnly.maxCycleRetries = 0;
@@ -1517,7 +1518,9 @@ void testFireability() {
 
     // The seeding route costs four executions: one seed, one round of each
     // recycle step, and the target. The rejected plan cost three and used no
-    // seed at all.
+    // seed at all. The cut and the retry both land on the four-execution route;
+    // the greedy fallback is startable too but takes a longer route, so only
+    // its use of the seed is asserted.
     for (const aw::PlanResult *plan : {&cut, &retried}) {
       int64_t total = 0;
       int64_t seed = 0;
@@ -1530,13 +1533,21 @@ void testFireability() {
       expect(total == 4, "the seeded plan is the runner-up");
       expect(seed > 0, "the seeded plan draws the seed from stock");
     }
+    {
+      int64_t seed = 0;
+      for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
+        const auto inputs = sub.graph.inputsOf(r);
+        if (inputs.size() == 1 && sub.itemOrigin[inputs[0]] == 0)  // handle 1 (L)
+          seed += rejected.exec[r];
+      }
+      expect(seed > 0, "the fallback is the seeded route, not the recycle");
+    }
   }
 
-  // The 1-cycle (self-loop) cut, on a self-consuming amplifier. Without it the
-  // blocked recipe is only cut after the first rejection, so the unseeded
-  // cost-3 plan is returned, rejected, and replaced by the seeded cost-4 one;
-  // the eager self-loop cut posts the same inequality up front, so a single
-  // solve is enough.
+  // The 1-cycle (self-loop) cut, on a self-consuming amplifier. The unseeded
+  // cost-3 plan is rejected and, when the eager self-loop cut is off, the
+  // greedy DAG pre-pass supplies a startable route as a fallback; the eager cut
+  // posts the same inequality up front, so a single solve is enough.
   aw::registerCraftingGraph(buildStartupBarrierSample());
   expect(aw::getCraftingError() == nullptr, "startup barrier sample parses");
   {
@@ -1554,8 +1565,8 @@ void testFireability() {
     off.maxCycleRetries = 0;
     off.maxStartupGroups = 0;
     const aw::PlanResult rejected = aw::planCrafting(sub, target, 1, inventory, off);
-    expect(rejected.status == aw::PlanStatus::CYCLE_UNFULFILLED,
-           "the unseeded amplifier plan is rejected without barriers");
+    expect(rejected.status == aw::PlanStatus::OK,
+           "the greedy fallback answers without barriers");
 
     aw::solver::Options cutOnly;
     cutOnly.maxCycleRetries = 0;
@@ -1566,11 +1577,22 @@ void testFireability() {
     const aw::PlanResult retried = aw::planCrafting(sub, target, 1, inventory);
     expect(retried.status == aw::PlanStatus::OK,
            "the barrier cut plus no-good finds the seeded plan");
+    // The unseeded plan costs three and cannot fire; the cut and the retry
+    // both land on the four-execution route. The greedy fallback is startable
+    // too but longer, so it is only checked to be a route other than the
+    // unseeded one.
     for (const aw::PlanResult *plan : {&cut, &retried}) {
       int64_t total = 0;
       for (uint32_t r = 0; r < sub.graph.nRecipe; r++)
         total += plan->exec[r];
       expect(total == 4, "the seeded plan is the runner-up");
+    }
+    {
+      int64_t fallbackTotal = 0;
+      for (uint32_t r = 0; r < sub.graph.nRecipe; r++)
+        fallbackTotal += rejected.exec[r];
+      expect(fallbackTotal > 0 && fallbackTotal != 3,
+             "the fallback is a startable route, not the unseeded amplifier");
     }
   }
 }
