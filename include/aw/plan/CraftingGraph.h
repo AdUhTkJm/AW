@@ -72,7 +72,11 @@ struct BaseCraftingGraph {
 
   // Maps item to all recipes that produce it. Targets are recipe ids.
   SparseGraph i2r;
-  // Maps recipe to all items that it needs as input. Targets are item ids.
+  // Maps recipe to all items that it needs as input. Targets are item ids,
+  // ascending and duplicate-free, and every amount is positive: the decoder
+  // delta-codes each list, every later rewrite of the lists preserves that
+  // encoding, and dropNonPositiveInputs clears the remaining amounts before any
+  // pass runs. The sparse column comparisons rely on that order.
   SparseGraph r2i;
 
   // Anchor output item id per recipe. Non-decreasing: the decoder emits recipes

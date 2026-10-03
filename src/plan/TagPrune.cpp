@@ -152,6 +152,11 @@ struct TagPruner {
   aw::vector<uint> qualInputOffsets;       // nRecipe + 1 after prefixSum
   aw::vector<ItemId> qualInputItems;
 
+  // Whether a recipe names at least one allowed tag among its inputs. A tag
+  // input is flexible -- any member can pay for it -- so such a recipe's column
+  // is not a fixed vector and covers() has to build the member pool for it.
+  aw::vector<uint8_t> hasAllowedTagInput;  // nRecipe
+
   // Witness seeds grouped by witness: witnessByW[w] holds the m with a witness
   // pair (m, w). Seeding is per item but solving is per witness, so the pairs
   // are bucketed here instead of stored packed.
@@ -450,9 +455,21 @@ void TagPruner::buildConsumerIndex() noexcept {
 // substitution, because a plan can drop one execution and pay for it with the
 // input. A tag the budget dropped is left out, since it can never justify a
 // pair -- exactly as if the recipe did not list it.
+//
+// The same sweep also marks the recipes that name an allowed tag at all, which
+// is what tells covers() it cannot use the plain column comparison. That bit is
+// about every input, not just the qualified ones, so it is set before the
+// byproduct skip: covers() rejects a byproduct recipe anyway, but it reads the
+// bit first.
 void TagPruner::buildQualifiedInputs() noexcept {
   qualInputOffsets.assign(nRecipe, 0);
+  hasAllowedTagInput.assign(nRecipe, 0);
   for (uint r = 0; r < nRecipe; r++) {
+    for (ItemId j : graph.inputsOf(r))
+      if (j >= nReal && allowedTags[j]) {
+        hasAllowedTagInput[r] = 1;
+        break;
+      }
     if (graph.hasByproducts(r))
       continue;
     const auto inputs = graph.inputsOf(r);
@@ -725,6 +742,9 @@ Amount consume(aw::vector<std::pair<ItemId, Amount>> &pool, ItemId item,
 // consumes allowed to pick any member. One execution of s then stands in for
 // one of r, so it must not cost more than r either; under a uniform cost that
 // is always true.
+//
+// A recipe that consumes no allowed tag has a fixed column and is decided by
+// leVectorRaw alone; only a tag input needs the mutable member pool.
 bool TagPruner::covers(uint s, uint r) noexcept {
   if (coverBudget == 0)
     return false;
@@ -736,14 +756,18 @@ bool TagPruner::covers(uint s, uint r) noexcept {
   if (graph.outputAmt[s] < graph.outputAmt[r])
     return false;
 
-  cap.clear();
   const auto ri = graph.inputsOf(r);
   const auto rw = graph.inputAmountsOf(r);
+  const auto si = graph.inputsOf(s);
+  const auto sw = graph.inputAmountsOf(s);
+  if (!hasAllowedTagInput[s])
+    return leVectorRaw(si.data(), sw.data(), si.size(),
+                       ri.data(), rw.data(), ri.size());
+
+  cap.clear();
   for (size_t j = 0; j < ri.size(); j++)
     cap.emplace_back(ri[j], rw[j]);
 
-  const auto si = graph.inputsOf(s);
-  const auto sw = graph.inputAmountsOf(s);
   for (size_t j = 0; j < si.size(); j++) {
     const ItemId h = si[j];
 

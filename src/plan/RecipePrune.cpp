@@ -5,89 +5,13 @@
 
 namespace aw::detail {
 
-// NOTE: This is linked against other translation units.
-// We don't use it in this particular file, but we cannot delete it.
+// NOTE: This is linked against other translation units, so it keeps external
+// linkage. The body is the shared sparse-column comparison; see leVectorRaw in
+// Prune.h.
 bool leVector(std::span<const ItemId> ci, std::span<const Amount> cc,
               std::span<const ItemId> si, std::span<const Amount> sc) noexcept {
-  size_t i = 0, j = 0;
-  const size_t c_size = ci.size();
-  const size_t s_size = si.size();
-
-  // Shared part, where both sides have elements.
-  while (i < c_size && j < s_size) {
-    const ItemId c_id = ci[i];
-    const ItemId s_id = si[j];
-
-    if (c_id == s_id) {
-      if (cc[i] > sc[j])
-        return false;
-      ++i;
-      ++j;
-    } else if (c_id < s_id) {
-      if (cc[i] > 0)
-        return false;
-      ++i;
-    } else {
-      if (sc[j] < 0)
-        return false;
-      ++j;
-    }
-  }
-
-  // Now the remaining items for c and s.
-  while (i < c_size) {
-    if (cc[i] > 0)
-      return false;
-    ++i;
-  }
-  while (j < s_size) {
-    if (sc[j] < 0)
-      return false;
-    ++j;
-  }
-
-  return true;
-}
-
-[[gnu::always_inline]]
-inline bool leVectorRaw(const ItemId *ci, const Amount *cc, size_t c_size,
-                 const ItemId *si, const Amount *sc, size_t s_size) noexcept {
-  size_t i = 0, j = 0;
-
-  // Shared part, where both sides have elements.
-  while (i < c_size && j < s_size) {
-    const ItemId cid = ci[i];
-    const ItemId sid = si[j];
-
-    if (cid == sid) {
-      if (cc[i] > sc[j])
-        return false;
-      ++i;
-      ++j;
-    } else if (cid < sid) {
-      if (cc[i] > 0)
-        return false;
-      ++i;
-    } else {
-      if (sc[j] < 0)
-        return false;
-      ++j;
-    }
-  }
-
-  // Now the remaining items for c and s.
-  while (i < c_size) {
-    if (cc[i] > 0)
-      return false;
-    ++i;
-  }
-  while (j < s_size) {
-    if (sc[j] < 0)
-      return false;
-    ++j;
-  }
-
-  return true;
+  return leVectorRaw(ci.data(), cc.data(), ci.size(),
+                     si.data(), sc.data(), si.size());
 }
 
 bool leZero(std::span<const Amount> cc) noexcept {

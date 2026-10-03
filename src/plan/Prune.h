@@ -84,6 +84,53 @@ void compositeWorkstations(const CraftingGraph &graph,
                           aw::vector<aw::vector<ItemId>> &compWs) noexcept;
 
 
+// True when the sparse column (ci, cc) is componentwise <= (si, sc). Positive
+// coefficients are consumption and negative ones production, so an item only
+// the right side names is fatal when that side produces it. Both runs must be
+// ascending and duplicate-free; the caller owns that invariant. Raw pointers
+// rather than spans because every caller is an inner loop that already holds
+// the rows.
+[[gnu::always_inline]]
+inline bool leVectorRaw(const ItemId *ci, const Amount *cc, size_t cSize,
+                        const ItemId *si, const Amount *sc, size_t sSize) noexcept {
+  size_t i = 0, j = 0;
+
+  // Shared part, where both sides have elements.
+  while (i < cSize && j < sSize) {
+    const ItemId cid = ci[i];
+    const ItemId sid = si[j];
+
+    if (cid == sid) {
+      if (cc[i] > sc[j])
+        return false;
+      ++i;
+      ++j;
+    } else if (cid < sid) {
+      if (cc[i] > 0)
+        return false;
+      ++i;
+    } else {
+      if (sc[j] < 0)
+        return false;
+      ++j;
+    }
+  }
+
+  // Now the remaining items for c and s.
+  while (i < cSize) {
+    if (cc[i] > 0)
+      return false;
+    ++i;
+  }
+  while (j < sSize) {
+    if (sc[j] < 0)
+      return false;
+    ++j;
+  }
+
+  return true;
+}
+
 bool leVector(std::span<const ItemId> ci, std::span<const Amount> cc,
               std::span<const ItemId> si, std::span<const Amount> sc) noexcept;
 
