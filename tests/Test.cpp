@@ -389,6 +389,36 @@ aw::vector<std::byte> buildCycleRetrySample() {
   return w.out;
 }
 
+// A directed three-recipe ring, which the eager pass cannot see: no two members
+// consume each other's output, so `unitePartners` never merges them and there
+// is no 1- or 2-cycle to cut. The ring is net positive (A +4, B +1 per round),
+// so the balance runs it from nothing and the cheapest plan for the target is
+// unstartable. Only the post-solve component group, which keeps all three
+// members out of the funding sum, can exclude it.
+//
+//   handle 1 (L) leaf, 10 in stock
+//   handle 2 (A) <- r0 (x5, ws [1], input B x1)   ring
+//                <- r1 (x1, ws [1], input L x1)   seed, cost 10
+//   handle 3 (B) <- r2 (x2, ws [1], input C x1)   ring
+//   handle 4 (C) <- r3 (x1, ws [1], input A x1)   ring
+//   handle 5 (T) <- r4 (x1, ws [1], input A x4)   target
+aw::vector<std::byte> buildDirectedRingSample() {
+  AwrWriter w;
+  w.header(5, 5);
+  w.item(1, 0);
+  w.item(2, 2);
+  w.recipe(5, {1}, {{3, 1}});
+  w.cost(10);
+  w.recipe(1, {1}, {{1, 1}});
+  w.item(3, 1);
+  w.recipe(2, {1}, {{4, 1}});
+  w.item(4, 1);
+  w.recipe(1, {1}, {{2, 1}});
+  w.item(5, 1);
+  w.recipe(1, {1}, {{2, 4}});
+  return w.out;
+}
+
 // Recipes that differ only in their workstation set are the same LP column,
 // so registration folds them together.
 //
@@ -1594,6 +1624,59 @@ void testFireability() {
       expect(fallbackTotal > 0 && fallbackTotal != 3,
              "the fallback is a startable route, not the unseeded amplifier");
     }
+  }
+
+  // The post-solve component group, on a directed three-recipe ring. The eager
+  // pass only unites mutually-consuming pairs, so the ring reaches the solver
+  // whole; grouping all three members is what keeps the ring's own output out
+  // of the funding sum and forces the seed.
+  aw::registerCraftingGraph(buildDirectedRingSample());
+  expect(aw::getCraftingError() == nullptr, "directed ring sample parses");
+  {
+    const aw::Handle stations[] = {1};
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    aw::vector<aw::Amount> inventory(graph.nItem, 0);
+    inventory[0] = 10;  // handle 1 (L)
+    const aw::Subgraph sub = aw::reachableSubgraph(5, stations, inventory);
+    const aw::ItemId target = sub.translate(4);  // handle 5 (T)
+    expect(target != UINT32_MAX, "the ring target is in the subgraph");
+    expect(sub.graph.nRecipe == 5, "the ring sample keeps every route");
+
+    aw::solver::Options off;
+    off.maxStartupGroups = 0;  // the eager pass cannot see a directed ring
+    off.maxCycleRetries = 0;
+    const aw::PlanResult fallback = aw::planCrafting(sub, target, 1, inventory, off);
+    expect(fallback.status == aw::PlanStatus::OK,
+           "the greedy fallback answers a directed ring");
+
+    // One retry is enough: the rejection posts the whole-ring group, the ring's
+    // own output can no longer fund its start, and the rerun solves the seeded
+    // route. The unstartable balance plan runs one ring round for four, so the
+    // old per-recipe groups had nothing to exclude; the grouped cut has to
+    // force the seed.
+    aw::solver::Options oneRetry;
+    oneRetry.maxStartupGroups = 0;
+    oneRetry.maxCycleRetries = 1;
+    const aw::PlanResult ring = aw::planCrafting(sub, target, 1, inventory, oneRetry);
+    expect(ring.status == aw::PlanStatus::OK,
+           "the component group makes the directed ring startable in one retry");
+
+    int64_t fallbackCost = 0;
+    int64_t ringCost = 0;
+    int64_t ringSeed = 0;
+    for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
+      fallbackCost += sub.graph.cost[r] * fallback.exec[r];
+      ringCost += sub.graph.cost[r] * ring.exec[r];
+      const auto inputs = sub.graph.inputsOf(r);
+      if (inputs.size() == 1 && sub.itemOrigin[inputs[0]] == 0)  // handle 1 (L)
+        ringSeed += ring.exec[r];
+    }
+    // One seed (10) plus one round of the ring and the target is 14. The
+    // fallback cannot run the ring at all and pays four seeds, 41.
+    expect(ringCost == 14, "the component group lands on the seeded ring route");
+    expect(ringSeed == 1, "the ring route draws exactly one seed");
+    expect(ringCost < fallbackCost,
+           "the component cut beats the greedy fallback on the directed ring");
   }
 }
 

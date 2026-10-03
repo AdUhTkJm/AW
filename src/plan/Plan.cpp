@@ -11,15 +11,30 @@
 namespace aw {
 namespace {
 
-// True when some group already cuts on this (row, column). The fireability
-// witness repeats itself across retries, and the eager pass may have posted the
-// same need for a 1- or 2-cycle already.
-bool hasEntryNeed(const aw::vector<solver::Options::EntryGroup> &groups, uint32_t row,
-                  uint32_t column) noexcept {
-  for (const solver::Options::EntryGroup &group : groups)
-    for (const solver::Options::EntryNeed &need : group.needs)
-      if (need.row == row && need.column == column)
-        return true;
+// True when some posted group already covers exactly this set of columns, so a
+// retry that reports the same deadlock does not post a duplicate. The sizes are
+// compared first, which turns the subset test into an equality test.
+bool hasEntryGroup(const aw::vector<solver::Options::EntryGroup> &groups,
+                   std::span<const uint32_t> columns) noexcept {
+  for (const solver::Options::EntryGroup &group : groups) {
+    if (group.columns.size() != columns.size())
+      continue;
+    bool all = true;
+    for (uint32_t column : group.columns) {
+      bool found = false;
+      for (uint32_t wanted : columns)
+        if (wanted == column) {
+          found = true;
+          break;
+        }
+      if (!found) {
+        all = false;
+        break;
+      }
+    }
+    if (all)
+      return true;
+  }
   return false;
 }
 
@@ -367,23 +382,24 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
       return result;
     }
 
-    // Record one startup cut per blocked recipe: a sound cut that makes the
-    // re-solve pay that recipe's seed. The eager pass has already posted the
-    // 1- and 2-cycles, so this is what is left for the longer ones; the exact
-    // no-good still goes in, so progress is guaranteed even when the cut does
-    // not by itself exclude the rejected vector.
+    // Post one entry group over the whole deadlocked component, not one group
+    // per recipe. Grouping is what makes the cut bite: the group's own members
+    // are left out of the funding sum, so a member can only be named the entry
+    // when its gross input is seedable from the stock or from a recipe outside
+    // the component. Singleton groups cannot see this -- the rest of the cycle
+    // counts as outside and funds the entry, which is why a longer cycle used to
+    // come back unchanged on every retry. The exact no-good still goes in, so
+    // progress is guaranteed even when the cut does not by itself exclude the
+    // rejected vector.
+    const std::span<const uint32_t> component(witness.recipe.data(),
+                                              witness.recipe.size());
     bool addedCut = false;
-    for (size_t k = 0; k < witness.recipe.size(); k++) {
-      const uint32_t column = witness.recipe[k];
-      const uint32_t row = witness.item[k];
-      if (hasEntryNeed(solveOptions.entryGroups, row, column))
-        continue;
+    if (!hasEntryGroup(solveOptions.entryGroups, component)) {
       solver::Options::EntryGroup group;
-      group.columns.push_back(column);
-      group.needs.push_back(
-          solver::Options::EntryNeed{row, column, (int64_t) witness.need[k]});
-      solveOptions.entryGroups.push_back(std::move(group));
-      addedCut = true;
+      if (buildEntryGroup(sub, component, group)) {
+        solveOptions.entryGroups.push_back(std::move(group));
+        addedCut = true;
+      }
     }
     if (addedCut)
       installStock();

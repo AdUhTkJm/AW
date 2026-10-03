@@ -4,6 +4,8 @@
 #include "aw/plan/CraftingGraph.h"
 #include "aw/plan/Solver.h"
 
+#include <span>
+
 namespace aw {
 
 // Eager startup cuts for the 1- and 2-cycles of `sub`.
@@ -35,6 +37,23 @@ namespace aw {
 void buildStartupCuts(const Subgraph &sub, aw::vector<solver::Options::EntryGroup> &groups,
                       aw::vector<solver::Options::SeedCut> &seeds, uint32_t maxGroups,
                       uint32_t maxMembers) noexcept;
+
+// Builds one entry group over `columns`: every member is a candidate entry, and
+// the group's needs are the merged gross inputs of all of them.
+//
+// `buildStartupCuts` uses this for its components, and `planCrafting` uses it
+// for the component a rejected plan deadlocked in. Grouping the cycle's own
+// members is what makes the cut bite: `Options::EntryGroup` leaves the group
+// out of its own funding sum, so a member can only be named the entry when its
+// input is seedable from the stock or from a recipe outside the group. A
+// single-column group cannot see that, because the rest of the cycle counts as
+// outside and funds the entry.
+//
+// Returns false when `columns` is empty or no member has a gross input, in
+// which case `out` is left empty. The columns are not deduplicated; the caller
+// passes a set.
+bool buildEntryGroup(const Subgraph &sub, std::span<const uint32_t> columns,
+                     solver::Options::EntryGroup &out) noexcept;
 
 }  // namespace aw
 

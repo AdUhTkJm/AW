@@ -407,19 +407,37 @@ void buildStartupCuts(const Subgraph &sub, aw::vector<solver::Options::EntryGrou
     const uint32_t count = memberCount[root];
     if (groups.size() < maxGroups) {
       solver::Options::EntryGroup group;
-      group.columns.reserve(count);
-      group.needs.reserve(count);
-      for (uint32_t k = first; k < first + count; k++) {
-        const RecipeId r = members[k];
-        group.columns.push_back(r);
-        inputs.merge(g, r);
-        inputs.appendNeeds(r, group.needs);
-      }
-      groups.push_back(std::move(group));
+      if (buildEntryGroup(sub,
+                          std::span<const uint32_t>(members.data() + first, count), group))
+        groups.push_back(std::move(group));
     }
     if (count == 2)
       addPairSeedCuts(g, members[first], members[first + 1], inputs, seeds, maxGroups);
   }
+}
+
+bool buildEntryGroup(const Subgraph &sub, std::span<const uint32_t> columns,
+                     solver::Options::EntryGroup &out) noexcept {
+  out.columns.clear();
+  out.needs.clear();
+  const BaseCraftingGraph &g = sub.graph;
+  if (columns.empty() || g.nRecipe == 0)
+    return false;
+
+  // One merger over every member, so a need's amount is the member's merged
+  // gross input even when the recipe lists the same item twice. Every member is
+  // a candidate entry, so every member's inputs have to be priced.
+  InputMerger inputs(g.nItem);
+  out.columns.reserve(columns.size());
+  out.needs.reserve(columns.size());
+  for (uint32_t column : columns) {
+    if (column >= g.nRecipe)
+      return false;
+    out.columns.push_back(column);
+    inputs.merge(g, column);
+    inputs.appendNeeds(column, out.needs);
+  }
+  return !out.needs.empty();
 }
 
 }  // namespace aw
