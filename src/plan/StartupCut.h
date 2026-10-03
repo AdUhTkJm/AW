@@ -6,13 +6,19 @@
 
 namespace aw {
 
-// Eager startup entry cuts for the 1- and 2-cycles of `sub`.
+// Eager startup cuts for the 1- and 2-cycles of `sub`.
 //
-// Appends to `out`, up to `maxGroups` of them, one group per connected
+// Appends to `groups`, up to `maxGroups` of them, one group per connected
 // component of the net-gain mutual-consumption relation and per net-gain
 // self-loop. `maxMembers` skips a component too large to cut usefully, which is
 // how a whole conversion soup is kept out of the model. `solver::Options::
 // EntryGroup` says what a group means and why every fireable plan obeys it.
+//
+// For a component with exactly two members it also appends to `seeds`, up to
+// `maxGroups` of them, the *joint* cut of the ordered pair. An entry group
+// prices one firing against one row at a time, which a two-recipe cycle can
+// pass and still not start; the seed cut weighs the two rows against each other
+// instead. `solver::Options::SeedCut` carries the derivation.
 //
 // The cuts are plan-independent, so they can be posted before the first solve.
 // That is the point: the unstartable plan the post-solve fireability check used
@@ -26,8 +32,9 @@ namespace aw {
 // nothing. Exact inverse pairs (compress and decompress) sum to zero and are
 // skipped, as are cycles that destroy an item. The filter only decides
 // relevance, so a budget that runs out early is safe.
-void buildStartupCuts(const Subgraph &sub, aw::vector<solver::Options::EntryGroup> &out,
-                      uint32_t maxGroups, uint32_t maxMembers) noexcept;
+void buildStartupCuts(const Subgraph &sub, aw::vector<solver::Options::EntryGroup> &groups,
+                      aw::vector<solver::Options::SeedCut> &seeds, uint32_t maxGroups,
+                      uint32_t maxMembers) noexcept;
 
 }  // namespace aw
 

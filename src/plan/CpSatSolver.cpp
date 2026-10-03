@@ -360,7 +360,7 @@ aw::vector<int64_t> columnDomains(const Matrix &A, const RowMajor &rows,
   return domain;
 }
 
-// Everything the startup entry-cut pass needs, so the helper stays under the
+// Everything the startup cut passes need, so the helpers stay under the
 // argument limit.
 struct EntryContext {
   sat::CpModelBuilder &model;
@@ -371,6 +371,7 @@ struct EntryContext {
   absl::Span<const sat::IntVar> variables;
   const aw::vector<int64_t> &domain;
   const aw::vector<Options::EntryGroup> &groups;
+  const aw::vector<Options::SeedCut> &seeds;
 };
 
 bool isGroupColumn(std::span<const uint32_t> group, uint32_t column) noexcept {
@@ -471,6 +472,63 @@ void addEntryGroups(const EntryContext &ctx) {
   }
 }
 
+// The weighted availability a seed cut measures: the named rows' stock plus
+// their positive net output outside `members`, with each row's weight folded
+// in. False when a coefficient leaves the int64 range, in which case the cut is
+// skipped and the model simply stays weaker.
+bool weightedFundingOf(const EntryContext &ctx, const Options::SeedCut &cut,
+                       sat::LinearExpr &funding, int64_t &stock) noexcept {
+  uint64_t capacity = 0;
+  uint64_t stockSum = 0;
+  for (const Options::SeedTerm &term : cut.terms) {
+    const uint32_t row = term.row;
+    if (row >= ctx.A.rows || term.weight <= 0)
+      continue;
+    const uint64_t weight = (uint64_t) term.weight;
+    stockSum = satAdd(stockSum, satMul(weight, magnitude(seedStockOf(ctx, row))));
+    for (uint32_t k = ctx.rows.start[row]; k < ctx.rows.start[row + 1]; k++) {
+      const int64_t value = ctx.rows.value[k];
+      const uint32_t column = ctx.rows.column[k];
+      if (value <= 0 || isGroupColumn(cut.members, column))
+        continue;
+      const uint64_t coefficient = satMul(weight, (uint64_t) value);
+      if (coefficient > (uint64_t) INT64_MAX)
+        return false;
+      funding += sat::LinearExpr::Term(ctx.variables[column], (int64_t) coefficient);
+      capacity = satAdd(capacity, satMul(coefficient, (uint64_t) ctx.domain[column]));
+      if (capacity > (uint64_t) INT64_MAX / 2)
+        return false;
+    }
+  }
+  // A saturated stock sum only makes the cut easier to satisfy, which is safe.
+  stock = stockSum > (uint64_t) INT64_MAX ? INT64_MAX : (int64_t) stockSum;
+  return true;
+}
+
+// Adds the cuts described on Options::SeedCut: one fresh Boolean per cut, tied
+// to its trigger column, and the weighted availability that has to cover the
+// cut's demand when that trigger is used.
+void addSeedCuts(const EntryContext &ctx) {
+  for (const Options::SeedCut &cut : ctx.seeds) {
+    if (cut.trigger >= ctx.A.cols || cut.demand <= 0 || cut.terms.empty())
+      continue;
+    sat::LinearExpr funding;
+    int64_t stock = 0;
+    if (!weightedFundingOf(ctx, cut, funding, stock))
+      continue;
+    // `used` is 1 exactly when the trigger fires: x <= domain * used keeps it
+    // down, x >= used keeps it from being set on an unused member and escaping
+    // the cut.
+    const sat::BoolVar used = ctx.model.NewBoolVar();
+    ctx.model.AddLessOrEqual(sat::LinearExpr(ctx.variables[cut.trigger]),
+                             ctx.domain[cut.trigger] * sat::LinearExpr(used));
+    ctx.model.AddGreaterOrEqual(sat::LinearExpr(ctx.variables[cut.trigger]),
+                                sat::LinearExpr(used));
+    // demand * used - funding <= stock.
+    ctx.model.AddLessOrEqual(sat::LinearExpr::Term(used, cut.demand) - funding, stock);
+  }
+}
+
 // One solve with x in [0, domain[r]], x_r <= upper[r] (when given) and
 // sum(c_r x_r) <= cap. `ceiling` is the fallback domain for zero-cost columns.
 // `timeLimitSeconds` <= 0 means no limit.
@@ -515,10 +573,15 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
     }
   }
 
-  if (!options.entryGroups.empty())
-    addEntryGroups(EntryContext{model, A, rows, b, options.stock,
-                                absl::Span<const sat::IntVar>(variables), domain,
-                                options.entryGroups});
+  if (!options.entryGroups.empty() || !options.seedCuts.empty()) {
+    const EntryContext ctx{model, A, rows, b, options.stock,
+                           absl::Span<const sat::IntVar>(variables), domain,
+                           options.entryGroups, options.seedCuts};
+    if (!options.entryGroups.empty())
+      addEntryGroups(ctx);
+    if (!options.seedCuts.empty())
+      addSeedCuts(ctx);
+  }
 
   aw::vector<sat::IntVar> terms;
   aw::vector<int64_t> coefficients;
@@ -743,6 +806,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   // costs to fix columns, while an infeasible answer proves the integrality
   // gap is too wide to bother. See docs/algorithm.typ.
   if (!options.flash && options.noGoods.empty() && options.entryGroups.empty() &&
+      options.seedCuts.empty() &&
       envDouble("AW_RC_GAP", options.reducedCostGap) > 0.0 && lp.ok &&
       std::isfinite(lp.value) && lp.value >= 0.0 && A.cols > 0) {
     const int64_t probeCap = std::clamp<int64_t>(

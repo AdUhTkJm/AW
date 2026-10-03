@@ -35,6 +35,14 @@
 // All of this is a *filter on relevance*, never on soundness. Cutting a cycle
 // the solver would never have used costs a row; missing one only means a
 // rejected solve, exactly as before.
+//
+// A two-member component also gets a *joint* seed cut, which weighs two rows
+// against one demand. The entry group prices one firing at a time, one row at a
+// time, and an amplifier pair passes it and still cannot start: `A x64 <- B x16`
+// needs sixteen B, `B x1 <- A x1` needs one A, and a shelf with eight A answers
+// the second while the first is what the cycle actually costs. See
+// `addPairSeedCuts` for the derivation and `solver::Options::SeedCut` for what
+// is posted.
 
 #include "StartupCut.h"
 
@@ -177,6 +185,122 @@ bool consumesProduced(const BaseCraftingGraph &g, RecipeId consumer, RecipeId pr
   return false;
 }
 
+// Merged gross inputs of one recipe, copied out of `InputMerger`, so that both
+// members of a cycle can be weighed at once: the merger only holds the recipe
+// it was last handed. `items` and `amounts` are parallel.
+struct InputSnapshot {
+  aw::vector<ItemId> items;
+  aw::vector<Amount> amounts;
+
+  void take(const InputMerger &inputs) noexcept {
+    items.assign(inputs.touched.begin(), inputs.touched.end());
+    amounts.clear();
+    amounts.reserve(items.size());
+    for (ItemId item : items)
+      amounts.push_back(inputs.amountOf(item));
+  }
+};
+
+// `x * y` when both are positive and the product fits in int64, otherwise
+// false. A cut that cannot be built is skipped, which only leaves the model
+// weaker.
+bool mulFits(Amount x, Amount y, int64_t &out) noexcept {
+  if (x <= 0 || y <= 0 || x > INT64_MAX / y)
+    return false;
+  out = x * y;
+  return true;
+}
+
+// Add `weight` on `row` to a cut's terms, merging with a term that already
+// names the row. A cycle whose two recipes share an item puts that item on both
+// sides of the derivation, and two separate terms would have it counted once.
+void appendTerm(aw::vector<solver::Options::SeedTerm> &terms, ItemId row, Amount weight) noexcept {
+  for (solver::Options::SeedTerm &term : terms)
+    if (term.row == row) {
+      term.weight += weight;
+      return;
+    }
+  terms.push_back(solver::Options::SeedTerm{row, weight});
+}
+
+// The joint seed cuts of the ordered pair (a, b) of a two-recipe cycle: `a` eats
+// `e` that `b` makes, and `b` eats `f` that `a` makes.
+//
+// The derivation is about the *first* firing of `a`. Let `m` be the number of
+// `b` firings before it. Whatever is on the shelf of `e` then is at most
+// `stock_e + out_e` plus what those `m` firings made of it, and `a`'s firing has
+// to be paid out of it:
+//
+//   eIn(a) <= stock_e + out_e + m * eOut(b).                    (1)
+//
+// Each of those `m` firings ate `fIn(b)` units of `f`, and `a` has not fired
+// yet, so all of that came from the shelf:
+//
+//   m * fIn(b) <= stock_f + out_f.                              (2)
+//
+// Eliminating `m` between the two (scale (2) by `eOut(b) / fIn(b)` and
+// substitute into (1)) gives the integer inequality
+//
+//   fIn(b) * eIn(a) <= fIn(b) * (stock_e + out_e)
+//                    + eOut(b) * (stock_f + out_f),
+//
+// posted with demand `fIn(b) * eIn(a)`, weight `fIn(b)` on `e` and weight
+// `eOut(b)` on `f`, and triggered by `a` being used at all. The mirror image,
+// derived from the first firing of `b` instead, has the same demand and weights
+// `eIn(a)` on `f` and `fOut(a)` on `e`; the two items do not play symmetric
+// roles, so both directions are worth posting.
+//
+// Two over-estimates keep it sound with no assumption about the plan: `stock +
+// positive outside net` ignores whatever the outside world consumes, and both
+// derivations ignore any `e` or `f` the partner's own firings return, which
+// only happens for a recipe that eats what it makes. Under-stating the shelf
+// can only weaken the cut, never make it wrong.
+void addPairSeedCuts(const BaseCraftingGraph &g, RecipeId a, RecipeId b, InputMerger &inputs,
+                     aw::vector<solver::Options::SeedCut> &out, uint32_t maxSeeds) noexcept {
+  inputs.merge(g, a);
+  InputSnapshot aIn;
+  aIn.take(inputs);
+  inputs.merge(g, b);
+  InputSnapshot bIn;
+  bIn.take(inputs);
+
+  for (size_t i = 0; i < aIn.items.size(); i++) {
+    const ItemId e = aIn.items[i];
+    const Amount eIn = aIn.amounts[i];
+    const Amount eOut = g.producedAmountOf(b, e);
+    if (eOut <= 0)
+      continue;
+    for (size_t k = 0; k < bIn.items.size(); k++) {
+      const ItemId f = bIn.items[k];
+      const Amount fIn = bIn.amounts[k];
+      const Amount fOut = g.producedAmountOf(a, f);
+      if (fOut <= 0)
+        continue;
+      int64_t demand = 0;
+      if (!mulFits(eIn, fIn, demand))
+        continue;
+      for (int direction = 0; direction < 2; direction++) {
+        if (out.size() >= maxSeeds)
+          return;
+        solver::Options::SeedCut cut;
+        cut.members.push_back(a);
+        cut.members.push_back(b);
+        cut.demand = demand;
+        if (direction == 0) {
+          cut.trigger = a;
+          appendTerm(cut.terms, e, fIn);
+          appendTerm(cut.terms, f, eOut);
+        } else {
+          cut.trigger = b;
+          appendTerm(cut.terms, f, eIn);
+          appendTerm(cut.terms, e, fOut);
+        }
+        out.push_back(std::move(cut));
+      }
+    }
+  }
+}
+
 // `r` is a self-loop (it eats something it makes) whose column has a positive
 // net entry, so the balance can run it without buying anything first. A
 // self-loop with no positive entry only destroys value and the balance already
@@ -223,8 +347,9 @@ bool unitePartners(const BaseCraftingGraph &g, RecipeId r, const InputMerger &in
 
 }  // namespace
 
-void buildStartupCuts(const Subgraph &sub, aw::vector<solver::Options::EntryGroup> &out,
-                      uint32_t maxGroups, uint32_t maxMembers) noexcept {
+void buildStartupCuts(const Subgraph &sub, aw::vector<solver::Options::EntryGroup> &groups,
+                      aw::vector<solver::Options::SeedCut> &seeds, uint32_t maxGroups,
+                      uint32_t maxMembers) noexcept {
   const BaseCraftingGraph &g = sub.graph;
   const uint32_t n = g.nRecipe;
   const ItemId m = g.nItem;
@@ -272,22 +397,28 @@ void buildStartupCuts(const Subgraph &sub, aw::vector<solver::Options::EntryGrou
       members[cursor[root]++] = r;
   }
 
-  // Pass 2: one group per component, with the gross inputs of every member.
+  // Pass 2: one group per component, with the gross inputs of every member,
+  // plus the joint seed cut of the two-member ones. The two lists have their
+  // own budgets, so one running out does not stop the other.
   for (uint32_t root = 0; root < n; root++) {
     if (!qualifies[root] || memberCount[root] > maxMembers)
       continue;
-    if (out.size() >= maxGroups)
-      return;
-    solver::Options::EntryGroup group;
-    group.columns.reserve(memberCount[root]);
-    group.needs.reserve(memberCount[root]);
-    for (uint32_t k = offset[root]; k < offset[root + 1]; k++) {
-      const RecipeId r = members[k];
-      group.columns.push_back(r);
-      inputs.merge(g, r);
-      inputs.appendNeeds(r, group.needs);
+    const uint32_t first = offset[root];
+    const uint32_t count = memberCount[root];
+    if (groups.size() < maxGroups) {
+      solver::Options::EntryGroup group;
+      group.columns.reserve(count);
+      group.needs.reserve(count);
+      for (uint32_t k = first; k < first + count; k++) {
+        const RecipeId r = members[k];
+        group.columns.push_back(r);
+        inputs.merge(g, r);
+        inputs.appendNeeds(r, group.needs);
+      }
+      groups.push_back(std::move(group));
     }
-    out.push_back(std::move(group));
+    if (count == 2)
+      addPairSeedCuts(g, members[first], members[first + 1], inputs, seeds, maxGroups);
   }
 }
 

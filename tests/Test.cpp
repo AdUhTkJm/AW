@@ -1585,19 +1585,74 @@ void testStartupCuts() {
            "the B-seeded pair plan fires");
   }
 
-  // Eight A funds the first firing but not the sixteen B the amplifier eats, so
-  // the plan still cannot be executed. Only the *first* firing is cut over; the
-  // rounds after it are the retry loop's problem, so this stays unproven rather
-  // than proven impossible. The staged startup model in docs/algorithm.typ,
-  // "启动切断", is what would settle it.
+  // Eight A funds the first firing of the seed recipe but not the sixteen B the
+  // amplifier eats, so the instance is impossible: whatever the balance says,
+  // sixteeen units of A or B have to be on the shelf before the cycle turns
+  // over, and the shelf holds eight A. Only the joint seed cut sees that, since
+  // it weighs the two rows against one demand; the entry group prices `r1` at
+  // one A against the eight in stock and passes.
   {
     aw::vector<aw::Amount> inventory(2, 0);
     inventory[0] = 8;
     const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
     const aw::ItemId target = sub.translate(0);
     const aw::PlanResult plan = aw::planCrafting(sub, target, 64, inventory);
-    expect(plan.status != aw::PlanStatus::OK,
-           "eight A cannot pay the amplifier's first batch");
+    expect(plan.status == aw::PlanStatus::INFEASIBLE,
+           "the joint seed cut proves eight A unstartable");
+  }
+
+  // The same shelf split between the two items does start the cycle: eight A
+  // pays for eight firings of the seed recipe, which makes the sixteen B the
+  // amplifier eats. The seed cut has to accept it, and the plan it lets through
+  // has to be fireable, so this is the case a per-item lump of 16 would get
+  // wrong.
+  {
+    aw::vector<aw::Amount> inventory(2, 0);
+    inventory[0] = 8;
+    inventory[1] = 8;
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    const aw::ItemId target = sub.translate(0);
+    const aw::PlanResult plan = aw::planCrafting(sub, target, 64, inventory);
+    expect(plan.status == aw::PlanStatus::OK, "eight A and eight B seed the pair");
+    expect(aw::planIsFireable(sub, inventory,
+                              std::span<const int64_t>(plan.exec.data(), plan.exec.size())),
+           "the mixed-seed plan fires");
+  }
+
+  // Fifteen and one also add up to the sixteen the round needs, and fifteen
+  // alone does not. These are the two sides of the joint inequality.
+  {
+    aw::vector<aw::Amount> inventory(2, 0);
+    inventory[0] = 15;
+    inventory[1] = 1;
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    const aw::ItemId target = sub.translate(0);
+    const aw::PlanResult plan = aw::planCrafting(sub, target, 64, inventory);
+    expect(plan.status == aw::PlanStatus::OK, "fifteen A and one B seed the pair");
+    expect(aw::planIsFireable(sub, inventory,
+                              std::span<const int64_t>(plan.exec.data(), plan.exec.size())),
+           "the fifteen-one plan fires");
+  }
+  {
+    aw::vector<aw::Amount> inventory(2, 0);
+    inventory[0] = 15;
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    const aw::ItemId target = sub.translate(0);
+    const aw::PlanResult plan = aw::planCrafting(sub, target, 64, inventory);
+    expect(plan.status == aw::PlanStatus::INFEASIBLE,
+           "fifteen A is one short of the round");
+  }
+
+  // A shelf of B alone still starts the pair through the amplifier's own side,
+  // and the seed cut leaves that route alone: its demand is on the sum, not on
+  // the item the entry group happens to price.
+  {
+    aw::vector<aw::Amount> inventory(2, 0);
+    inventory[1] = 16;
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    const aw::ItemId target = sub.translate(0);
+    const aw::PlanResult plan = aw::planCrafting(sub, target, 64, inventory);
+    expect(plan.status == aw::PlanStatus::OK, "sixteen B seeds the pair with the cut on");
   }
 }
 

@@ -172,9 +172,64 @@ struct Options {
   };
   aw::vector<EntryGroup> entryGroups;
 
-  // Budget for the eager cycle enumeration: how many groups it may add, and how
-  // many columns one group may hold. 0 for either disables the pass, which
-  // leaves only the groups added after a rejection.
+  // Startup *seed* cuts: the joint form of the same idea, for a two-recipe
+  // cycle whose start needs two items at once.
+  //
+  // The entry cut prices every input against its own row, one firing at a time,
+  // and a cycle can pass it and still not start. The shape is an amplifier
+  // pair: `a` eats a batch of `e` that it does not make, `b` makes `e` and eats
+  // `f`, and `a` makes `f`. Nothing can fire at first, so the balance asks `a`
+  // to be paid out of the shelf alone, which it cannot be; the real start is a
+  // few firings of `b`, each of which is itself paid out of the shelf in `f`.
+  // The two rows are therefore not separately affordable, they are *jointly*
+  // affordable, and only a cut that mixes them sees the difference:
+  //
+  //   A x64 <- B x16      a: e = B (16 per firing), f = A (64 per firing)
+  //   B x1  <- A x1       b: e = B (1 per firing),  f = A (1 per firing)
+  //
+  // starting from eight A and eight B. The entry cut accepts it (`b` needs one
+  // A, and the shelf has eight), the plan is unstartable, and the joint form
+  // rejects it because one round of the cycle needs sixteen units of A or B in
+  // total. See `buildStartupCuts` for the derivation of the weights.
+  //
+  // A cut weighs several rows against a single demand and is triggered by one
+  // member being used at all:
+  //
+  //   x_trigger >= t,  x_trigger <= domain_trigger * t
+  //   sum_k weight_k * (stock[k] + sum_{j not in cycle, net_kj > 0} net_kj x_j)
+  //     >= demand * t
+  //
+  // The trigger is the member the derivation is about, coupled to a fresh
+  // Boolean, and it cannot reuse the entry group's `start_c`: that one only
+  // says "some member fires first", so a plan that starts the cycle through
+  // the other member would escape this cut, and the plan that does so is
+  // exactly the unstartable one the cut is for.
+  //
+  // The cut is a *necessary* condition of fireability, like the entry cut, so
+  // the INFEASIBLE it can produce is still a proof.
+  struct SeedTerm {
+    uint32_t row = 0;
+    // Coefficient on that row's stock plus positive outside net. Positive; a
+    // term with a weight of 0 would be dropped by the solver.
+    int64_t weight = 0;
+  };
+
+  struct SeedCut {
+    // The cycle's members. Left out of the funding sum: a cycle cannot pay for
+    // its own start, and counting the amplifier's own output would make the
+    // cut vacuous.
+    aw::vector<uint32_t> members;
+    // The member whose use triggers the cut.
+    uint32_t trigger = 0;
+    // Right-hand side, in the units the weights make of the rows.
+    int64_t demand = 0;
+    aw::vector<SeedTerm> terms;
+  };
+  aw::vector<SeedCut> seedCuts;
+
+  // Budget for the eager cycle enumeration: how many groups and how many seed
+  // cuts it may add, and how many columns one group may hold. 0 for either
+  // disables the pass, which leaves only the groups added after a rejection.
   uint32_t maxStartupGroups = 1024;
 
   // A cycle with more members than this is skipped. The mutual-consumption
@@ -183,7 +238,7 @@ struct Options {
   // are well under the bound.
   uint32_t maxStartupGroupMembers = 32;
 
-  // Physical stock per row, in the solver's row space. The entry cuts use it
+  // Physical stock per row, in the solver's row space. The startup cuts use it
   // as the seed that stock contributes; an empty span means "derive from b"
   // (max(0, -b[i])), which understates the target row and would make the cuts
   // unsound there. `planCrafting` always fills it.

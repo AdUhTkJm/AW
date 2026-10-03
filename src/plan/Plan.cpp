@@ -214,7 +214,7 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
 
   // Startup cuts need the physical stock per row, and they are the only reason
   // a solve ever needs it, so it is filled on demand. See
-  // Options::EntryGroup.
+  // Options::EntryGroup and Options::SeedCut.
   aw::vector<int64_t> stockPerRow;
   const auto installStock = [&]() {
     if (!stockPerRow.empty())
@@ -256,16 +256,18 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
 
   // Eager startup cuts: every 1- and 2-cycle of the subgraph gets a group that
   // makes its first firing pay for itself out of the stock and the world
-  // outside the cycle. The cuts are implied by fireability, so they can be
-  // posted before the first solve: the plan the fireability check used to
+  // outside the cycle, and a two-recipe component also gets the joint seed cut
+  // that weighs its two items against one demand. The cuts are implied by
+  // fireability, so they can be posted before the first solve: the plan the
+  // fireability check used to
   // reject is now excluded while it is still being searched for, which saves a
   // whole rejected solve per cycle, and the instance comes back INFEASIBLE
   // instead of CYCLE_UNFULFILLED when no firing sequence exists at all. A
   // greedy hit above never reaches this point. See buildStartupCuts.
   if (solveOptions.maxStartupGroups > 0)
-    buildStartupCuts(sub, solveOptions.entryGroups, solveOptions.maxStartupGroups,
-                     solveOptions.maxStartupGroupMembers);
-  if (!solveOptions.entryGroups.empty())
+    buildStartupCuts(sub, solveOptions.entryGroups, solveOptions.seedCuts,
+                     solveOptions.maxStartupGroups, solveOptions.maxStartupGroupMembers);
+  if (!solveOptions.entryGroups.empty() || !solveOptions.seedCuts.empty())
     installStock();
 
   // Re-solve while the post-solve fireability check rejects the plan. Every
