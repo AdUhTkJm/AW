@@ -8,7 +8,7 @@
 // earlier, which is independent of how the DFS happens to walk the graph.
 
 #include "RankedCut.h"
-#include "aw/utils/LargeStackCall.h"
+#include "aw/utils/Scc.h"
 
 #include <cstdint>
 #include <queue>
@@ -29,77 +29,6 @@ struct Ready {
   // std::priority_queue is a max-heap, so every comparison is inverted.
   bool operator<(const Ready &other) const noexcept { return sortKey > other.sortKey; }
 };
-
-// Standard Tarjan algorithm.
-struct TarjanContext {
-  const aw::vector<ItemId> &adjOffsets;
-  const aw::vector<ItemId> &adjTargets;
-  aw::vector<int32_t> index;
-  aw::vector<int32_t> low;
-  aw::vector<uint8_t> onStack;
-  aw::vector<uint32_t> componentStack;
-  aw::vector<int32_t> &component;
-  int32_t timer = 0;
-  int32_t nComponent = 0;
-
-  TarjanContext(const aw::vector<ItemId> &adjOffsets, const aw::vector<ItemId> &adjTargets, aw::vector<int32_t> &component, uint nItem):
-    adjOffsets(adjOffsets), adjTargets(adjTargets), index(nItem, -1), low(nItem, -1), onStack(nItem, 0), component(component)
-  {
-    componentStack.reserve(nItem);
-  }
-};
-
-void tarjanDFS(TarjanContext &ctx, uint32_t node) noexcept {
-  ctx.index[node] = ctx.low[node] = ctx.timer++;
-  ctx.onStack[node] = 1;
-  ctx.componentStack.push_back_unchecked(node);
-
-  const ItemId startEdge = ctx.adjOffsets[node];
-  const ItemId endEdge = ctx.adjOffsets[node + 1];
-
-  for (ItemId e = startEdge; e < endEdge; ++e) {
-    const uint32_t child = ctx.adjTargets[e];
-
-    if (ctx.index[child] < 0) {
-      tarjanDFS(ctx, child);
-      if (ctx.low[child] < ctx.low[node])
-        ctx.low[node] = ctx.low[child];
-    } else if (ctx.onStack[child]) {
-      if (ctx.index[child] < ctx.low[node])
-        ctx.low[node] = ctx.index[child];
-    }
-  }
-
-  if (ctx.low[node] == ctx.index[node]) {
-    for (;;) {
-      const uint32_t member = ctx.componentStack.back();
-      ctx.componentStack.pop_back();
-      ctx.onStack[member] = 0;
-      ctx.component[member] = ctx.nComponent;
-      if (member == node)
-        break;
-    }
-    ctx.nComponent++;
-  }
-}
-
-// Visits every root that no earlier root reached.
-void tarjanAll(TarjanContext &ctx, std::span<const uint32_t> roots) noexcept {
-  for (uint32_t root : roots) {
-    if (ctx.index[root] < 0)
-      tarjanDFS(ctx, root);
-  }
-}
-
-// Fills `component` in place; unreached entries keep their -1 value.
-void computeComponents(std::span<const uint32_t> roots,
-                       const aw::vector<ItemId> &adjOffsets,
-                       const aw::vector<ItemId> &adjTargets,
-                       aw::vector<int32_t> &component) noexcept {
-  TarjanContext ctx(adjOffsets, adjTargets, component, component.size());
-  // Entered on the large stack.
-  aw::ls::call(tarjanAll, ctx, roots);
-}
 
 }  // namespace
 
@@ -187,7 +116,7 @@ ReachableView::ReachableView(const BaseCraftingGraph &g, ItemId target) noexcept
     }
   }
 
-  computeComponents(order, adjOffsets, adjTargets, component);
+  aw::computeSccs(adjOffsets, adjTargets, order, component);
 
   consumers.offsets = std::move(consumerOffsets);
   consumers.targets = std::move(consumerTargets);

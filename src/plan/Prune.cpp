@@ -50,6 +50,7 @@
 
 #include "aw/plan/Options.h"
 #include "aw/utils/Helpers.h"
+#include "aw/utils/Scc.h"
 #ifdef AW_PROFILE_PRUNING
 #  include "aw/plan/Profiler.h"
 #endif
@@ -127,60 +128,7 @@ uint32_t markSinkRepresentatives(uint k, const aw::vector<uint> &adjOffsets,
   if (k == 0)
     return 0;
 
-  // Iterative Tarjan, so a deep graph cannot overflow the stack.
-  aw::vector<int32_t> disc(k, -1), low(k, 0);
-  aw::vector<uint8_t> onStack(k, 0);
-  aw::vector<uint32_t> tstack, callNode, callEdge;
-  // A DFS stack never holds more than one frame per node.
-  tstack.reserve(k);
-  callNode.reserve(k);
-  callEdge.reserve(k);
-  int32_t timer = 0;
-  uint32_t nComp = 0;
-  for (uint32_t s = 0; s < k; s++) {
-    if (disc[s] != -1)
-      continue;
-    disc[s] = low[s] = timer++;
-    tstack.push_back_unchecked(s);
-    onStack[s] = 1;
-    callNode.push_back_unchecked(s);
-    callEdge.push_back_unchecked(adjOffsets[s]);
-    while (!callNode.empty()) {
-      const uint32_t v = callNode.back();
-      uint32_t &edge = callEdge.back();
-      if (edge < adjOffsets[v + 1]) {
-        const uint32_t u = adjTargets[edge++];
-        if (disc[u] == -1) {
-          disc[u] = low[u] = timer++;
-          tstack.push_back_unchecked(u);
-          onStack[u] = 1;
-          callNode.push_back_unchecked(u);
-          callEdge.push_back_unchecked(adjOffsets[u]);
-        } else if (onStack[u] && disc[u] < low[v]) {
-          low[v] = disc[u];
-        }
-      } else {
-        if (low[v] == disc[v]) {
-          while (true) {
-            const uint32_t u = tstack.back();
-            tstack.pop_back();
-            onStack[u] = 0;
-            comp[u] = (int32_t) nComp;
-            if (u == v)
-              break;
-          }
-          nComp++;
-        }
-        callNode.pop_back();
-        callEdge.pop_back();
-        if (!callNode.empty()) {
-          const uint32_t parent = callNode.back();
-          if (low[v] < low[parent])
-            low[parent] = low[v];
-        }
-      }
-    }
-  }
+  const uint32_t nComp = aw::computeSccs(adjOffsets, adjTargets, comp);
 
   aw::vector<uint8_t> isSink(nComp, 1);
   for (uint32_t a = 0; a < k; a++)

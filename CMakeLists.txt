@@ -75,6 +75,7 @@ add_library(aw_crafting STATIC
    src/plan/RankedCut.cpp
    src/plan/RecipePrune.cpp
    src/plan/SatellitePrune.cpp
+   src/plan/Scc.cpp
    src/plan/StartupCut.cpp
    src/plan/SubstitutionPrune.cpp
    src/plan/TagPrune.cpp
@@ -103,6 +104,7 @@ if(AW_STRICT_FLAGS)
       src/plan/Protocol.cpp
       src/plan/RankedCut.cpp
       src/plan/RecipePrune.cpp
+      src/plan/Scc.cpp
       src/plan/SubstitutionPrune.cpp
       src/plan/TagPrune.cpp
       src/plan/TagTidy.cpp

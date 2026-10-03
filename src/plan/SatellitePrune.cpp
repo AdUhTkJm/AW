@@ -71,6 +71,7 @@
 
 #include "aw/plan/CraftingGraph.h"
 #include "aw/utils/Int128.h"
+#include "aw/utils/Scc.h"
 #include "aw/plan/Options.h"
 
 namespace aw {
@@ -316,66 +317,21 @@ void buildItemGraph(const CraftingGraph& graph, std::span<const uint8_t> recipeS
   }
 }
 
-// Iterative Tarjan over the item graph. `comp[v]` is the SCC id of v, or
-// UINT32_MAX when the item is not in the subgraph. The number of components is
-// returned.
+// Tarjan over the item graph, restricted to the subgraph's items. `comp[v]` is
+// the SCC id of v, or -1 when the item is not in the subgraph. The number of
+// components is returned.
 uint32_t computeItemSccs(const ItemGraph& graph, std::span<const uint8_t> itemSeen,
-                         uint nItem, aw::vector<uint32_t> &comp) noexcept {
-  comp.assign(nItem, UINT32_MAX);
-  aw::vector<uint32_t> index(nItem, UINT32_MAX);
-  aw::vector<uint32_t> low(nItem, 0);
-  aw::vector<uint8_t> onStack(nItem, 0);
-  aw::vector<uint> stack;
-  aw::vector<uint> nodeStack;
-  aw::vector<uint> edgeStack;
-  uint32_t timer = 0;
-  uint32_t nComp = 0;
-
-  for (uint root = 0; root < nItem; root++) {
-    if (!itemSeen[root] || index[root] != UINT32_MAX)
-      continue;
-    index[root] = low[root] = timer++;
-    onStack[root] = 1;
-    stack.push_back(root);
-    nodeStack.push_back(root);
-    edgeStack.push_back(graph.offsets[root]);
-    while (!nodeStack.empty()) {
-      const uint v = nodeStack.back();
-      uint& edge = edgeStack.back();
-      if (edge < graph.offsets[v + 1]) {
-        const uint w = graph.targets[edge++];
-        if (index[w] == UINT32_MAX) {
-          index[w] = low[w] = timer++;
-          onStack[w] = 1;
-          stack.push_back(w);
-          nodeStack.push_back(w);
-          edgeStack.push_back(graph.offsets[w]);
-        } else if (onStack[w] && index[w] < low[v]) {
-          low[v] = index[w];
-        }
-      } else {
-        nodeStack.pop_back();
-        edgeStack.pop_back();
-        if (low[v] == index[v]) {
-          while (true) {
-            const uint w = stack.back();
-            stack.pop_back();
-            onStack[w] = 0;
-            comp[w] = nComp;
-            if (w == v)
-              break;
-          }
-          nComp++;
-        }
-        if (!nodeStack.empty()) {
-          const uint p = nodeStack.back();
-          if (low[v] < low[p])
-            low[p] = low[v];
-        }
-      }
-    }
-  }
-  return nComp;
+                         uint nItem, aw::vector<int32_t> &comp) noexcept {
+  comp.assign(nItem, -1);
+  // Root the walk at the subgraph's items, so an item outside the subgraph
+  // never becomes a component of its own. Such an item can still be numbered
+  // when an edge reaches it; the caller filters those out with `itemSeen`.
+  aw::vector<uint32_t> roots;
+  roots.reserve(nItem);
+  for (uint v = 0; v < nItem; v++)
+    if (itemSeen[v])
+      roots.push_back_unchecked(v);
+  return aw::computeSccs(graph.offsets, graph.targets, roots, comp);
 }
 
 // ---------------------------------------------------------------------------
@@ -853,16 +809,16 @@ bool runDirected(const CraftingGraph& graph, ItemId target, std::span<const uint
   // SCCs of the item level consume->produce graph, used only to order escapes.
   ItemGraph itemEdges;
   buildItemGraph(graph, recipeSeen, itemEdges);
-  aw::vector<uint32_t> comp;
+  aw::vector<int32_t> comp;
   const uint32_t nComp = computeItemSccs(itemEdges, itemSeen, nItem, comp);
   aw::vector<uint8_t> cycleItem(nItem, 0);
   if (nComp > 0) {
     aw::vector<uint> sizes(nComp, 0);
     for (uint j = 0; j < nItem; j++)
-      if (itemSeen[j] && comp[j] != UINT32_MAX)
+      if (itemSeen[j] && comp[j] >= 0)
         sizes[comp[j]]++;
     for (uint j = 0; j < nItem; j++)
-      if (itemSeen[j] && comp[j] != UINT32_MAX && sizes[comp[j]] > 1)
+      if (itemSeen[j] && comp[j] >= 0 && sizes[comp[j]] > 1)
         cycleItem[j] = 1;
   }
 

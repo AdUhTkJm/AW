@@ -32,6 +32,7 @@
 
 #include "aw/plan/Options.h"
 #include "aw/plan/CraftingGraph.h"
+#include "aw/utils/Scc.h"
 
 #include "WorkstationSample.h"
 
@@ -212,59 +213,7 @@ SccStats analyzeScc(const BaseCraftingGraph &g, aw::vector<int32_t> &comp) {
       arcs[cursor++] = to;
   }
 
-  aw::vector<int32_t> disc(n, -1), low(n, 0);
-  aw::vector<uint8_t> onStack(n, 0);
-  aw::vector<uint32_t> tarjanStack, callNode, callEdge;
-  tarjanStack.reserve(n);
-  callNode.reserve(n);
-  callEdge.reserve(n);
-  int32_t timer = 0;
-  uint32_t nComp = 0;
-
-  for (uint32_t s = 0; s < n; s++) {
-    if (disc[s] != -1)
-      continue;
-    disc[s] = low[s] = timer++;
-    tarjanStack.push_back_unchecked(s);
-    onStack[s] = 1;
-    callNode.push_back_unchecked(s);
-    callEdge.push_back_unchecked(offsets[s]);
-    while (!callNode.empty()) {
-      const uint32_t v = callNode.back();
-      uint32_t &edge = callEdge.back();
-      if (edge < offsets[v + 1]) {
-        const uint32_t u = arcs[edge++];
-        if (disc[u] == -1) {
-          disc[u] = low[u] = timer++;
-          tarjanStack.push_back_unchecked(u);
-          onStack[u] = 1;
-          callNode.push_back_unchecked(u);
-          callEdge.push_back_unchecked(offsets[u]);
-        } else if (onStack[u] && disc[u] < low[v]) {
-          low[v] = disc[u];
-        }
-      } else {
-        if (low[v] == disc[v]) {
-          while (true) {
-            const uint32_t u = tarjanStack.back();
-            tarjanStack.pop_back();
-            onStack[u] = 0;
-            comp[u] = (int32_t) nComp;
-            if (u == v)
-              break;
-          }
-          nComp++;
-        }
-        callNode.pop_back();
-        callEdge.pop_back();
-        if (!callNode.empty()) {
-          const uint32_t parent = callNode.back();
-          if (low[v] < low[parent])
-            low[parent] = low[v];
-        }
-      }
-    }
-  }
+  const uint32_t nComp = aw::computeSccs(offsets, arcs, comp);
 
   aw::vector<uint32_t> size(nComp, 0), items(nComp, 0), recipes(nComp, 0);
   for (uint32_t v = 0; v < n; v++) {
