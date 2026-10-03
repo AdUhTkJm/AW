@@ -225,7 +225,9 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
         !readBool(j, "recipePruning", next.recipePruning, error) ||
         !readBool(j, "directPruning", next.directPruning, error) ||
         !readBool(j, "substitutionPruning", next.substitutionPruning, error) ||
-        !readBool(j, "seedPruning", next.seedPruning, error))
+        !readBool(j, "seedPruning", next.seedPruning, error) ||
+        !readBool(j, "tagTidy", next.tagTidy, error) ||
+        !readBool(j, "flash", next.flash, error))
       return false;
 
     {
@@ -280,7 +282,7 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
     if (!checkKnown(j,
                     {"nonoptimal", "tagPruning", "recipePruning", "directPruning",
                      "substitutionPruning", "deadNodePruning", "seedPruning",
-                     "outputPruningProfile",
+                     "tagTidy", "outputPruningProfile",
                      "tagInlining", "pack", "satellite", "maxTagMembers", "maxTagPairs",
                      "maxTagCoverWork", "maxWitnessPairs", "maxPrunePairs",
                      "maxSiblingRecipes", "maxWitnessProducers", "maxSubstitutionWork",
@@ -320,8 +322,7 @@ bool applySolverOptionsJson(std::string_view text, std::string &error) noexcept 
         !readDouble(j, "reducedCostGap", next.reducedCostGap, error) ||
         !readInt(j, "maxCycleRetries", next.maxCycleRetries, error) ||
         !readU32(j, "maxStartupGroups", next.maxStartupGroups, error) ||
-        !readU32(j, "maxStartupGroupMembers", next.maxStartupGroupMembers, error) ||
-        !readBool(j, "flash", next.flash, error))
+        !readU32(j, "maxStartupGroupMembers", next.maxStartupGroupMembers, error))
       return false;
 
     if (!checkKnown(j,
@@ -352,6 +353,7 @@ std::string plannerOptionsJson() noexcept {
     j["directPruning"] = options.directPruning;
     j["substitutionPruning"] = options.substitutionPruning;
     j["seedPruning"] = options.seedPruning;
+    j["tagTidy"] = options.tagTidy;
     switch (options.tagInlining) {
       case TagInlineMode::OFF: j["tagInlining"] = "off"; break;
       case TagInlineMode::PRE_PRUNE: j["tagInlining"] = "prePrune"; break;
@@ -408,7 +410,6 @@ std::string solverOptionsJson() noexcept {
     j["maxCycleRetries"] = solverOptions.maxCycleRetries;
     j["maxStartupGroups"] = solverOptions.maxStartupGroups;
     j["maxStartupGroupMembers"] = solverOptions.maxStartupGroupMembers;
-    j["flash"] = solverOptions.flash;
     return j.dump(2);
   } catch (...) {
     return "{}";

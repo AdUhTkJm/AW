@@ -68,6 +68,7 @@ struct PackPruneOptions {
 // per-query information.
 struct SubgraphRepruneOptions {
   bool enabled = true;
+  bool enabledOnFlash = false;
 
   // Use the exact relation instead of the nonoptimal relaxation.
   // The nonoptimal mode might cause solution downgrade.
@@ -120,6 +121,8 @@ struct Options {
   bool substitutionPruning = true;
   bool seedPruning = true;
 
+  bool tagTidy = true;
+  bool flash = false;
 #ifdef AW_PROFILE_PRUNING
   bool outputPruningProfile = false;
   bool outputRepruningProfile = false;

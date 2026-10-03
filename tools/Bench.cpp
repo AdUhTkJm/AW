@@ -759,7 +759,7 @@ int main(int argc, char **argv) {
   solverOptions.maxTimeSeconds = timeLimit;
   solverOptions.relativeGap = gap;
   solverOptions.numWorkers = (int) workers;
-  solverOptions.flash = flash;
+  aw::options.flash = flash;
   if (!startupCuts)
     solverOptions.maxStartupGroups = 0;
 

@@ -467,6 +467,31 @@ aw::vector<std::byte> buildFreeTagSample() {
   return w.out;
 }
 
+// A tag with two usable members, for the post-solve tidying pass. Handles 1..4
+// are real, handle 5 is the pseudo-resource T = {m_stock, m_made}.
+//
+//   m_made <- m_base x1             (real)
+//   P      <- T x5                  (real)
+//   T      <- m_stock               (synthetic)
+//   T      <- m_made                (synthetic)
+//
+// A plan can fire both member edges: m_stock is held, and m_made is crafted
+// from the stocked m_base. They are therefore both legal answers to "which
+// member fills T", and the tidying pass has to pick one; it picks m_stock,
+// because a member already in stock is available before the plan runs.
+aw::vector<std::byte> buildTidySample() {
+  AwrWriter w;
+  w.header(4, 3);
+  w.item(3, 1);
+  w.recipe(1, {1}, {{1, 1}});
+  w.item(4, 1);
+  w.recipe(1, {1}, {{5, 5}});
+  w.item(5, 2);
+  w.recipe(1, {}, {{2, 1}});
+  w.recipe(1, {}, {{3, 1}});
+  return w.out;
+}
+
 aw::vector<std::byte> buildCounterSample() {  AwrWriter w;
   w.header(7, 7);
   w.item(3, 1);
@@ -1234,13 +1259,14 @@ void testFlash() {
     const aw::vector<int64_t> b = {4, 1};
     const aw::vector<int64_t> c = {1, 1};
     aw::solver::Options options;
-    options.flash = true;
+    aw::options.flash = true;
     const aw::solver::Result r = aw::solver::solve(A, b, c, options);
     expect(r.status == aw::PlanStatus::OK, "flash returns a plan");
     expect(r.x.size() == 2 && r.x[0] + 2 * r.x[1] >= 4 && r.x[0] >= 1,
            "the flash plan is feasible");
     expect(r.objective == r.x[0] + r.x[1] && r.objective >= 3,
            "the flash objective matches the plan and is at least the optimum");
+    aw::options.flash = false;
   }
 
   // A cap below the requirement still has to be grown: the cap bounds the
@@ -1251,11 +1277,12 @@ void testFlash() {
     const aw::vector<int64_t> b = {5};
     const aw::vector<int64_t> c = {1};
     aw::solver::Options options;
-    options.flash = true;
+    aw::options.flash = true;
     options.objectiveCap = 1;
     const aw::solver::Result r = aw::solver::solve(A, b, c, options);
     expect(r.status == aw::PlanStatus::OK && r.objective >= 5,
            "flash grows a binding cap until the plan fits");
+    aw::options.flash = false;
   }
 
   // Reduced-cost fixing is an optimality proof accelerator, so flash skips it:
@@ -1266,10 +1293,11 @@ void testFlash() {
     const aw::vector<int64_t> c = {1, 1};
     aw::solver::Options options;
     options.reducedCostGap = 0.5;
-    options.flash = true;
+    aw::options.flash = true;
     const aw::solver::Result r = aw::solver::solve(A, b, c, options);
     expect(r.status == aw::PlanStatus::OK && r.fixedColumns == 0,
            "flash skips reduced-cost fixing");
+    aw::options.flash = false;
   }
 }
 
@@ -2688,9 +2716,10 @@ void testFreeTagObjective() {
       tags += r.exec[i];
   }
   expect(real == 1, "the cheap route uses one real craft");
-  // The row is `>=`, so overproduction is legal and harmless (the caller never
-  // executes a tag edge). It must at least cover the five units P consumes.
-  expect(tags >= 5, "the tag covers exactly the consumption at minimum");
+  // The tag's row is `>=`, so the solver may fire the member edges well past
+  // what P consumes; the tidying pass cuts them back to exactly the five units
+  // P asks for, so the response has no conversion the plan does not use.
+  expect(tags == 5, "the tidied tag covers exactly the consumption");
 
   // The fixing pass decides a zero-cost column's neutral domain differently
   // from a costed one. Check that it does not over-tighten the tag edges.
@@ -2700,10 +2729,137 @@ void testFreeTagObjective() {
     const aw::PlanResult fixed = aw::planCrafting(sub, target, 1, inventory, options);
     expect(fixed.status == aw::PlanStatus::OK, "reduced-cost fixing keeps the plan");
     int64_t fixedReal = 0;
-    for (uint32_t i = 0; i < sub.graph.nRecipe; i++)
+    int64_t fixedTags = 0;
+    for (uint32_t i = 0; i < sub.graph.nRecipe; i++) {
       if (sub.graph.output[i] < sub.graph.nReal)
         fixedReal += fixed.exec[i];
+      else
+        fixedTags += fixed.exec[i];
+    }
     expect(fixedReal == 1, "reduced-cost fixing keeps the real optimum");
+    expect(fixedTags == 5, "reduced-cost fixing is tidied too");
+  }
+}
+
+// The post-solve tidying pass. The sample is small enough that both member
+// edges of the tag are legal, so the test can pin down which one survives and
+// how much of the demand spills onto a second edge when the first is capped.
+void testTagTidying() {
+  std::cout << "[Test] tag conversion tidying\n";
+
+  aw::registerCraftingGraph(buildTidySample());
+  expect(aw::getCraftingError() == nullptr, "tidy sample parses");
+
+  const aw::Handle all[] = {1, 2, 3, 4, 5};
+  aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+  inventory[0] = 100;  // handle 1 m_base
+  inventory[1] = 100;  // handle 2 m_stock
+
+  const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
+  const aw::ItemId target = sub.translate(3);
+  const aw::BaseCraftingGraph &g = sub.graph;
+
+  // Locate the tag, its two member edges, the recipe that crafts m_made and the
+  // one recipe that consumes the tag. Nothing is hardcoded: the subgraph
+  // renumbers both spaces.
+  aw::ItemId tag = UINT32_MAX;
+  for (aw::ItemId item = g.nReal; item < g.nItem; item++)
+    if (!g.producersOf(item).empty())
+      tag = item;
+  expect(tag != UINT32_MAX, "the tidy sample keeps its tag node");
+
+  const aw::ItemId stockItem = sub.translate(1);  // handle 2
+  const aw::ItemId madeItem = sub.translate(2);   // handle 3
+  aw::RecipeId stockEdge = UINT32_MAX;
+  aw::RecipeId madeEdge = UINT32_MAX;
+  for (aw::RecipeId r : g.producersOf(tag)) {
+    if (g.inputsOf(r)[0] == stockItem)
+      stockEdge = r;
+    else
+      madeEdge = r;
+  }
+  expect(stockEdge != UINT32_MAX && madeEdge != UINT32_MAX,
+         "the tag has one edge per member");
+
+  aw::RecipeId maker = UINT32_MAX;
+  aw::RecipeId consumer = UINT32_MAX;
+  for (aw::RecipeId r = 0; r < g.nRecipe; r++) {
+    if (g.output[r] >= g.nReal)
+      continue;
+    if (g.output[r] == madeItem)
+      maker = r;
+    for (aw::ItemId input : g.inputsOf(r))
+      if (input == tag)
+        consumer = r;
+  }
+  expect(maker != UINT32_MAX && consumer != UINT32_MAX,
+         "the sample keeps its real recipes");
+
+  // The balance vector planCrafting hands the solver: the request at the
+  // target, negative stock elsewhere.
+  aw::vector<int64_t> b(g.nItem, 0);
+  for (aw::ItemId item = 0; item < g.nItem; item++) {
+    const aw::ItemId source = sub.itemOrigin[item];
+    b[item] = source < inventory.size() ? -inventory[source] : 0;
+  }
+  b[target] = 1;
+
+  // A fireable plan that overproduces the tag: P consumes five units, and both
+  // member edges convert ten.
+  aw::vector<int64_t> exec = aw::vector<int64_t>::zeroes(g.nRecipe);
+  exec[maker] = 10;
+  exec[stockEdge] = 10;
+  exec[madeEdge] = 10;
+  exec[consumer] = 1;
+  expect(aw::planIsFireable(sub, inventory,
+                            std::span<const int64_t>(exec.data(), exec.size())),
+         "the surplus plan fires");
+
+  const aw::vector<int64_t> tidied = aw::tidyTagConversions(sub, inventory, b, exec);
+  expect(!tidied.empty(), "the tidying pass cuts the surplus");
+  expect(tidied[stockEdge] == 5 && tidied[madeEdge] == 0,
+         "the demand lands on the stocked member");
+  expect(tidied[consumer] == 1 && tidied[maker] == 10,
+         "the tidying pass leaves real recipes alone");
+  expect(aw::planIsFireable(sub, inventory,
+                            std::span<const int64_t>(tidied.data(), tidied.size())),
+         "the tidied plan still fires");
+
+  {
+    // The cap is the solver's own count, so a member edge that fired fewer
+    // times than the demand keeps all of them and the rest spills over.
+    aw::vector<int64_t> capped = exec;
+    capped[stockEdge] = 2;
+    const aw::vector<int64_t> spilled = aw::tidyTagConversions(sub, inventory, b, capped);
+    expect(!spilled.empty() && spilled[stockEdge] == 2 && spilled[madeEdge] == 3,
+           "the demand spills over to a second edge");
+  }
+
+  {
+    // Nothing to drop: the tag is already consumed exactly, so the pass hands
+    // back nothing and the solver's vector stands.
+    aw::vector<int64_t> exact = exec;
+    exact[stockEdge] = 5;
+    exact[madeEdge] = 0;
+    expect(aw::tidyTagConversions(sub, inventory, b, exact).empty(),
+           "an exactly consumed tag is left alone");
+  }
+
+  {
+    // A tag nothing consumes loses every conversion, which is what turns the
+    // ATM10 plan for one item from about 89700 steps into 3.
+    aw::vector<int64_t> unused = exec;
+    unused[consumer] = 0;
+    const aw::vector<int64_t> dropped = aw::tidyTagConversions(sub, inventory, b, unused);
+    expect(!dropped.empty() && dropped[stockEdge] == 0 && dropped[madeEdge] == 0,
+           "an unconsumed tag loses its conversions");
+  }
+
+  {
+    aw::options.tagTidy = false;
+    expect(aw::tidyTagConversions(sub, inventory, b, exec).empty(),
+           "the switch turns the pass off");
+    aw::options.tagTidy = true;
   }
 }
 
@@ -3548,10 +3704,11 @@ void testGreedyDag() {
       expect(greedyBalances(sub, target, 7, {}, exec), "greedy DAG plan balances");
     // Flash mode must pass the same plan through untouched and still feasible.
     aw::solver::Options options;
-    options.flash = true;
+    aw::options.flash = true;
     const aw::PlanResult flash = aw::planCrafting(sub, target, 7, {}, options);
     expect(flash.status == aw::PlanStatus::OK && greedyBalances(sub, target, 7, {}, flash.exec),
            "flash returns the greedy plan and it balances");
+    aw::options.flash = false;
   }
 
   // A pure cycle with no stock: cutting the back-edge removes the only producer
@@ -3911,7 +4068,7 @@ void testOptionsJson() {
   error.clear();
   expect(aw::applySolverOptionsJson(R"({"flash": true, "numWorkers": 1, "maxTimeSeconds": 0.5})", error),
          "a partial solver patch applies");
-  expect(aw::solverOptions.flash && aw::solverOptions.numWorkers == 1, "solver scalars are updated");
+  expect(aw::solverOptions.numWorkers == 1, "solver scalars are updated");
   expect(aw::solverOptions.maxTimeSeconds == 0.5, "a solver double is updated");
   expect(aw::solverOptions.relativeGap == savedSolver.relativeGap, "an absent solver key keeps its value");
   expect(!aw::applySolverOptionsJson(R"({"maxTimeSeconds": "slow"})", error),
@@ -4222,6 +4379,7 @@ int main() {
   testTagInlining();
   testOutputOrdering();
   testFreeTagObjective();
+  testTagTidying();
   testRecipePruning();
   testRecipePruningWorkstations();
   testRecipeDominatorWorkstations();

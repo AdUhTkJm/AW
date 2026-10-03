@@ -1,6 +1,7 @@
 #include "aw/utils/Int128.h"
 #include "aw/plan/Plan.h"
 #include "aw/plan/Solver.h"
+#include "aw/plan/Options.h"
 #include "StartupCut.h"
 
 #include <algorithm>
@@ -237,7 +238,7 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
     greedyUsable = greedyCost > 0 && greedyCost <= (aw::int128) INT64_MAX;
   }
   if (greedyUsable) {
-    if (options.flash) {
+    if (aw::options.flash) {
       result.status = PlanStatus::OK;
       result.provenOptimal = false;
       result.exec = std::move(greedy);
@@ -321,8 +322,18 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
     FireabilityWitness witness;
     if (planIsFireable(sub, invSrc,
                       std::span<const int64_t>(result.exec.data(), result.exec.size()),
-                      &witness))
+                      &witness)) {
+      // Tag edges are free, so the solver may leave any of them at its domain
+      // cap; the row only asks for `>=`. Cut the conversions the plan does not
+      // consume here, where `rhs` is still in scope. Best effort: an empty
+      // return means nothing was dropped or the trim stopped firing, and the
+      // solver's own vector stands. See TagTidy.cpp.
+      aw::vector<int64_t> tidied =
+          tidyTagConversions(sub, invSrc, rhs, result.exec);
+      if (!tidied.empty())
+        result.exec = std::move(tidied);
       return result;
+    }
 
     result.status = PlanStatus::CYCLE_UNFULFILLED;
     result.provenOptimal = false;

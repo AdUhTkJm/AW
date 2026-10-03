@@ -6,6 +6,7 @@
 #endif
 
 #include "aw/plan/Solver.h"
+#include "aw/plan/Options.h"
 
 #include <chrono>
 #include <span>
@@ -647,11 +648,7 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
   parameters.set_linearization_level(2);
   parameters.set_search_branching(operations_research::sat::SatParameters::LP_SEARCH);
   parameters.set_use_feasibility_pump(true);
-
-  // Flash mode: hand back the first integer-feasible solution and stop. The
-  // cap still constrains the objective, so the model stays bounded, but no
-  // optimality is pursued or proven. See Options::flash.
-  parameters.set_stop_after_first_solution(options.flash);
+  parameters.set_stop_after_first_solution(aw::options.flash);
 
   // For instances large enough, presolving actually harms.
   if (A.cols > 30000)
@@ -805,7 +802,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   // bound: a feasible answer gives an incumbent tight enough for the reduced
   // costs to fix columns, while an infeasible answer proves the integrality
   // gap is too wide to bother. See docs/algorithm.typ.
-  if (!options.flash && options.noGoods.empty() && options.entryGroups.empty() &&
+  if (!aw::options.flash && options.noGoods.empty() && options.entryGroups.empty() &&
       options.seedCuts.empty() &&
       envDouble("AW_RC_GAP", options.reducedCostGap) > 0.0 && lp.ok &&
       std::isfinite(lp.value) && lp.value >= 0.0 && A.cols > 0) {
@@ -938,7 +935,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
     if (current.status == PlanStatus::OK) {
       // Flash mode takes the first feasible plan whatever it costs; there is
       // no incumbent to compare it against and no larger cap to try.
-      if (options.flash)
+      if (aw::options.flash)
         return current;
       if (!haveBest || current.objective < best.objective) {
         best = std::move(current);

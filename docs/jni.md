@@ -162,7 +162,7 @@ leaves the running configuration untouched.
 
 ```
 nonoptimal, tagPruning, recipePruning, directPruning, substitutionPruning,
-seedPruning                bool
+seedPruning, tagTidy       bool
 outputPruningProfile       bool   (accepted on every platform; only meaningful
                                    in a build with AW_PROFILE_PRUNING)
 tagInlining                string "off" | "prePrune" | "queryTime" | "both",
@@ -209,9 +209,10 @@ back by `plannerOptionsJson()`.
 
 The registration-time switches (`tagInlining` and the dominance / pack passes)
 are read once by `registerCraftingGraph`, so they take effect on the next
-registration. The query-time ones (`satellite`, `seedPruning` and the query-time
-half of tag inlining) can be changed at any time. The solver budget is re-read on
-every `plan` call, so it applies to the next query without re-registering.
+registration. The query-time ones (`satellite`, `seedPruning`, `tagTidy` and
+the query-time half of tag inlining) can be changed at any time. The solver
+budget is re-read on every `plan` call, so it applies to the next query without
+re-registering.
 
 ## Building the library
 

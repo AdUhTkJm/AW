@@ -1670,7 +1670,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   // dominated recipes are found, and the survivors are assembled again. This
   // runs after the inliner so the composite relation sees real inputs where a
   // tag used to be.
-  if (options.reprune.enabled) {
+  if (!options.flash ? options.reprune.enabled : options.reprune.enabledOnFlash) {
     const Subgraph probe = assembleSubgraph(query.itemSeen, built);
     const aw::vector<uint8_t> drop = aw::detail::repruneSubgraph(probe, inventory);
     size_t kept = 0;

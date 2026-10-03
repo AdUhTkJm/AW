@@ -73,6 +73,33 @@ bool planIsFireable(const Subgraph& sub, std::span<const Amount> invSrc,
                     std::span<const int64_t> exec,
                     FireabilityWitness* witness = nullptr) noexcept;
 
+// Post-solve tidying of tag conversions, and the pass `planCrafting` runs
+// after the fireability check accepts a CP-SAT solution.
+//
+// A tag edge is free and a tag's row is only `produced - consumed >= b`, so the
+// solver is free to fire every member edge up to its domain cap, which on a
+// real pack leaves thousands of conversions of items the plan never consumes.
+// This pass cuts a tag's member edges back to the amount the plan consumes.
+//
+// `b` and `invSrc` describe the same problem `planCrafting` handed the solver:
+// `b` is its balance vector, one entry per subgraph item (`-stock` everywhere
+// but the target, which holds the request), and `invSrc` is the source-indexed
+// stock the fireability re-check needs. `exec` is the solver's firing vector,
+// one entry per subgraph recipe.
+//
+// Every kept count is capped at the solver's own, so a trim never consumes more
+// of an item than the plan already did and never touches a real recipe. It is
+// best effort on top of that: a trim that stops the plan from firing is
+// discarded, because whether it does depends on which member edge of a cyclic
+// tag was kept. The return value is the trimmed vector, or an empty vector when
+// nothing was dropped, when `options.tagTidy` is off, or when the trim did not
+// survive the fireability re-check -- in each case the caller keeps the
+// solver's own answer.
+aw::vector<int64_t> tidyTagConversions(const Subgraph& sub,
+                                       std::span<const Amount> invSrc,
+                                       std::span<const int64_t> b,
+                                       std::span<const int64_t> exec) noexcept;
+
 // Greedy DAG pre-pass used by `planCrafting`, and exposed for testing.
 //
 // Builds an acyclic view of the reachable recipe graph by cutting back-edges

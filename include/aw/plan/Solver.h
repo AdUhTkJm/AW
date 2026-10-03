@@ -79,24 +79,6 @@ struct Options {
   // in the full column space and the probe solves a sub-model.
   double reducedCostGap = 0.0;
 
-  // Flash mode: return the first feasible plan instead of a cheap one.
-  //
-  // CP-SAT is told to stop as soon as it has any integer-feasible solution, so
-  // the answer is a real plan but its cost is arbitrary. The objective and the
-  // cap search are untouched -- they still bound the search and keep the
-  // variable domains small -- but nothing is spent improving or proving the
-  // incumbent, and the reduced-cost fixing probe is skipped because it exists
-  // only to accelerate an optimality proof. `Result::provenOptimal` is usually
-  // false, but it is still true when the first plan CP-SAT finds happens to be
-  // provably optimal on its own (for example when the LP bound already meets
-  // it); flash never spends time trying to earn that proof.
-  //
-  // This trades plan quality for latency: it is what an interactive caller
-  // wants when the alternative is no answer at all within its budget. Use
-  // `maxTimeSeconds` (plus `relativeGap`) for the opposite trade, where the
-  // solver keeps improving until the budget runs out.
-  bool flash = false;
-
   // Optional warm start: one suggested value per column of the model handed to
   // `solve`. It is installed as a CP-SAT solution hint, so it guides the search
   // toward a known plan without constraining it. Values are clamped into the

@@ -964,6 +964,7 @@ int main(int argc, char** argv) {
   bool noPackPrune = false;
   bool noSatellitePrune = false;
   bool noSeedPrune = false;
+  bool noTagTidy = false;
   bool optimalPruning = false;
   bool doReach = false;
   bool doTree = false;
@@ -995,14 +996,14 @@ int main(int argc, char** argv) {
       noSatellitePrune = true;
     } else if (arg == "--no-seed-prune") {
       noSeedPrune = true;
+    } else if (arg == "--no-tag-tidy") {
+      noTagTidy = true;
     } else if (arg == "--optimal") {
       optimalPruning = true;
     } else if (arg == "--dump-ws") {
       dumpWorkstation = true;
     } else if (arg == "--flash") {
-      // Return the first feasible plan instead of a cheap one. Solver-side, so
-      // it is orthogonal to the pruning flags above.
-      solverOptions.flash = true;
+      aw::options.flash = true;
     } else if (arg == "--no-cycle-retries") {
       // Turn off the post-rejection re-solves, for measuring their cost.
       solverOptions.maxCycleRetries = 0;
@@ -1137,7 +1138,7 @@ int main(int argc, char** argv) {
                    "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                    "                   [--no-pack-prune]\n"
                    "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
-                   "                   [--no-seed-prune] [--optimal] [--flash] [--no-cycle-retries]\n"
+                   "                   [--no-seed-prune] [--no-tag-tidy] [--optimal] [--flash] [--no-cycle-retries]\n"
                    "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                    "                   [--inv-file <stock.tsv>]\n"
@@ -1159,7 +1160,7 @@ int main(int argc, char** argv) {
                  "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                  "                   [--no-pack-prune]\n"
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
-                 "                   [--no-seed-prune] [--optimal] [--flash] [--no-cycle-retries]\n"
+                 "                   [--no-seed-prune] [--no-tag-tidy] [--optimal] [--flash] [--no-cycle-retries]\n"
                  "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                  "                   [--inv-file <stock.tsv>]\n"
@@ -1220,6 +1221,9 @@ int main(int argc, char** argv) {
 
   // Seed pruning runs per query, after the walk and every pruning pass.
   aw::options.seedPruning = !noSeedPrune && !noPrune;
+
+  // Tag tidying runs per query, after the solve.
+  aw::options.tagTidy = !noTagTidy;
 
   // Profile the whole run: decode + canonicalize + prune precompute, the
   // reachability pass, the LP/CP-SAT solve, and the report. Started before the
@@ -1443,10 +1447,7 @@ int main(int argc, char** argv) {
     }
     std::cout << "  status: " << statusName;
     if (plan.status == aw::PlanStatus::OK)
-      std::cout << (plan.provenOptimal
-                        ? " (proven optimal)"
-                        : (solverOptions.flash ? " (flash: first feasible)"
-                                               : " (gave up early)"))
+      std::cout << (plan.provenOptimal ? " (proven optimal)" : "")
                 << ", gap=" << plan.gap << ", bound=" << plan.bestBound;
     std::cout << ", conflicts=" << plan.numConflicts
               << ", branches=" << plan.numBranches

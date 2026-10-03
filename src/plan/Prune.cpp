@@ -521,8 +521,6 @@ aw::vector<uint8_t> repruneSubgraph(const Subgraph &sub,
 #endif
   const uint nRecipe = sub.graph.nRecipe;
   aw::vector<uint8_t> drop(nRecipe, 0);
-  if (!options.reprune.enabled || nRecipe == 0)
-    return drop;
 
   CraftingGraph g;
   static_cast<BaseCraftingGraph &>(g) = sub.graph;
