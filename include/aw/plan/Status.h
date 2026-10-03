@@ -16,8 +16,9 @@ enum class PlanStatus {
   // but a different plan may still exist, so `planCrafting` spends up to
   // `solver::Options::maxCycleRetries` extra solves looking for one, forbidding
   // each rejected plan in turn. This status is what comes back when the retries
-  // are exhausted (or disabled). See docs/algorithm.typ, "启动可达性" and
-  // "no-good 重试".
+  // are exhausted (or disabled). The eager entry cuts in `planCrafting` exclude
+  // the 1- and 2-cycles before the first solve, so this is reserved for what
+  // they cannot see. See docs/algorithm.typ, "启动可达性" and "启动切断".
   CYCLE_UNFULFILLED,
 };
 

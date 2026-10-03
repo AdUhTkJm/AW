@@ -315,6 +315,26 @@ aw::vector<std::byte> buildSeedQuantitySample() {
   return w.out;
 }
 
+// A two-recipe amplifier pair with a large batch, which is what makes the seed
+// a *quantity* rather than a token:
+//
+//   handle 1 (A)  <- r0 (x64, ws [1], input B x16)
+//   handle 2 (B)  <- r1 (x1,  ws [1], input A x1)
+//
+// The pair is net positive in A (+63 per round), so the net balance accepts
+// r0:2 / r1:32 for 64 A, but the first firing of either needs 16 B or 1 A and
+// neither exists. The entry cut has to weigh sixteen units, which is what one
+// execution of the amplifier eats, not one token per cycle firing.
+aw::vector<std::byte> buildAmplifierPairSample() {
+  AwrWriter w;
+  w.header(2, 2);
+  w.item(1, 1);
+  w.recipe(64, {1}, {{2, 16}});
+  w.item(2, 1);
+  w.recipe(1, {1}, {{1, 1}});
+  return w.out;
+}
+
 // A self-consuming amplifier with a separate seed route, and the stock to pay
 // for it. `A x3 <- A x1, L2 x1` is net positive, so the balance accepts two
 // amplifications and no seed for four A, which is the cheapest plan and cannot
@@ -1305,18 +1325,26 @@ void testPlan() {
   const aw::Handle all[] = {1, 2};
 
   // The two-item loop is net-positive, so the net balance accepts r0:8 / r1:4
-  // for four item 1, but nothing can fire from empty stock. With the seed
-  // filter off the solver still returns that plan; the fireability check
-  // rejects it as unrealizable rather than handing it back.
+  // for four item 1, but nothing can fire from empty stock. The eager 2-cycle
+  // cut tells the solver that before the first solve, so the instance comes
+  // back INFEASIBLE; with the cuts off the balance still has a feasible plan
+  // and only the post-solve check refuses it, which is the weaker answer.
   {
     aw::options.seedPruning = false;
     const aw::Subgraph sub = aw::reachableSubgraph(1, all);
     aw::options.seedPruning = true;
     expect(sub.graph.nItem == 2 && sub.graph.nRecipe == 2, "unseeded subgraph shape");
-    const aw::PlanResult rejected = aw::planCrafting(sub, sub.translate(0), 4, {});
+
+    aw::solver::Options noCuts;
+    noCuts.maxStartupGroups = 0;
+    const aw::PlanResult rejected = aw::planCrafting(sub, sub.translate(0), 4, {}, noCuts);
     expect(rejected.status == aw::PlanStatus::CYCLE_UNFULFILLED,
            "an unseeded cycle is rejected");
     expect(!rejected.provenOptimal, "a rejected cycle claims nothing");
+
+    const aw::PlanResult cut = aw::planCrafting(sub, sub.translate(0), 4, {});
+    expect(cut.status == aw::PlanStatus::INFEASIBLE,
+           "the 2-cycle cut proves the unseeded cycle infeasible");
   }
 
   // With the filter on, the unreachable loop never reaches the solver.
@@ -1365,17 +1393,27 @@ void testFireability() {
   const aw::Handle all[] = {1};
 
   // One seed: the filter keeps the cycle (S is in stock) but r0 needs two and
-  // nothing else is enabled, so the net-balanced r0:2 / r1:1 plan is rejected.
+  // nothing else is enabled, so the net-balanced r0:2 / r1:1 plan cannot fire.
+  // The entry cut weighs the two the cycle needs against the one in stock and
+  // proves the plan impossible; with the cuts off the same instance is only
+  // rejected.
   {
     aw::vector<aw::Amount> inventory(2, 0);
     inventory[0] = 1;  // one S
     const aw::Subgraph sub = aw::reachableSubgraph(2, all, inventory);
     const aw::ItemId target = sub.translate(1);  // handle 2 (C)
     expect(target != UINT32_MAX, "the target is in the subgraph");
-    const aw::PlanResult r = aw::planCrafting(sub, target, 1, inventory);
-    expect(r.status == aw::PlanStatus::CYCLE_UNFULFILLED,
+
+    aw::solver::Options noCuts;
+    noCuts.maxStartupGroups = 0;
+    const aw::PlanResult lazy = aw::planCrafting(sub, target, 1, inventory, noCuts);
+    expect(lazy.status == aw::PlanStatus::CYCLE_UNFULFILLED,
            "a cycle that needs two seeds but holds one is rejected");
-    expect(!r.provenOptimal, "a rejected plan claims nothing");
+    expect(!lazy.provenOptimal, "a rejected plan claims nothing");
+
+    const aw::PlanResult cut = aw::planCrafting(sub, target, 1, inventory);
+    expect(cut.status == aw::PlanStatus::INFEASIBLE,
+           "the entry cut proves the short-seeded cycle infeasible");
   }
 
   // Two seeds: r0 fires, r1 refills S, and the loop reaches any amount.
@@ -1387,9 +1425,11 @@ void testFireability() {
     expect(r.status == aw::PlanStatus::OK, "two seeds make the cycle fireable");
   }
 
-  // The no-good retry: the cheapest balance-feasible plan recycles with no
-  // seed, and is rejected; the next cheapest starts the loop from stock and is
-  // returned. With the retry off the same instance still reports the rejection.
+  // The no-good retry, and the cut that makes it unnecessary: the cheapest
+  // balance-feasible plan recycles with no seed and cannot fire. The 2-cycle
+  // cut forces the seed before the first solve, so a single solve returns the
+  // seeded runner-up; with the cuts off the plan has to be rejected first and
+  // the no-good retry has to find the same answer.
   aw::registerCraftingGraph(buildCycleRetrySample());
   expect(aw::getCraftingError() == nullptr, "cycle retry sample parses");
   {
@@ -1404,9 +1444,16 @@ void testFireability() {
 
     aw::solver::Options off;
     off.maxCycleRetries = 0;
+    off.maxStartupGroups = 0;  // exercise the no-good path, not the cuts
     const aw::PlanResult rejected = aw::planCrafting(sub, target, 1, inventory, off);
     expect(rejected.status == aw::PlanStatus::CYCLE_UNFULFILLED,
            "the unseeded recycle plan is rejected when retries are off");
+
+    aw::solver::Options cutOnly;
+    cutOnly.maxCycleRetries = 0;
+    const aw::PlanResult cut = aw::planCrafting(sub, target, 1, inventory, cutOnly);
+    expect(cut.status == aw::PlanStatus::OK,
+           "the 2-cycle cut finds the seeded plan without a retry");
 
     const aw::PlanResult retried = aw::planCrafting(sub, target, 1, inventory);
     expect(retried.status == aw::PlanStatus::OK,
@@ -1415,21 +1462,25 @@ void testFireability() {
     // The seeding route costs four executions: one seed, one round of each
     // recycle step, and the target. The rejected plan cost three and used no
     // seed at all.
-    int64_t total = 0;
-    int64_t seed = 0;
-    for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
-      total += retried.exec[r];
-      const auto inputs = sub.graph.inputsOf(r);
-      if (inputs.size() == 1 && sub.itemOrigin[inputs[0]] == 0)  // handle 1 (L)
-        seed += retried.exec[r];
+    for (const aw::PlanResult *plan : {&cut, &retried}) {
+      int64_t total = 0;
+      int64_t seed = 0;
+      for (uint32_t r = 0; r < sub.graph.nRecipe; r++) {
+        total += plan->exec[r];
+        const auto inputs = sub.graph.inputsOf(r);
+        if (inputs.size() == 1 && sub.itemOrigin[inputs[0]] == 0)  // handle 1 (L)
+          seed += plan->exec[r];
+      }
+      expect(total == 4, "the seeded plan is the runner-up");
+      expect(seed > 0, "the seeded plan draws the seed from stock");
     }
-    expect(total == 4, "the retried plan is the seeded runner-up");
-    expect(seed > 0, "the retried plan draws the seed from stock");
   }
 
-  // The startup barriers, on a self-consuming amplifier. The blocked recipe is
-  // cut after the first rejection, so the unseeded cost-3 plan is replaced by
-  // the seeded cost-4 one. Without the retry the rejection still comes back.
+  // The 1-cycle (self-loop) cut, on a self-consuming amplifier. Without it the
+  // blocked recipe is only cut after the first rejection, so the unseeded
+  // cost-3 plan is returned, rejected, and replaced by the seeded cost-4 one;
+  // the eager self-loop cut posts the same inequality up front, so a single
+  // solve is enough.
   aw::registerCraftingGraph(buildStartupBarrierSample());
   expect(aw::getCraftingError() == nullptr, "startup barrier sample parses");
   {
@@ -1445,17 +1496,108 @@ void testFireability() {
 
     aw::solver::Options off;
     off.maxCycleRetries = 0;
+    off.maxStartupGroups = 0;
     const aw::PlanResult rejected = aw::planCrafting(sub, target, 1, inventory, off);
     expect(rejected.status == aw::PlanStatus::CYCLE_UNFULFILLED,
            "the unseeded amplifier plan is rejected without barriers");
 
+    aw::solver::Options cutOnly;
+    cutOnly.maxCycleRetries = 0;
+    const aw::PlanResult cut = aw::planCrafting(sub, target, 1, inventory, cutOnly);
+    expect(cut.status == aw::PlanStatus::OK,
+           "the self-loop cut finds the seeded plan without a retry");
+
     const aw::PlanResult retried = aw::planCrafting(sub, target, 1, inventory);
     expect(retried.status == aw::PlanStatus::OK,
            "the barrier cut plus no-good finds the seeded plan");
-    int64_t total = 0;
-    for (uint32_t r = 0; r < sub.graph.nRecipe; r++)
-      total += retried.exec[r];
-    expect(total == 4, "the retried plan is the seeded runner-up");
+    for (const aw::PlanResult *plan : {&cut, &retried}) {
+      int64_t total = 0;
+      for (uint32_t r = 0; r < sub.graph.nRecipe; r++)
+        total += plan->exec[r];
+      expect(total == 4, "the seeded plan is the runner-up");
+    }
+  }
+}
+
+// The eager 1- and 2-cycle cuts. They are implied by fireability, so they are
+// posted before the first solve: an instance whose cycle cannot start comes
+// back INFEASIBLE instead of CYCLE_UNFULFILLED, and one whose cycle needs a seed
+// is answered in a single solve.
+void testStartupCuts() {
+  std::cout << "[Test] eager startup cuts\n";
+  aw::registerCraftingGraph(buildAmplifierPairSample());
+  expect(aw::getCraftingError() == nullptr, "amplifier pair sample parses");
+
+  const aw::Handle all[] = {1};
+  aw::solver::Options noCuts;
+  noCuts.maxStartupGroups = 0;
+
+  // Nothing to start from: the cut proves no firing sequence exists, while the
+  // plain balance model still returns the net-balanced r0:2 / r1:32 plan for
+  // the fireability check to refuse. The seed filter has to be off, or the
+  // unseeded pair never reaches the solver at all.
+  {
+    aw::options.seedPruning = false;
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all);
+    aw::options.seedPruning = true;
+    const aw::ItemId target = sub.translate(0);  // handle 1 (A)
+    expect(target != UINT32_MAX, "the pair target is in the subgraph");
+
+    const aw::PlanResult lazy = aw::planCrafting(sub, target, 64, {}, noCuts);
+    expect(lazy.status == aw::PlanStatus::CYCLE_UNFULFILLED,
+           "the unstartable pair is only rejected without the cut");
+
+    const aw::PlanResult cut = aw::planCrafting(sub, target, 64, {});
+    expect(cut.status == aw::PlanStatus::INFEASIBLE,
+           "the 2-cycle cut proves the pair unstartable");
+  }
+
+  // Sixteen A is exactly the entry the amplifier needs, and it is the item r1
+  // turns into the B the amplifier eats.
+  {
+    aw::vector<aw::Amount> inventory(2, 0);
+    inventory[0] = 16;
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    const aw::ItemId target = sub.translate(0);
+    expect(target != UINT32_MAX, "the seeded pair target is in the subgraph");
+    const aw::PlanResult plan = aw::planCrafting(sub, target, 64, inventory);
+    expect(plan.status == aw::PlanStatus::OK, "sixteen A seeds the pair");
+    expect(plan.exec.size() == 2 && plan.exec[0] == 2 && plan.exec[1] == 32,
+           "the A-seeded pair plan is r0:2 / r1:32");
+    expect(aw::planIsFireable(sub, inventory,
+                              std::span<const int64_t>(plan.exec.data(), plan.exec.size())),
+           "the returned pair plan fires");
+  }
+
+  // Sixteen B is the other way in, and the cheaper one: the amplifier can run
+  // first and nothing has to be converted.
+  {
+    aw::vector<aw::Amount> inventory(2, 0);
+    inventory[1] = 16;
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    const aw::ItemId target = sub.translate(0);
+    const aw::PlanResult plan = aw::planCrafting(sub, target, 64, inventory);
+    expect(plan.status == aw::PlanStatus::OK, "sixteen B seeds the pair");
+    expect(plan.exec.size() == 2 && plan.exec[0] == 1 && plan.exec[1] == 0,
+           "the B-seeded pair plan is one amplifier run");
+    expect(aw::planIsFireable(sub, inventory,
+                              std::span<const int64_t>(plan.exec.data(), plan.exec.size())),
+           "the B-seeded pair plan fires");
+  }
+
+  // Eight A funds the first firing but not the sixteen B the amplifier eats, so
+  // the plan still cannot be executed. Only the *first* firing is cut over; the
+  // rounds after it are the retry loop's problem, so this stays unproven rather
+  // than proven impossible. The staged startup model in docs/algorithm.typ,
+  // "启动切断", is what would settle it.
+  {
+    aw::vector<aw::Amount> inventory(2, 0);
+    inventory[0] = 8;
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    const aw::ItemId target = sub.translate(0);
+    const aw::PlanResult plan = aw::planCrafting(sub, target, 64, inventory);
+    expect(plan.status != aw::PlanStatus::OK,
+           "eight A cannot pay the amplifier's first batch");
   }
 }
 
@@ -4012,6 +4154,7 @@ int main() {
   testZeroCostColumns();
   testPlan();
   testFireability();
+  testStartupCuts();
   testPlanInfeasible();
   testGreedyDag();
   testDuplicateRecipes();

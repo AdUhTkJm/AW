@@ -74,7 +74,9 @@ struct Options {
   // recipe graphs. There the integer optimum sits far enough above the LP bound
   // that the probe is infeasible and fixes nothing, so the time is pure
   // overhead; enable it explicitly on instances where the optimum is known to
-  // be close to the LP bound.
+  // be close to the LP bound. The probe is also skipped while forbidden
+  // assignments or startup entry cuts are present, because both are expressed
+  // in the full column space and the probe solves a sub-model.
   double reducedCostGap = 0.0;
 
   // Flash mode: return the first feasible plan instead of a cheap one.
@@ -112,45 +114,77 @@ struct Options {
   // `maxCycleRetries` times. The entries are matched against the original
   // column space, so they stay valid across the cap retries inside one `solve`
   // call; a reduced-cost probe is skipped while they are present. See
-  // docs/algorithm.typ, "no-good 重试".
+  // docs/algorithm.typ, "启动切断".
   aw::vector<aw::vector<int64_t>> noGoods;
 
   // How many extra solves a caller may run after rejecting a plan. 0 turns the
   // retry off, which is the behaviour before no-goods existed.
   int maxCycleRetries = 3;
 
-  // Startup barriers, added lazily after a plan is rejected.
+  // Startup entry cuts.
   //
   // The balance model can return a plan whose cycle has no seed: an
   // "amplifier" that eats the item it makes is net positive, so the balance
   // accepts it without ever having a unit to start from. The post-solve
-  // fireability check rejects that plan, and the no-good retry then has to look
-  // for another one. This is where `planCrafting` records what the check found
-  // blocked, so the re-solve also gets a cut that tells it to pay the seed.
+  // fireability check rejects that plan, but the solver then has to be told
+  // what it missed, or it returns another plan built on the same unstartable
+  // cycle.
   //
-  // For a blocked (row i, column r): the first execution of r can only draw on
-  // the stock plus the net output of the *other* recipes, so
+  // A *group* is a set of columns whose first firing is cut over. Exactly one
+  // member is designated the entry (`start_c`), forced whenever the group is
+  // used at all, and the entry has to pay the group's *gross* inputs out of the
+  // stock plus the net output of everything outside the group:
   //
-  //   c(r,i) * [x_r >= 1] <= stock[i] + sum_{k != r, net_k > 0} net_k * x_k
+  //   x_c >= start_c                                        (used => entry)
+  //   x_c <= domain_c * sum_{g in group} start_g           (used => an entry)
+  //   gross(c,i) * start_c <= stock[i] + sum_{k not in group, net_k > 0} net_k * x_k
   //
-  // holds for every fireable plan, where `c(r,i)` is the *gross* input amount
-  // from the witness and `net` is the balance row. The right side ignores the
-  // other recipes' consumption, so it only over-estimates what could be
-  // available. Two details matter: the balance matrix stores net coefficients,
-  // so `c(r,i)` cannot be read back out of it (an amplifier's row entry is
-  // positive) and must come from the witness; and r must be left out of the
-  // sum, because its own output cannot pay for its own first firing. The
-  // activation bit expresses "r is used at all", forced by
-  // `x_r <= domain_r * [x_r >= 1]`. See docs/algorithm.typ, "no-good 重试".
-  struct Barrier {
+  // Every fireable plan obeys this for *any* group: the first member of the
+  // group to fire is used, draws on the stock and on firings outside the group,
+  // and never on the group itself. The `x_c >= start_c` row is what keeps the
+  // solver from naming an unused member the entry and escaping the cut.
+  // The sum over the complement ignores the other recipes' consumption, so it
+  // only over-estimates what could be on the shelf by then, which keeps the
+  // cut sound. Two details matter: the balance matrix stores net coefficients,
+  // so `gross` cannot be read back out of it (an amplifier's row entry is
+  // positive) and has to come from the graph; and the group's own columns are
+  // left out of the funding sum, because a cycle cannot pay for its own start.
+  //
+  // `planCrafting` posts the 1- and 2-cycles of the subgraph eagerly, before
+  // the first solve, so the unstartable plan is excluded while it is still
+  // being searched for (see buildStartupCuts); after a rejection it adds one
+  // more group for the component the fireability check found deadlocked. See
+  // docs/algorithm.typ, "启动可达性".
+  struct EntryNeed {
     uint32_t row = 0;
     uint32_t column = 0;
-    int64_t need = 0;
+    // Gross input per execution. Not the net coefficient, which the balance
+    // matrix stores and which is 0 or positive for a self-consuming recipe.
+    int64_t amount = 0;
   };
-  aw::vector<Barrier> barriers;
 
-  // Physical stock per row, in the solver's row space. The barriers use it as
-  // the seed that stock contributes; an empty span means "derive from b"
+  struct EntryGroup {
+    // Members. Some member that is actually used has to be the entry, so a
+    // group is also a valid place to record a single blocked recipe.
+    aw::vector<uint32_t> columns;
+    // One entry per (column, row) the group's entry has to afford.
+    aw::vector<EntryNeed> needs;
+  };
+  aw::vector<EntryGroup> entryGroups;
+
+  // Budget for the eager cycle enumeration: how many groups it may add, and how
+  // many columns one group may hold. 0 for either disables the pass, which
+  // leaves only the groups added after a rejection.
+  uint32_t maxStartupGroups = 1024;
+
+  // A cycle with more members than this is skipped. The mutual-consumption
+  // components of a large modpack merge into one huge blob, and cutting that
+  // would cost more than it is worth; the tight little cycles this pass is for
+  // are well under the bound.
+  uint32_t maxStartupGroupMembers = 32;
+
+  // Physical stock per row, in the solver's row space. The entry cuts use it
+  // as the seed that stock contributes; an empty span means "derive from b"
   // (max(0, -b[i])), which understates the target row and would make the cuts
   // unsound there. `planCrafting` always fills it.
   std::span<const int64_t> stock;

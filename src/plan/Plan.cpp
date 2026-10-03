@@ -1,6 +1,7 @@
 #include "aw/utils/Int128.h"
 #include "aw/plan/Plan.h"
 #include "aw/plan/Solver.h"
+#include "StartupCut.h"
 
 #include <algorithm>
 #include <chrono>
@@ -8,6 +9,18 @@
 
 namespace aw {
 namespace {
+
+// True when some group already cuts on this (row, column). The fireability
+// witness repeats itself across retries, and the eager pass may have posted the
+// same need for a 1- or 2-cycle already.
+bool hasEntryNeed(const aw::vector<solver::Options::EntryGroup> &groups, uint32_t row,
+                  uint32_t column) noexcept {
+  for (const solver::Options::EntryGroup &group : groups)
+    for (const solver::Options::EntryNeed &need : group.needs)
+      if (need.row == row && need.column == column)
+        return true;
+  return false;
+}
 
 struct ColumnEntry {
   uint32_t row;
@@ -199,10 +212,11 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
   aw::vector<int64_t> greedy = greedyDagPlan(sub, target, amount, invSrc);
   solver::Options solveOptions = options;
 
-  // Startup barriers, added lazily after a rejected plan, so an ordinary
-  // feasible call pays nothing for the experiment. See Options::Barrier.
+  // Startup cuts need the physical stock per row, and they are the only reason
+  // a solve ever needs it, so it is filled on demand. See
+  // Options::EntryGroup.
   aw::vector<int64_t> stockPerRow;
-  const auto installBarriers = [&]() {
+  const auto installStock = [&]() {
     if (!stockPerRow.empty())
       return;
     // `rhs` only carries stock for the non-target rows and hides the target's
@@ -239,6 +253,20 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
       solveOptions.solutionHint = std::span<const int64_t>(greedy.data(), greedy.size());
     }
   }
+
+  // Eager startup cuts: every 1- and 2-cycle of the subgraph gets a group that
+  // makes its first firing pay for itself out of the stock and the world
+  // outside the cycle. The cuts are implied by fireability, so they can be
+  // posted before the first solve: the plan the fireability check used to
+  // reject is now excluded while it is still being searched for, which saves a
+  // whole rejected solve per cycle, and the instance comes back INFEASIBLE
+  // instead of CYCLE_UNFULFILLED when no firing sequence exists at all. A
+  // greedy hit above never reaches this point. See buildStartupCuts.
+  if (solveOptions.maxStartupGroups > 0)
+    buildStartupCuts(sub, solveOptions.entryGroups, solveOptions.maxStartupGroups,
+                     solveOptions.maxStartupGroupMembers);
+  if (!solveOptions.entryGroups.empty())
+    installStock();
 
   // Re-solve while the post-solve fireability check rejects the plan. Every
   // rejected vector becomes a no-good, so the next solve has to return a
@@ -299,28 +327,26 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
     if (retry >= solveOptions.maxCycleRetries)
       return result;
 
-    // Record one startup barrier per blocked recipe: a sound cut that makes the
-    // re-solve pay that recipe's seed. The exact no-good still goes in, so
-    // progress is guaranteed even when the cut does not by itself exclude the
-    // rejected vector.
+    // Record one startup cut per blocked recipe: a sound cut that makes the
+    // re-solve pay that recipe's seed. The eager pass has already posted the
+    // 1- and 2-cycles, so this is what is left for the longer ones; the exact
+    // no-good still goes in, so progress is guaranteed even when the cut does
+    // not by itself exclude the rejected vector.
     bool addedCut = false;
     for (size_t k = 0; k < witness.recipe.size(); k++) {
       const uint32_t column = witness.recipe[k];
       const uint32_t row = witness.item[k];
-      bool seen = false;
-      for (const solver::Options::Barrier &old : solveOptions.barriers)
-        if (old.row == row && old.column == column) {
-          seen = true;
-          break;
-        }
-      if (seen)
+      if (hasEntryNeed(solveOptions.entryGroups, row, column))
         continue;
-      solveOptions.barriers.push_back(
-          solver::Options::Barrier{row, column, (int64_t) witness.need[k]});
+      solver::Options::EntryGroup group;
+      group.columns.push_back(column);
+      group.needs.push_back(
+          solver::Options::EntryNeed{row, column, (int64_t) witness.need[k]});
+      solveOptions.entryGroups.push_back(std::move(group));
       addedCut = true;
     }
     if (addedCut)
-      installBarriers();
+      installStock();
 
     // The rejected plan stays in `result.exec`, so a caller still sees what was
     // refused. Drop the warm start: it points at the vector just forbidden.

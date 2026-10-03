@@ -360,9 +360,9 @@ aw::vector<int64_t> columnDomains(const Matrix &A, const RowMajor &rows,
   return domain;
 }
 
-// Everything the startup-barrier pass needs, so the helper stays under the
+// Everything the startup entry-cut pass needs, so the helper stays under the
 // argument limit.
-struct BarrierContext {
+struct EntryContext {
   sat::CpModelBuilder &model;
   const Matrix &A;
   const RowMajor &rows;
@@ -370,61 +370,104 @@ struct BarrierContext {
   std::span<const int64_t> stock;  // empty: derive from b
   absl::Span<const sat::IntVar> variables;
   const aw::vector<int64_t> &domain;
-  const aw::vector<Options::Barrier> &barriers;
+  const aw::vector<Options::EntryGroup> &groups;
 };
 
-// Adds the cuts described on Options::Barrier. A row whose capacity overflows
-// int64 is skipped; the model stays valid either way.
-void addStartupBarriers(const BarrierContext &ctx) {
-  // One activation bit per column a barrier names, created on first use.
-  aw::vector<sat::BoolVar> active(ctx.A.cols);
-  aw::vector<uint8_t> haveActive(ctx.A.cols, 0);
-  const auto activation = [&](uint32_t r) {
-    if (!haveActive[r]) {
-      active[r] = ctx.model.NewBoolVar();
-      // x_r >= 1 forces the bit; a zero bit pins the column to zero.
-      ctx.model.AddLessOrEqual(sat::LinearExpr(ctx.variables[r]),
-                               ctx.domain[r] * sat::LinearExpr(active[r]));
-      haveActive[r] = 1;
-    }
-    return active[r];
-  };
+bool isGroupColumn(std::span<const uint32_t> group, uint32_t column) noexcept {
+  for (uint32_t member : group)
+    if (member == column)
+      return true;
+  return false;
+}
 
-  for (const Options::Barrier &barrier : ctx.barriers) {
-    const uint32_t i = barrier.row;
-    const uint32_t r = barrier.column;
-    if (i >= ctx.A.rows || r >= ctx.A.cols || barrier.need <= 0)
+// Index of `column` in `group`, or -1. Groups are the cycle members, so this
+// scan is over a couple of entries.
+int indexInGroup(std::span<const uint32_t> group, uint32_t column) noexcept {
+  for (size_t k = 0; k < group.size(); k++)
+    if (group[k] == column)
+      return (int) k;
+  return -1;
+}
+
+// The stock a row starts from. Beyond the stock the caller reports, only the
+// negative side of `b` counts: `planCrafting` fills the span from the actual
+// inventory, which is what keeps the target row right.
+int64_t seedStockOf(const EntryContext &ctx, uint32_t row) noexcept {
+  if (!ctx.stock.empty() && row < ctx.stock.size())
+    return ctx.stock[row] > 0 ? ctx.stock[row] : 0;
+  return ctx.b[row] < 0 ? (int64_t) magnitude(ctx.b[row]) : 0;
+}
+
+// Positive net output of `row` outside the group: what the rest of the plan can
+// put on the shelf before the group's first firing. Skipping the group's own
+// columns is what makes the cut bite, since a cycle cannot fund its own start.
+// False when the coefficient capacity overflows int64, in which case the cut
+// built from it is skipped and the model simply stays weaker.
+bool fundingOf(const EntryContext &ctx, uint32_t row, std::span<const uint32_t> group,
+               sat::LinearExpr &out) noexcept {
+  uint64_t capacity = 0;
+  for (uint32_t k = ctx.rows.start[row]; k < ctx.rows.start[row + 1]; k++) {
+    const int64_t value = ctx.rows.value[k];
+    const uint32_t column = ctx.rows.column[k];
+    if (value <= 0 || isGroupColumn(group, column))
+      continue;
+    out += sat::LinearExpr::Term(ctx.variables[column], value);
+    capacity = satAdd(capacity, satMul((uint64_t) value, (uint64_t) ctx.domain[column]));
+    if (capacity > (uint64_t) INT64_MAX / 2)
+      return false;
+  }
+  return true;
+}
+
+// Adds the cuts described on Options::EntryGroup: for each group, one start bit
+// per member, the coupling that forces an entry whenever the group is used, and
+// one inequality per gross input of that entry.
+void addEntryGroups(const EntryContext &ctx) {
+  for (const Options::EntryGroup &group : ctx.groups) {
+    if (group.columns.empty() || group.needs.empty())
+      continue;
+    bool inRange = true;
+    for (uint32_t column : group.columns)
+      if (column >= ctx.A.cols)
+        inRange = false;
+    if (!inRange)
       continue;
 
-    // `gain` is the row's positive net output excluding column r: an amplifier
-    // produces in the same row it eats, but its own output cannot pay for its
-    // own first firing.
-    sat::LinearExpr gain;
-    uint64_t capacity = 0;
-    bool overflow = false;
-    for (uint32_t k = ctx.rows.start[i]; k < ctx.rows.start[i + 1]; k++) {
-      const int64_t value = ctx.rows.value[k];
-      if (value <= 0 || ctx.rows.column[k] == r)
+    // `start[k]` means "member k is the first of the group to fire". Only one
+    // member can be first, the group is used at all only if a used member is
+    // it, and an unused member can never be the entry: `x_c >= start_c` pins
+    // that down, and `x_c <= domain_c * sum(start)` forces some entry whenever
+    // any member is used.
+    aw::vector<sat::BoolVar> start;
+    start.reserve(group.columns.size());
+    sat::LinearExpr anyStart;
+    for (size_t k = 0; k < group.columns.size(); k++) {
+      start.push_back(ctx.model.NewBoolVar());
+      anyStart += sat::LinearExpr(start.back());
+    }
+    for (size_t k = 0; k < group.columns.size(); k++) {
+      const uint32_t column = group.columns[k];
+      ctx.model.AddLessOrEqual(sat::LinearExpr(ctx.variables[column]),
+                               ctx.domain[column] * anyStart);
+      ctx.model.AddGreaterOrEqual(sat::LinearExpr(ctx.variables[column]),
+                                  sat::LinearExpr(start[k]));
+    }
+
+    for (const Options::EntryNeed &need : group.needs) {
+      const uint32_t row = need.row;
+      if (row >= ctx.A.rows || need.amount <= 0)
         continue;
-      gain += sat::LinearExpr::Term(ctx.variables[ctx.rows.column[k]], value);
-      capacity = satAdd(capacity,
-                        satMul((uint64_t) value, (uint64_t) ctx.domain[ctx.rows.column[k]]));
-      if (capacity > (uint64_t) INT64_MAX / 2) {
-        overflow = true;
-        break;
-      }
+      const int index = indexInGroup(group.columns, need.column);
+      if (index < 0)
+        continue;
+      sat::LinearExpr funding;
+      if (!fundingOf(ctx, row, group.columns, funding))
+        continue;
+      // gross * start_c - funding <= stock.
+      ctx.model.AddLessOrEqual(
+          sat::LinearExpr::Term(start[(size_t) index], need.amount) - funding,
+          seedStockOf(ctx, row));
     }
-    if (overflow)
-      continue;
-
-    int64_t stock = 0;
-    if (!ctx.stock.empty() && i < ctx.stock.size())
-      stock = ctx.stock[i] > 0 ? ctx.stock[i] : 0;
-    else if (ctx.b[i] < 0)
-      stock = (int64_t) magnitude(ctx.b[i]);
-
-    // need * [x_r >= 1] - gain <= stock.
-    ctx.model.AddLessOrEqual(sat::LinearExpr::Term(activation(r), barrier.need) - gain, stock);
   }
 }
 
@@ -472,10 +515,10 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
     }
   }
 
-  if (!options.barriers.empty())
-    addStartupBarriers(BarrierContext{model, A, rows, b, options.stock,
-                                      absl::Span<const sat::IntVar>(variables), domain,
-                                      options.barriers});
+  if (!options.entryGroups.empty())
+    addEntryGroups(EntryContext{model, A, rows, b, options.stock,
+                                absl::Span<const sat::IntVar>(variables), domain,
+                                options.entryGroups});
 
   aw::vector<sat::IntVar> terms;
   aw::vector<int64_t> coefficients;
@@ -699,7 +742,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   // bound: a feasible answer gives an incumbent tight enough for the reduced
   // costs to fix columns, while an infeasible answer proves the integrality
   // gap is too wide to bother. See docs/algorithm.typ.
-  if (!options.flash && options.noGoods.empty() && options.barriers.empty() &&
+  if (!options.flash && options.noGoods.empty() && options.entryGroups.empty() &&
       envDouble("AW_RC_GAP", options.reducedCostGap) > 0.0 && lp.ok &&
       std::isfinite(lp.value) && lp.value >= 0.0 && A.cols > 0) {
     const int64_t probeCap = std::clamp<int64_t>(

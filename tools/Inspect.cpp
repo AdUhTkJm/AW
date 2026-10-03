@@ -1006,6 +1006,10 @@ int main(int argc, char** argv) {
     } else if (arg == "--no-cycle-retries") {
       // Turn off the post-rejection re-solves, for measuring their cost.
       solverOptions.maxCycleRetries = 0;
+    } else if (arg == "--no-startup-cuts") {
+      // Turn off the eager 1- and 2-cycle entry cuts, for measuring what they
+      // save against the rejected-solve retry path.
+      solverOptions.maxStartupGroups = 0;
     } else if (arg == "--satellite-seconds") {
       if (i + 1 >= argc || !parseDouble(argv[++i], satelliteSeconds)) {
         std::cerr << "--satellite-seconds needs a number of seconds\n";

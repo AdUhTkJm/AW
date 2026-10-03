@@ -75,6 +75,7 @@ add_library(aw_crafting STATIC
    src/plan/RankedCut.cpp
    src/plan/RecipePrune.cpp
    src/plan/SatellitePrune.cpp
+   src/plan/StartupCut.cpp
    src/plan/SubstitutionPrune.cpp
    src/plan/TagPrune.cpp
 )

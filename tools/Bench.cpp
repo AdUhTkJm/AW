@@ -329,7 +329,7 @@ std::string label(const std::map<aw::Handle, std::string> &names, aw::ItemId ite
 void usage() {
   std::fprintf(stderr,
                "usage: aw_bench --dataset <name> --awr <path> --plan <prefix> --config <name> --out <jsonl>\n"
-               "                [--nonoptimal 0|1] [--flash 0|1] [--stage <profile>[:<label>]]...\n"
+               "                [--nonoptimal 0|1] [--flash 0|1] [--startup-cuts 0|1] [--stage <profile>[:<label>]]...\n"
                "                [--inline-tags off|pre|post|both]\n"
                "                [--reprune 0|1] [--reprune-exact 0|1] [--reprune-pack 0|1]\n"
                "                [--reprune-pack-seconds <s>]\n"
@@ -376,6 +376,9 @@ int main(int argc, char **argv) {
   aw::vector<std::pair<std::string, std::string>> stageArgs;  // profile -> label
   bool nonoptimal = true;
   bool flash = false;
+  // Eager 1- and 2-cycle startup cuts. On by default; `--startup-cuts 0`
+  // measures the rejected-solve retry path instead.
+  bool startupCuts = true;
   bool quiet = false;
   bool preprocessOnly = false;
   bool sampleWorkstations = false;
@@ -420,6 +423,10 @@ int main(int argc, char **argv) {
       std::string value;
       next(value);
       flash = value != "0";
+    } else if (arg == "--startup-cuts") {
+      std::string value;
+      next(value);
+      startupCuts = value != "0";
     } else if (arg == "--stage") {
       std::string value;
       next(value);
@@ -753,6 +760,8 @@ int main(int argc, char **argv) {
   solverOptions.relativeGap = gap;
   solverOptions.numWorkers = (int) workers;
   solverOptions.flash = flash;
+  if (!startupCuts)
+    solverOptions.maxStartupGroups = 0;
 
   // Workstation availability was resolved above, before the config header.
 
