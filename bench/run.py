@@ -313,7 +313,7 @@ def main():
                            "--config", config, "--out", target, "--names", names,
                            "--nonoptimal", "0", "--stage", "satellite:optimal",
                            "--warmup", "0", "--repeats", args.repeats,
-                           "--time-limit", args.time_limit, "--gap", args.gap,
+                           "--time-limit", args.time_limit, "--gap", "0",
                            "--workers", args.workers, "--pack-seconds", args.pack_seconds,
                            "--satellite-seconds", args.satellite_seconds] + preprocess_flags
                 code = run_logged(config, command, log, ROOT, args.dry_run)
