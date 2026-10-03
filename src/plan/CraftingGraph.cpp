@@ -1689,7 +1689,32 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
       dropUnusedItems(query.itemSeen, output, built);
   }
 
-  return assembleSubgraph(query.itemSeen, built);
+  // Escape-free satellite elimination. It has to come after the re-pruning:
+  // removing a dominated recycling recipe can be what cuts a closed island off
+  // from the needed items, so only the post-reprune graph is the one the
+  // closure has to see. A drop here removes whole recipes, so the items they
+  // were the only users of go with them.
+  Subgraph result = assembleSubgraph(query.itemSeen, built);
+  if (options.satellite.enabled) {
+    const ItemId subTarget = result.translate(CraftingGraph::itemNode(output));
+    if (subTarget != UINT32_MAX) {
+      aw::vector<uint8_t> closed(result.graph.nRecipe, 0);
+      if (computeClosedIslandPruning(result, subTarget, inventory, closed)) {
+        size_t kept = 0;
+        for (size_t i = 0; i < built.size(); i++) {
+          if (closed.size() > i && closed[i])
+            continue;
+          if (kept != i)
+            built[kept] = std::move(built[i]);
+          kept++;
+        }
+        built.resize(kept);
+        dropUnusedItems(query.itemSeen, output, built);
+        result = assembleSubgraph(query.itemSeen, built);
+      }
+    }
+  }
+  return result;
 }
 
 

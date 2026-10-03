@@ -17,6 +17,18 @@ bool computeSatellitePruning(const CraftingGraph &graph, ItemId target,
                              std::span<const Amount> inventory,
                              aw::vector<uint8_t> &drop) noexcept;
 
+// Escape-free satellite elimination, on an already assembled subgraph. Drops
+// every subgraph recipe that produces or consumes an item of the largest set of
+// items that no recipe leaks out of, excluding the target and the stock. It has
+// to run after the query-time re-pruning, which can be the step that cuts the
+// island off from the needed items.
+//
+// `target` is a subgraph item, `sourceInventory` is indexed in source node, and
+// `drop` is indexed by subgraph recipe, sized to `sub.graph.nRecipe`.
+bool computeClosedIslandPruning(const Subgraph &sub, ItemId target,
+                                std::span<const Amount> sourceInventory,
+                                aw::vector<uint8_t> &drop) noexcept;
+
 }
 
 namespace aw::detail {

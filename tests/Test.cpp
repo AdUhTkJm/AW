@@ -1102,6 +1102,34 @@ aw::vector<std::byte> buildSatelliteLeakSample() {
   return w.out;
 }
 
+// A closed island with no escape at all, which the escape enumeration cannot
+// describe. The only recipe linking the island to the needed items is a
+// dominated recycling edge, so the query-time re-pruning is what removes it and
+// leaves the island dangling. Handle 5 is a bare workbench.
+//
+//   handle 1 T <- r0 (x1, ws [5], A x1)      (the target)
+//   handle 2 A <- r1 (x1, ws [5], L x1)
+//              <- r2 (x1, ws [5], Y x10)      the recycling edge
+//   handle 3 Y <- r3 (x1, ws [5], L x10)     the island
+//   handle 4 L     (leaf)
+//
+// Inlining r3 into r2 commits the ten Y it makes, spends 10 L on one A while
+// r1 spends one, so reprune drops r2. What is left of Y is r3 alone, which only
+// makes Y, so {Y} is output-closed and dead. Y shares L with the target chain,
+// so the undirected articulation search cannot see it either.
+aw::vector<std::byte> buildClosedIslandSample() {
+  AwrWriter w;
+  w.header(5, 3);
+  w.item(1, 1);
+  w.recipe(1, {5}, {{2, 1}});
+  w.item(2, 2);
+  w.recipe(1, {5}, {{4, 1}});
+  w.recipe(1, {5}, {{3, 10}});
+  w.item(3, 1);
+  w.recipe(1, {5}, {{4, 10}});
+  return w.out;
+}
+
 aw::solver::Matrix makeMatrix(
     uint32_t rows, uint32_t cols,
     const aw::vector<aw::vector<std::pair<uint32_t, int64_t>>> &columns) {
@@ -3587,6 +3615,67 @@ void testSatelliteLeakPruning() {
   aw::options.pack.enabled = true;
 }
 
+// An island that leaks nothing at all has no escape to enumerate. It is dead
+// with the empty certificate, and the closure over the post-reprune graph finds
+// it in one linear scan.
+void testClosedIslandPruning() {
+  std::cout << "[Test] output-closed satellite elimination\n";
+  const aw::Handle all[] = {1, 2, 3, 4, 5};
+
+  aw::options.tagPruning = false;
+  aw::options.recipePruning = false;
+  aw::options.directPruning = false;
+  aw::options.substitutionPruning = false;
+  aw::options.pack.enabled = false;
+  aw::options.satellite.enabled = true;
+  // The suite disables re-pruning globally; this case needs it, because the
+  // dominant recycling edge is what reprune removes to close the island.
+  aw::options.reprune.enabled = true;
+
+  aw::registerCraftingGraph(buildClosedIslandSample());
+  expect(aw::getCraftingError() == nullptr, "closed island sample parses");
+  {
+    // L is stocked, so the plan stays feasible and the island is not hidden by
+    // an unstocked raw material.
+    aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    inventory[3] = 1000;  // handle 4, item node 3 (L)
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(!subgraphHasRecipe(sub, 2), "reprune cuts the dominated recycling edge");
+    expect(!subgraphHasRecipe(sub, 3), "the output-closed island is dropped");
+    expect(sub.graph.nRecipe == 2, "only the target route survives");
+  }
+  // The island is the only other route and is strictly worse, so the optimum
+  // must not move.
+  {
+    const aw::vector<std::byte> bytes = buildClosedIslandSample();
+    auto plan = [&](bool prune) {
+      aw::options.satellite.enabled = prune;
+      aw::registerCraftingGraph(bytes);
+      const aw::CraftingGraph &graph = aw::getCraftingGraph();
+      aw::vector<aw::Amount> inventory(graph.nItem, 0);
+      inventory[3] = 1000;
+      const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+      const aw::PlanResult r = aw::planCrafting(sub, sub.translate(0), 1, inventory);
+      int64_t total = 0;
+      for (int64_t x : r.exec)
+        total += x;
+      return std::pair<aw::PlanStatus, int64_t>(r.status, total);
+    };
+    const auto full = plan(false);
+    const auto pruned = plan(true);
+    expect(full.first == pruned.first, "closed: status agrees with and without the pass");
+    expect(full.second == pruned.second, "closed: optimum agrees with and without the pass");
+  }
+
+  aw::options.satellite.enabled = true;
+  aw::options.tagPruning = true;
+  aw::options.recipePruning = true;
+  aw::options.directPruning = true;
+  aw::options.substitutionPruning = true;
+  aw::options.pack.enabled = true;
+  aw::options.reprune.enabled = false;
+}
+
 void testSatellitePruningParity() {
   std::cout << "[Test] satellite elimination preserves the optimum\n";
 
@@ -4391,6 +4480,7 @@ int main() {
   testPackPruningParity();
   testSatellitePruning();
   testSatelliteLeakPruning();
+  testClosedIslandPruning();
   testSatellitePruningParity();
   testPlanProtocol();
   testByproducts();

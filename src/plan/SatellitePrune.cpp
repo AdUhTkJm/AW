@@ -42,6 +42,17 @@
 // rounds it to integers and re-checks the inequalities exactly, so an island is
 // dropped only on an exactly verified certificate and never on a float.
 //
+// The escape is only needed to describe a leak. An island that leaks nothing
+// at all -- every recipe touching it outputs only island items -- needs no
+// escape and no LP: any item outside the island serves as a vacuous escape,
+// because no recipe of G can produce it, so the empty certificate Y = 0 holds.
+// The largest such island is the complement of the smallest "needed" set,
+// which is closed under "a recipe that produces a needed item keeps all of its
+// items needed". That case is a single linear scan and is what
+// computeClosedIslandPruning drops; it is separate from the two passes below
+// because it runs on the assembled subgraph *after* the query-time re-pruning,
+// which can be the step that disconnects the island from the needed items.
+//
 // This is deliberately the only other file next to CpSatSolver.cpp that
 // includes OR-Tools, so it is exempt from -fno-exceptions -fno-rtti; the
 // exported entry point is noexcept and swallows every exception itself.
@@ -1104,6 +1115,94 @@ bool run(const CraftingGraph& graph, ItemId target, std::span<const uint8_t> ite
 }
 
 }  // namespace
+
+// Drops every recipe of an assembled subgraph that produces or consumes an item
+// of the largest output-closed island, excluding the target and the stock. See
+// the file comment for why this is a separate, escape-free case.
+//
+// `target` is a subgraph item -- translate the source target first -- and
+// `sourceInventory` is indexed in source node, exactly like the inventory of
+// `computeSatellitePruning`. `drop` is indexed by subgraph recipe and must be
+// sized to `sub.graph.nRecipe`.
+bool computeClosedIslandPruning(const Subgraph& sub, ItemId target,
+                                std::span<const Amount> sourceInventory,
+                                aw::vector<uint8_t> &drop) noexcept {
+  const BaseCraftingGraph& graph = sub.graph;
+  const uint nItem = graph.nItem;
+  if (target >= nItem || drop.size() != graph.nRecipe)
+    return false;
+
+  static const bool debug = std::getenv("AW_SATELLITE_DEBUG") != nullptr;
+  verbose = debug;
+
+  // Stock of a subgraph item, read through the source remapping.
+  const auto held = [&](ItemId item) noexcept -> Amount {
+    const ItemId source = sub.itemOrigin[item];
+    return source < sourceInventory.size() ? sourceInventory[source] : 0;
+  };
+
+  // B: the smallest set of items the plan cannot do without. Seeded with the
+  // target and every stocked item, then closed over the producers.
+  aw::vector<uint8_t> needed(nItem, 0);
+  aw::vector<ItemId> pending;
+  pending.reserve(nItem);
+  const auto seed = [&](ItemId item) noexcept {
+    if (!needed[item]) {
+      needed[item] = 1;
+      pending.push_back_unchecked(item);
+    }
+  };
+  seed(target);
+  for (ItemId item = 0; item < nItem; item++)
+    if (held(item) != 0)
+      seed(item);
+  for (size_t q = 0; q < pending.size(); q++) {
+    const ItemId item = pending[q];
+    // Every output is part of "all of the recipe's items": a byproduct pulled
+    // in here is what turns into a dead-end island, and the dependency graph's
+    // `x -> inputs of a producer of x` would miss it.
+    for (RecipeId r : graph.producersOf(item)) {
+      for (ItemId out : graph.outputsOf(r))
+        seed(out);
+      for (ItemId in : graph.inputsOf(r))
+        seed(in);
+    }
+  }
+
+  const auto inIsland = [&](ItemId item) noexcept { return needed[item] == 0; };
+  const auto touches = [&](RecipeId r) noexcept {
+    for (ItemId out : graph.outputsOf(r))
+      if (inIsland(out))
+        return true;
+    for (ItemId in : graph.inputsOf(r))
+      if (inIsland(in))
+        return true;
+    return false;
+  };
+
+  // The closure guarantees this, but never drop on a surprise: a touching
+  // recipe that outputs something outside the island would break the lemma, so
+  // a violation drops nothing at all.
+  for (RecipeId r = 0; r < graph.nRecipe; r++) {
+    if (!touches(r))
+      continue;
+    for (ItemId out : graph.outputsOf(r))
+      if (!inIsland(out))
+        return false;
+  }
+
+  uint32_t dropped = 0;
+  for (RecipeId r = 0; r < graph.nRecipe; r++) {
+    if (!touches(r))
+      continue;
+    drop[r] = 1;
+    dropped++;
+  }
+  if (verbose && dropped != 0)
+    std::fprintf(stderr, "[satellite/closed] dropped=%u of %u recipes\n",
+                 (unsigned) dropped, (unsigned) graph.nRecipe);
+  return dropped != 0;
+}
 
 bool computeSatellitePruning(const CraftingGraph& graph, ItemId target,
                              std::span<const uint8_t> itemSeen,
