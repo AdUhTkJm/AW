@@ -227,6 +227,10 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
   // hint.
   aw::vector<int64_t> greedy = greedyDagPlan(sub, target, amount, invSrc);
   solver::Options solveOptions = options;
+  // The process-wide switch is the one the tools and the mod flip, so it is the
+  // source of truth; the per-solve copy is what the retry loop below can clear
+  // once a plan has been rejected.
+  solveOptions.flash = solveOptions.flash || aw::options.flash;
 
   // Startup cuts need the physical stock per row, and they are the only reason
   // a solve ever needs it, so it is filled on demand. See
@@ -252,18 +256,24 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
       greedyCost += (aw::int128) objective[r] * greedy[r];
     greedyUsable = greedyCost > 0 && greedyCost <= (aw::int128) INT64_MAX;
   }
-  if (greedyUsable) {
-    if (aw::options.flash) {
+  if (greedyUsable && solveOptions.flash) {
+    // A hit is the whole answer in flash mode: the greedy plan is acyclic, so
+    // the fireability check only ever confirms it. A plan that cannot be fired
+    // is not an answer, though, so a rejected one is dropped rather than
+    // returned, and the solver gets to look for a startable plan.
+    // `greedyUsable` also gates the warm start, the objective upper bound and
+    // the fallback below, so clearing it keeps the rejected vector out of all
+    // three.
+    if (planIsFireable(sub, invSrc,
+                       std::span<const int64_t>(greedy.data(), greedy.size()))) {
       result.status = PlanStatus::OK;
       result.provenOptimal = false;
       result.exec = std::move(greedy);
-      // The greedy plan is acyclic, so this only ever confirms it; it is kept
-      // so every returned plan passes the same check.
-      if (!planIsFireable(sub, invSrc,
-                          std::span<const int64_t>(result.exec.data(), result.exec.size())))
-        result.status = PlanStatus::CYCLE_UNFULFILLED;
       return result;
     }
+    greedyUsable = false;
+  }
+  if (greedyUsable) {
     if (greedyCost <= (aw::int128) costLowerBound(A, rhs, objective) * GREEDY_QUALITY_FACTOR) {
       solveOptions.objectiveUpperBound = (int64_t) greedyCost;
       solveOptions.solutionHint = std::span<const int64_t>(greedy.data(), greedy.size());
@@ -381,6 +391,15 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
       adoptGreedyFallback();
       return result;
     }
+
+    // The plan just rejected was the first balance-feasible one, not a cheap
+    // one, and it was not startable. Asking for "the first feasible plan"
+    // again would only risk another unstartable cycle, so the remaining
+    // retries optimize: an optimum is far more likely to come with a firing
+    // sequence. This is what keeps flash from answering CYCLE_UNFULFILLED on
+    // instances the optimizing solve answers with the same subgraph and the
+    // same budget.
+    solveOptions.flash = false;
 
     // Post one entry group over the whole deadlocked component, not one group
     // per recipe. Grouping is what makes the cut bite: the group's own members

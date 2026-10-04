@@ -103,6 +103,18 @@ struct Options {
   // retry off, which is the behaviour before no-goods existed.
   int maxCycleRetries = 3;
 
+  // Return the first balance-feasible plan instead of a cheap one.
+  //
+  // This is the per-solve copy of the process-wide `aw::options.flash`;
+  // `planCrafting` sets it from that switch and may clear it again. A first
+  // incumbent is only useful while it is startable, so once the fireability
+  // check rejects one, the retries run this flag off: the heuristic that put
+  // the rejected plan there has failed, and an optimized incumbent is far more
+  // likely to be realizable. Leaving it set is what made flash return
+  // CYCLE_UNFULFILLED on instances the optimizing solve answers. See
+  // docs/algorithm.typ, "启动可达性".
+  bool flash = false;
+
   // Startup entry cuts.
   //
   // The balance model can return a plan whose cycle has no seed: an

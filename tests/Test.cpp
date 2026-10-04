@@ -167,6 +167,29 @@ aw::vector<std::byte> buildByproductSeedSample() {
   return w.out;
 }
 
+// A sibling family whose tag is the way back in:
+//
+//   item 1 (A) <- r0 (x1, workstations [1], byproduct item 2 (B) x1, input item 3 (T) x1)
+//   item 2 (B) <- r2 (x1, workstations [1], no inputs)
+//   item 3 (T) <- r1 (x1, cost 0, input item 2 (B) x1)
+//
+// Handles 1..2 are real and item 3 is the synthetic tag, so r1 is a tag edge.
+// B is reached twice: as r0's byproduct and as r1's input. Only the second
+// visit may expand it, and only then is r2 -- the free producer that seeds the
+// whole family -- part of the subgraph. Dropping it leaves a cycle that no
+// stock can start, which the seed filter turns into a false INFEASIBLE.
+aw::vector<std::byte> buildByproductRecycleSample() {
+  AwrWriter w;
+  w.header(2, 3);
+  w.item(1, 1);
+  w.recipe(1, {1}, {{2, 1}}, {{3, 1}});
+  w.item(2, 1);
+  w.recipe(1, {1}, {}, {});
+  w.item(3, 1);
+  w.recipe(1, {}, {}, {{2, 1}});
+  return w.out;
+}
+
 // A two item cycle that only balances when the second recipe produces twice
 // what it eats. With no inventory the only feasible plan is 2*a of r0 and a of
 // r1, for 3*a total executions.
@@ -1309,6 +1332,10 @@ void testReducedCostFixing() {
 void testFlash() {
   std::cout << "[Test] flash mode\n";
 
+  // The solver reads its own `flash` switch; `planCrafting` copies the
+  // process-wide `aw::options.flash` into it and clears it again once a plan
+  // has been rejected, so these direct `solve` calls set it on the options.
+
   // min x0 + x1  s.t.  x0 + 2 x1 >= 4, x0 >= 1.  The optimum is 3. Flash may
   // return any feasible point, so assert feasibility and a sound objective
   // floor rather than the exact cost.
@@ -1317,14 +1344,13 @@ void testFlash() {
     const aw::vector<int64_t> b = {4, 1};
     const aw::vector<int64_t> c = {1, 1};
     aw::solver::Options options;
-    aw::options.flash = true;
+    options.flash = true;
     const aw::solver::Result r = aw::solver::solve(A, b, c, options);
     expect(r.status == aw::PlanStatus::OK, "flash returns a plan");
     expect(r.x.size() == 2 && r.x[0] + 2 * r.x[1] >= 4 && r.x[0] >= 1,
            "the flash plan is feasible");
     expect(r.objective == r.x[0] + r.x[1] && r.objective >= 3,
            "the flash objective matches the plan and is at least the optimum");
-    aw::options.flash = false;
   }
 
   // A cap below the requirement still has to be grown: the cap bounds the
@@ -1335,12 +1361,11 @@ void testFlash() {
     const aw::vector<int64_t> b = {5};
     const aw::vector<int64_t> c = {1};
     aw::solver::Options options;
-    aw::options.flash = true;
+    options.flash = true;
     options.objectiveCap = 1;
     const aw::solver::Result r = aw::solver::solve(A, b, c, options);
     expect(r.status == aw::PlanStatus::OK && r.objective >= 5,
            "flash grows a binding cap until the plan fits");
-    aw::options.flash = false;
   }
 
   // Reduced-cost fixing is an optimality proof accelerator, so flash skips it:
@@ -1351,11 +1376,24 @@ void testFlash() {
     const aw::vector<int64_t> c = {1, 1};
     aw::solver::Options options;
     options.reducedCostGap = 0.5;
-    aw::options.flash = true;
+    options.flash = true;
     const aw::solver::Result r = aw::solver::solve(A, b, c, options);
     expect(r.status == aw::PlanStatus::OK && r.fixedColumns == 0,
            "flash skips reduced-cost fixing");
-    aw::options.flash = false;
+  }
+
+  // Clearing the switch is enough to optimize again on the same model: this is
+  // what `planCrafting` does for the retries after a rejected plan.
+  {
+    const aw::solver::Matrix A = makeMatrix(1, 2, {{{0, 2}}, {}});
+    const aw::vector<int64_t> b = {7};
+    const aw::vector<int64_t> c = {1, 1};
+    aw::solver::Options options;
+    options.reducedCostGap = 0.5;
+    options.flash = false;
+    const aw::solver::Result r = aw::solver::solve(A, b, c, options);
+    expect(r.status == aw::PlanStatus::OK && r.fixedColumns > 0,
+           "with flash off the reduced-cost probe runs again");
   }
 }
 
@@ -4222,6 +4260,33 @@ void testByproducts() {
     for (const DecodedUse& use : chainDecoded.uses)
       total += use.count;
     expect(total == 2, "the chain costs two executions");
+  }
+  // A byproduct that feeds back into the tag its own recipe consumes. The walk
+  // has to expand B because r1 consumes it, even though r0 already produced it
+  // as a byproduct: the subgraph then holds the free producer r2, and the
+  // instance is a plain cost-2 plan instead of an unstartable cycle.
+  aw::registerCraftingGraph(buildByproductRecycleSample());
+  expect(aw::getCraftingError() == nullptr, "the recycling family parses");
+  {
+    const aw::Handle recycleAll[] = {1, 2};
+    const aw::Subgraph recycleSub = aw::reachableSubgraph(1, recycleAll);
+    expect(recycleSub.graph.nItem == 3 && recycleSub.graph.nRecipe == 3,
+           "a byproduct a tag edge consumes still expands its own producers");
+    expect(recycleSub.graph.nItem == 1 || recycleSub.graph.nRecipe != 0,
+           "the recycling family keeps a seed");
+  }
+  error.clear();
+  const auto recycle = aw::planBlob(encodePlanRequest(1, 1, {1, 2}, {}), error);
+  expect(error.empty(), "the recycling request is accepted");
+  const DecodedResponse recycleDecoded = decodePlanResponse(recycle);
+  expect(recycleDecoded.ok && recycleDecoded.status == (int) aw::PlanStatus::OK,
+         "the recycling family is feasible from an empty inventory");
+  if (recycleDecoded.ok && recycleDecoded.status == (int) aw::PlanStatus::OK) {
+    expect(recycleDecoded.uses.size() == 3, "all three recipes are executed");
+    long recycleTotal = 0;
+    for (const DecodedUse& use : recycleDecoded.uses)
+      recycleTotal += use.count;
+    expect(recycleTotal == 3, "two paid executions and the free tag edge");
   }
 }
 

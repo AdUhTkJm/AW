@@ -1009,6 +1009,12 @@ struct ReachQuery {
   // Workstation availability as a bitset (in fact a byteset).
   aw::vector<uint8_t> allowed;
   aw::vector<uint8_t> itemSeen;
+  // `expanded` is disjoint from `itemSeen` on purpose: an item is put in the
+  // subgraph as soon as it is any walked recipe's output, but its producers
+  // are only visited once some walked recipe *consumes* it. Keeping the two
+  // facts apart is what makes a byproduct that a later recipe needs pull in
+  // its own producers. See walk().
+  aw::vector<uint8_t> expanded;
   aw::vector<uint8_t> recipeSeen;
   aw::vector<uint8_t> disabled;
   aw::vector<ItemId> queue;
@@ -1016,8 +1022,8 @@ struct ReachQuery {
   ReachQuery(Handle output, std::span<const Handle> workstations,
              std::span<const Amount> inventory) noexcept
       : output(output), inventory(inventory), allowed(graph.nItem, 0),
-        itemSeen(graph.nItem, 0), recipeSeen(graph.nRecipe, 0),
-        disabled(graph.nRecipe, 0) {
+        itemSeen(graph.nItem, 0), expanded(graph.nItem, 0),
+        recipeSeen(graph.nRecipe, 0), disabled(graph.nRecipe, 0) {
     for (Handle handle : workstations) {
       if (handle >= 1 && handle <= graph.nItem)
         allowed[handle - 1] = 1;
@@ -1093,14 +1099,17 @@ struct ReachQuery {
     return false;
   }
 
-  // Ordinary BFS from the target.
+  // Ordinary BFS from the target. Every item is expanded at most once, so the
+  // walk is O(V + E) per pass.
   void walk() noexcept {
     std::fill(itemSeen.begin(), itemSeen.end(), 0);
+    std::fill(expanded.begin(), expanded.end(), 0);
     std::fill(recipeSeen.begin(), recipeSeen.end(), 0);
     queue.clear();
 
     const ItemId start = CraftingGraph::itemNode(output);
     itemSeen[start] = 1;
+    expanded[start] = 1;
     queue.push_back_unchecked(start);
 
     for (size_t q = 0; q < queue.size(); q++) {
@@ -1118,14 +1127,22 @@ struct ReachQuery {
           continue;
 
         recipeSeen[recipe] = 1;
-        // A recipe reached through one of its byproducts still outputs its
-        // anchor. Put every output row in the subgraph, but do not enqueue it:
-        // a surplus output must not pull in its other producers.
+        // Every output row of a walked recipe belongs to the subgraph, but an
+        // output is only *expanded* -- its own producers visited -- when a
+        // walked recipe consumes it: a surplus output must not pull in its
+        // other producers by itself.
         for (ItemId out : graph.outputsOf(recipe))
           itemSeen[out] = 1;
         for (ItemId input : graph.inputsOf(recipe)) {
-          if (!itemSeen[input]) {
-            itemSeen[input] = 1;
+          // Consumed, so its producers matter, however it first got here. A
+          // byproduct of one walked recipe is a legitimate input of another
+          // (think of a recipe that returns every sibling variant), and not
+          // expanding it hides the only route that can seed it: the subgraph
+          // then holds an unstartable cycle, which `pruneSeedUnreachable` and
+          // the fireability check turn into a false INFEASIBLE.
+          itemSeen[input] = 1;
+          if (!expanded[input]) {
+            expanded[input] = 1;
             queue.push_back_unchecked(input);
           }
         }
