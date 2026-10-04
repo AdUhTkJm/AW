@@ -291,8 +291,7 @@ def main():
                       and r.get("status") in ANSWERED]
         disagreements = [(r, t) for (r, t) in conclusive
                          if bool(r.get("feasible")) != bool(t.get("feasible"))]
-        false_negative = [(r, t) for (r, t) in disagreements if not r.get("feasible")]
-        false_positive_vs_truth = [(r, t) for (r, t) in disagreements if r.get("feasible")]
+        better = [(r, t) for (r, t) in disagreements if r.get("feasible") and r.get("balance_ok")]
         ratios = []
         for r in feasible:
             reference = truth.get((r["dataset"], r["target"], r["amount"], r["stock"],
@@ -324,11 +323,10 @@ def main():
             "timeout": sum(1 for r in items if r.get("timeout")),
             "gap_%s" % tag: aggregate(gaps, mode),
             "no_answer": len(items) - len(answered),
-            "false_positive": len(false_positives),
+            "better": len(better),
             "vs_truth_compared": len(conclusive),
             "vs_truth_agree": len(conclusive) - len(disagreements),
-            "vs_truth_false_positive": len(false_positive_vs_truth),
-            "vs_truth_false_negative": len(false_negative),
+            "false_positive": len(false_positives),
             "preprocess_ms": preprocess.get((dataset, config)),
             "parse_ms": parse.get((dataset, config)),
             "plan_ms_%s" % tag: aggregate(plan_times, mode),
@@ -348,9 +346,6 @@ def main():
         writer.writeheader()
         for row in summary_rows:
             writer.writerow(row)
-
-    with open(prefix + ".md", "w", encoding="utf-8") as handle:
-        write_markdown(handle, summary_rows, tag, args.group_inventory)
 
     render(summary_rows, tag, args.group_inventory)
     print()
@@ -378,67 +373,25 @@ def render(summary_rows, tag, group_inventory):
         by_dataset[row["dataset"]].append(row)
     for dataset in sorted(by_dataset):
         print()
-        print("== %s ==" % dataset)
-        print("  optimality: prov=proven optimal, unprov=plan without a proof (AW gap / TB"
-              " budget cut),")
-        print("              uncl=engine has no optimality notion, noans=no answer at all"
-              " (not merely unproven)")
-        print("  aggregation: %s" % tag)
+        print("== %s == [%s]" % (dataset, tag))
         for stock, rows in stock_chunks(by_dataset[dataset], group_inventory):
             if stock is not None:
                 print()
                 print("  -- inventory: %s --" % stock)
-            print("%-11s %-12s %4s %5s %6s %6s %6s %5s %4s %7s %7s %8s %9s %7s %8s %7s %8s"
+            print("%-11s %-12s %4s %5s %6s %6s %6s %5s %4s %11s %5s %4s %8s %9s %7s %8s %7s %8s"
                   % ("config", "stage", "n", "feas", "prov", "unprov", "uncl", "noans", "tout",
-                     "vs_ok", "fp_vs", "gap", "cost_rat", "pre_ms", "plan_ms", "items",
+                     "opt_agree", "fp", "more", "gap", "cost_rat", "pre_ms", "plan_ms", "items",
                      "recipes"))
             for row in sorted(rows, key=summary_sort_key):
-                print("%-11s %-12s %4d %5d %6d %6d %6d %5d %4d %7s %7d %8s %9s %7s %8s %7s %8s"
+                print("%-11s %-12s %4d %5d %6d %6d %6d %5d %4d %11s %5d %4d %8s %9s %7s %8s %7s %8s"
                       % (row["config"], row["stage"], row["queries"], row["feasible"],
                          row["proven"], row["unproven"], row["unclaimed"], row["no_answer"],
                          row["timeout"],
                          "%d/%d" % (row["vs_truth_agree"], row["vs_truth_compared"]),
-                         row["vs_truth_false_positive"],
+                         row["false_positive"], row["better"],
                          fmt(row[gap_key], 4), fmt(row[cost_key], 3),
                          fmt(row["preprocess_ms"]), fmt(row[plan_key]),
                          fmt(row[items_key], 0), fmt(row[recipes_key], 0)))
-
-
-def write_markdown(handle, summary_rows, tag, group_inventory):
-    gap_key = "gap_%s" % tag
-    cost_key = "cost_ratio_%s" % tag
-    plan_key = "plan_ms_%s" % tag
-    items_key = "items_%s" % tag
-    recipes_key = "recipes_%s" % tag
-    by_dataset = collections.defaultdict(list)
-    for row in summary_rows:
-        by_dataset[row["dataset"]].append(row)
-    for dataset in sorted(by_dataset):
-        handle.write("## %s\n\n" % dataset)
-        handle.write("`prov` = proven optimal, `unprov` = real plan without a proof (AW gap, "
-                     "TB budget cut), "
-                     "`uncl` = engine has no optimality notion, `noans` = no answer at all.\n\n")
-        handle.write("Aggregation: `%s`.\n\n" % tag)
-        for stock, rows in stock_chunks(by_dataset[dataset], group_inventory):
-            if stock is not None:
-                handle.write("### Inventory: %s\n\n" % stock)
-            handle.write("| config | stage | n | feasible | prov | unprov | uncl | noans | timeout | "
-                         "false-pos | vs truth | FP vs truth | FN vs truth | gap | cost ratio | "
-                         "preprocess ms | plan ms | items | recipes |\n")
-            handle.write("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
-                         "---:|---:|---:|---:|\n")
-            for row in sorted(rows, key=summary_sort_key):
-                handle.write("| %s | %s | %d | %d | %d | %d | %d | %d | %d | %d | %d/%d | %d | %d | %s | %s | %s | %s | %s | %s |\n"
-                             % (row["config"], row["stage"], row["queries"], row["feasible"],
-                                row["proven"], row["unproven"], row["unclaimed"], row["no_answer"],
-                                row["timeout"], row["false_positive"],
-                                row["vs_truth_agree"], row["vs_truth_compared"],
-                                row["vs_truth_false_positive"], row["vs_truth_false_negative"],
-                                fmt(row[gap_key], 4), fmt(row[cost_key], 3),
-                                fmt(row["preprocess_ms"]), fmt(row[plan_key]),
-                                fmt(row[items_key], 0), fmt(row[recipes_key], 0)))
-            handle.write("\n")
-
 
 if __name__ == "__main__":
     main()
