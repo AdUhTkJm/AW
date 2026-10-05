@@ -279,6 +279,7 @@ void computeDirectDominancePruning(CraftingGraph &graph,
 
   aw::vector<uint32_t> recs;
   aw::vector<Amount> outAmt;
+  aw::vector<uint8_t> selfConsuming;
   aw::vector<aw::vector<uint32_t>> adj;
   aw::vector<uint> adjOffsets;
   aw::vector<uint32_t> adjTargets;
@@ -308,6 +309,26 @@ void computeDirectDominancePruning(CraftingGraph &graph,
     }
     const uint k = (uint) recs.size();
 
+    // A sibling that consumes X itself can only run once X is already
+    // available, so it is not a replacement for another producer of X:
+    // dropping that producer can cut the only grounded route to X and leave
+    // the sibling stranded behind a cycle. Such a sibling is never offered as
+    // a dominator (it can still be dominated by a grounded one). This mirrors
+    // the composite pass; without it the direct pass can strand X, and
+    // `pruneSeedUnreachable` then removes the stranded dominator and reports a
+    // false INFEASIBLE. It is a cheap one-step guard and does not catch longer
+    // cycles back to X.
+    selfConsuming.assign(k, 0);
+    for (uint j = 0; j < k; j++) {
+      const auto ins = graph.inputsOf(recs[j]);
+      const auto amts = graph.inputAmountsOf(recs[j]);
+      for (size_t a = 0; a < ins.size(); a++)
+        if (ins[a] == X && amts[a] > 0) {
+          selfConsuming[j] = 1;
+          break;
+        }
+    }
+
     // adj[i] holds every sibling j whose column dominates i's, so the sink SCC
     // representatives are the maximal columns.
     adj.assign(k, {});
@@ -332,18 +353,18 @@ void computeDirectDominancePruning(CraftingGraph &graph,
           //
           // One execution of j stands in for one of i, so it must not cost
           // more; with a uniform cost both flags are always true.
-          if (iLeJ && !jLeI && graph.cost[j] <= graph.cost[i])
+          if (iLeJ && !jLeI && graph.cost[j] <= graph.cost[i] && !selfConsuming[j])
             adj[i].push_back(j);
-          if (jLeI && !iLeJ && graph.cost[i] <= graph.cost[j])
+          if (jLeI && !iLeJ && graph.cost[i] <= graph.cost[j] && !selfConsuming[i])
             adj[j].push_back(i);
         } else {
           // out_i <= out_j is necessary for v_i <= v_j, so it skips most pairs
           // when the outputs differ; it is not sufficient on its own.
           if (graph.cost[j] <= graph.cost[i] && outAmt[i] <= outAmt[j] &&
-              leVector(ii, ic, ji, jc))
+              leVector(ii, ic, ji, jc) && !selfConsuming[j])
             adj[i].push_back(j);
           if (graph.cost[i] <= graph.cost[j] && outAmt[j] <= outAmt[i] &&
-              leVector(ji, jc, ii, ic))
+              leVector(ji, jc, ii, ic) && !selfConsuming[i])
             adj[j].push_back(i);
         }
       }

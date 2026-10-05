@@ -338,6 +338,7 @@ void usage() {
                "                [--time-limit 40] [--gap 0.01] [--workers 16]\n"
                "                [--pack-seconds 60] [--satellite-seconds 2]\n"
                "                [--names <path>] [--quiet] [--preprocess-only]\n"
+               "                [--trace-attempts]\n"
                "                [--ws-percent 0..100] [--ws-seed <n>]\n"
                "\n"
                "--preprocess-only registers the graph and writes the config header and the\n"
@@ -381,6 +382,9 @@ int main(int argc, char **argv) {
   bool startupCuts = true;
   bool quiet = false;
   bool preprocessOnly = false;
+  // Emit the per-attempt objective-cap trajectory on every query row. Off by
+  // default: it is small but not free, and only the ablation needs it.
+  bool traceAttempts = false;
   bool sampleWorkstations = false;
   aw::TagInlineMode inlineMode = aw::TagInlineMode::OFF;
   bool singleMemberInline = true;
@@ -487,6 +491,7 @@ int main(int argc, char **argv) {
     }
     else if (arg == "--quiet") quiet = true;
     else if (arg == "--preprocess-only") preprocessOnly = true;
+    else if (arg == "--trace-attempts") traceAttempts = true;
     else if (arg == "-h" || arg == "--help") { usage(); return EXIT_SUCCESS; }
     else { std::fprintf(stderr, "unknown argument: %s\n", arg.c_str()); usage(); return EXIT_FAILURE; }
   }
@@ -675,6 +680,7 @@ int main(int argc, char **argv) {
         .num("ws_sampled_count", (long long) wsSample.sampled)
         .num("ws_total", (long long) wsSample.total)
         .boolean("preprocess_only", preprocessOnly);
+    json.boolean("trace_attempts", traceAttempts);
     const char *inlineText = inlineMode == aw::TagInlineMode::PRE_PRUNE ? "pre"
                              : inlineMode == aw::TagInlineMode::QUERY_TIME ? "post"
                              : inlineMode == aw::TagInlineMode::BOTH       ? "both"
@@ -920,7 +926,33 @@ int main(int argc, char **argv) {
                 .num("distinct_recipes", distinct)
                 .num("conflicts", plan.numConflicts)
                 .num("branches", plan.numBranches)
-                .num("fixed_columns", (long long) plan.fixedColumns);
+                .num("fixed_columns", (long long) plan.fixedColumns)
+                // Solution-finding diagnostics. `lp_ms` and `probe_ms` are
+                // spent outside the solver's wall-clock budget, so the true
+                // cost of a row is `lp_ms + probe_ms + solve_ms`.
+                .real("lp_ms", plan.lpMs)
+                .real("probe_ms", plan.probeMs)
+                .num("cap_attempts", plan.capAttempts)
+                .real("deterministic_time", plan.deterministicTime)
+                .real("first_feasible_ms", plan.firstFeasibleMs)
+                .real("proven_ms", plan.provenMs)
+                .num("solver_retries", plan.solverRetries);
+            if (traceAttempts) {
+              // [cap, budget_s, status, objective, elapsed_ms] per CP-SAT solve.
+              std::string trace = "[";
+              for (size_t k = 0; k < plan.attemptTrace.size(); k++) {
+                if (k != 0) trace += ",";
+                const aw::solver::CapAttempt &attempt = plan.attemptTrace[k];
+                char buffer[160];
+                std::snprintf(buffer, sizeof(buffer), "[%lld,%.3f,%d,%lld,%.3f]",
+                              (long long) attempt.cap, attempt.budgetSeconds,
+                              (int) attempt.status, (long long) attempt.objective,
+                              attempt.elapsedMs);
+                trace += buffer;
+              }
+              trace += "]";
+              json.raw("attempts", trace);
+            }
 
             std::string missingJson = "[";
             const size_t shown = std::min(missing.size(), missingCap);

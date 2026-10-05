@@ -226,6 +226,8 @@ def main():
             "cold", "status", "optimality", "has_plan", "no_answer", "feasible", "balance_ok",
             "false_positive", "cost", "missing_count", "gap", "bound",
             "plan_ms", "items", "recipes", "items_processed", "conflicts", "branches",
+            "lp_ms", "probe_ms", "cap_attempts", "deterministic_time",
+            "first_feasible_ms", "proven_ms", "solver_retries",
             "truth_status", "truth_feasible", "truth_cost", "truth_proven",
             "agrees_with_truth", "cost_ratio_vs_truth"])
         for row in sorted(queries, key=lambda r: (r["dataset"], r["config"],
@@ -256,6 +258,10 @@ def main():
                 "%.3f" % plan_ms_of(row),
                 row.get("items", 0), row.get("recipes", 0), row.get("items_processed", 0),
                 row.get("conflicts", 0), row.get("branches", 0),
+                row.get("lp_ms"), row.get("probe_ms"),
+                row.get("cap_attempts"), row.get("deterministic_time"),
+                row.get("first_feasible_ms"), row.get("proven_ms"),
+                row.get("solver_retries"),
                 truth_status, truth_feasible, reference.get("cost") if reference else None,
                 truth_proven, agrees,
                 "%.4f" % ratio if ratio is not None else ""])
@@ -305,6 +311,14 @@ def main():
         recipe_counts = [r.get("recipes", 0) for r in items]
         conflict_counts = [r.get("conflicts", 0) for r in items]
         branch_counts = [r.get("branches", 0) for r in items]
+        # Solution-finding times. Only rows that reached the milestone have a
+        # value, so the median is over the rows that did, and the complement is
+        # reported as a count. See tools/Bench.cpp.
+        first_feasible_times = [r["first_feasible_ms"] for r in items
+                                if r.get("first_feasible_ms") is not None
+                                and r["first_feasible_ms"] >= 0]
+        proven_times = [r["proven_ms"] for r in items
+                        if r.get("proven_ms") is not None and r["proven_ms"] >= 0]
         summary_rows.append({
             "dataset": dataset,
             "config": config,
@@ -335,6 +349,13 @@ def main():
             "recipes_%s" % tag: aggregate(recipe_counts, mode),
             "conflicts_%s" % tag: aggregate(conflict_counts, mode),
             "branches_%s" % tag: aggregate(branch_counts, mode),
+            "first_feasible_%s" % tag: aggregate(first_feasible_times, mode),
+            "proven_ms_%s" % tag: aggregate(proven_times, mode),
+            "never_feasible": sum(1 for r in items
+                                  if r.get("first_feasible_ms") is not None
+                                  and r["first_feasible_ms"] < 0),
+            "never_proven": sum(1 for r in items
+                                if r.get("proven_ms") is not None and r["proven_ms"] < 0),
             "cost_ratio_%s" % tag: aggregate(ratios, mode),
         })
 

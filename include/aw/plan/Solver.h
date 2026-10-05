@@ -239,6 +239,16 @@ struct Options {
   std::span<const int64_t> stock;
 };
 
+// One CP-SAT solve of the objective-cap search. A trivially copyable aggregate
+// so it can live in an `aw::vector`; see `Result::attemptTrace`.
+struct CapAttempt {
+  int64_t cap;             // objective cap this attempt was solved under
+  double budgetSeconds;    // <= 0 means unlimited
+  int32_t status;          // PlanStatus as an int
+  int64_t objective;       // 0 when the attempt returned no feasible plan
+  double elapsedMs;        // wall-clock since `solve()` started
+};
+
 struct Result {
   PlanStatus status = PlanStatus::INVALID_INPUT;
 
@@ -258,6 +268,36 @@ struct Result {
   // pass did not run or removed nothing. The returned `x` is always full
   // length, with zeros at the fixed columns.
   uint32_t fixedColumns = 0;
+
+  // --- solution-finding diagnostics -------------------------------------
+  //
+  // Wall-clock milliseconds spent in the LP relaxation and in the reduced-cost
+  // probe. Both run *outside* `Options::maxTimeSeconds`, so a query's true cost
+  // is `lpMs + probeMs + solveMs`, and on an unpruned graph the LP can dominate.
+  double lpMs = 0.0;
+  double probeMs = 0.0;
+
+  // Number of CP-SAT solves summarized here: the cap-growth attempts plus the
+  // probe and the reduced solve. > 1 means the objective cap bound and grew.
+  int64_t capAttempts = 0;
+
+  // CP-SAT's own deterministic-work counter, summed over attempts. Stable
+  // across machines (unlike wall-clock), so a capped row stays comparable.
+  double deterministicTime = 0.0;
+
+  // Wall-clock milliseconds from the start of `solve()` to the first feasible
+  // plan and to the incumbent that was returned. -1 when never reached. On a
+  // capped row these are the interesting numbers: they say how long the solver
+  // worked *before* the cutoff, which `solveMs` alone does not.
+  double firstFeasibleMs = -1.0;
+  double bestMs = -1.0;
+
+  // Starting objective cap (after the LP/lower-bound derivation).
+  int64_t initialCap = 0;
+
+  // Per-attempt trajectory: cap, budget, status, objective and the elapsed
+  // wall-clock at which each attempt finished. Serialized by the harness.
+  aw::vector<CapAttempt> attemptTrace;
 };
 
 // `b` has `A.rows` entries, `c` has `A.cols` entries. Negative entries in `b`

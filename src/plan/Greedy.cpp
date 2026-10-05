@@ -352,6 +352,38 @@ aw::int128 executionCost(const BaseCraftingGraph &g, std::span<const int64_t> ex
   return cost;
 }
 
+// Verify the exact balance the solver will be handed: `exec` must cover the
+// requested amount of `target` plus every other item's stock deficit. Every
+// output row counts, anchor and byproduct alike, so the check matches the
+// matrix `planCrafting` builds. The sweeps rank routes with an optimistic
+// capacity bound (`cap(x) = stock(x) + max_r producible(r)`), so a route they
+// accept is not guaranteed to cover the demand; an unbalanced vector here can
+// cost less than the true optimum and must never become the objective cap.
+bool satisfiesBalance(const BaseCraftingGraph &g, const aw::vector<int64_t> &exec,
+                      std::span<const Amount> stock, ItemId target, Amount amount) noexcept {
+  aw::vector<aw::int128> balance(g.nItem, 0);
+  for (uint32_t recipe = 0; recipe < g.nRecipe; recipe++) {
+    const int64_t times = exec[recipe];
+    if (times == 0)
+      continue;
+    const auto outs = g.outputsOf(recipe);
+    const auto outAmts = g.outputAmountsOf(recipe);
+    for (size_t k = 0; k < outs.size(); k++)
+      balance[outs[k]] += (aw::int128) outAmts[k] * (aw::int128) times;
+    const auto inputs = g.inputsOf(recipe);
+    const auto weights = g.inputAmountsOf(recipe);
+    for (size_t k = 0; k < inputs.size(); k++)
+      balance[inputs[k]] -= (aw::int128) weights[k] * (aw::int128) times;
+  }
+  for (uint32_t item = 0; item < g.nItem; item++) {
+    const aw::int128 required =
+        item == target ? (aw::int128) amount : -(aw::int128) stock[item];
+    if (balance[item] < required)
+      return false;
+  }
+  return true;
+}
+
 // The cheapest balance-checked plan seen so far. Every candidate is a complete
 // firing vector over the same subgraph, so their costs are comparable even when
 // they come from different acyclic views.
@@ -372,6 +404,10 @@ struct BestPlan {
 
 void BestPlan::consider(aw::vector<int64_t> &&candidate) noexcept {
   if (candidate.empty())
+    return;
+  // An unbalanced candidate is not a plan: reject it instead of recording it,
+  // so a later view still gets the chance to supply a balanced one.
+  if (!satisfiesBalance(g, candidate, stock, target, amount))
     return;
   const aw::int128 candidateCost = executionCost(g, candidate);
   if (found && candidateCost >= cost)

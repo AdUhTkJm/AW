@@ -34,6 +34,29 @@ struct PlanResult {
   // Columns the solver dropped with reduced-cost fixing before its final
   // solve. Diagnostics only; 0 when the pass did not run.
   uint32_t fixedColumns = 0;
+
+  // --- solution-finding diagnostics (aggregated over solver retries) -----
+  //
+  // Wall-clock milliseconds in the LP relaxation and in the reduced-cost probe
+  // across every solver call. Both run outside the solver's wall-clock budget.
+  double lpMs = 0.0;
+  double probeMs = 0.0;
+  // CP-SAT solves behind this plan (cap-growth attempts + probe + reduced),
+  // summed over retries.
+  int64_t capAttempts = 0;
+  // CP-SAT deterministic work, summed over retries; stable across machines.
+  double deterministicTime = 0.0;
+  // Wall-clock from the start of `planCrafting` to the first balance-feasible
+  // solve and to the first *proven-optimal* solve. -1 when never reached. Note
+  // that a balance-feasible plan may still fail the fireability check and be
+  // rejected, so `firstFeasibleMs` can precede any usable answer.
+  double firstFeasibleMs = -1.0;
+  double provenMs = -1.0;
+  // Number of extra solves the fireability loop needed (> 0 means at least one
+  // returned plan was rejected as unstartable).
+  int64_t solverRetries = 0;
+  // The concatenated per-attempt trajectory, for the finding-time table.
+  aw::vector<solver::CapAttempt> attemptTrace;
 };
 
 // Plans `amount` new units of the item at subgraph node `target`.

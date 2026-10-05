@@ -126,6 +126,15 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
                         const solver::Options &options) {
   PlanResult result;
 
+  // Wall-clock anchor for the solution-finding diagnostics. `planCrafting` is
+  // the caller-visible unit of work, so the finding times are measured from
+  // here, not from any individual solver call.
+  const auto planStart = std::chrono::steady_clock::now();
+  const auto sincePlanStartMs = [&planStart] {
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::steady_clock::now() - planStart).count();
+  };
+
   const BaseCraftingGraph &g = sub.graph;
   if (target >= g.nItem)
     return result;
@@ -269,6 +278,7 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
       result.status = PlanStatus::OK;
       result.provenOptimal = false;
       result.exec = std::move(greedy);
+      result.firstFeasibleMs = sincePlanStartMs();
       return result;
     }
     greedyUsable = false;
@@ -299,6 +309,8 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
     result.gap = 0.0;
     result.bestBound = 0.0;
     result.exec = greedy;
+    if (result.firstFeasibleMs < 0.0)
+      result.firstFeasibleMs = sincePlanStartMs();
     return true;
   };
 
@@ -347,6 +359,24 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
     branches += solved.numBranches;
     result.numConflicts = conflicts;
     result.numBranches = branches;
+    // Solution-finding diagnostics: sum the work over retries, keep the first
+    // feasible and first proven times, and concatenate the attempt traces.
+    // `firstFeasibleMs` is set even for a plan the fireability check later
+    // rejects, which is the point: it says when the solver first had *an*
+    // answer, not when it had a usable one.
+    result.lpMs += solved.lpMs;
+    result.probeMs += solved.probeMs;
+    result.capAttempts += solved.capAttempts;
+    result.deterministicTime += solved.deterministicTime;
+    for (const solver::CapAttempt &entry : solved.attemptTrace)
+      result.attemptTrace.push_back(entry);
+    result.solverRetries = retry;
+    if (solved.status == PlanStatus::OK) {
+      if (result.firstFeasibleMs < 0.0)
+        result.firstFeasibleMs = sincePlanStartMs();
+      if (solved.provenOptimal && result.provenMs < 0.0)
+        result.provenMs = sincePlanStartMs();
+    }
     if (solved.status != PlanStatus::OK) {
       // A retry that found nothing proves nothing about the original problem:
       // the no-goods exclude only the plans already rejected, so a retry's

@@ -1,0 +1,6 @@
+# key	value
+dataset	recipes-nast
+seed	20260101
+targets	2
+amounts	100000
+groups	none,random20

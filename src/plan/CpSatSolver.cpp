@@ -701,6 +701,9 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
   result.bestBound = response.best_objective_bound();
   result.numConflicts = response.num_conflicts();
   result.numBranches = response.num_branches();
+  // Deterministic work is comparable across machines, unlike the wall clock
+  // that a capped row actually stops on. See Result::deterministicTime.
+  result.deterministicTime = response.deterministic_time();
 
   if (result.status == PlanStatus::OK) {
     result.x.resize(A.cols);
@@ -797,6 +800,42 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   };
   const bool debug = searchDebug();
 
+  // Solution-finding diagnostics (see Solver.h). `lpMs` is already spent; the
+  // rest is filled as the cap search runs. `stamp` copies the current state
+  // onto whichever Result exits, so every path reports the same trace.
+  const double lpMs = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - relaxationStart).count();
+  double probeMs = 0.0;
+  int64_t capAttempts = 0;
+  double deterministicTime = 0.0;
+  double firstFeasibleMs = -1.0;
+  double bestMs = -1.0;
+  const int64_t initialCap = cap;
+  aw::vector<CapAttempt> attemptTrace;
+  const auto elapsedMs = [&elapsedSeconds] { return elapsedSeconds() * 1000.0; };
+  const auto recordAttempt = [&](int64_t attemptCap, double attemptBudget,
+                                 const Result &attempt) {
+    ++capAttempts;
+    deterministicTime += attempt.deterministicTime;
+    attemptTrace.push_back(CapAttempt{attemptCap, attemptBudget, (int32_t) attempt.status,
+                                      attempt.objective, elapsedMs()});
+    if (attempt.status == PlanStatus::OK) {
+      if (firstFeasibleMs < 0.0) firstFeasibleMs = elapsedMs();
+      bestMs = elapsedMs();
+    }
+  };
+  const auto stamp = [&](Result r) {
+    r.lpMs = lpMs;
+    r.probeMs = probeMs;
+    r.capAttempts = capAttempts;
+    r.deterministicTime = deterministicTime;
+    r.firstFeasibleMs = firstFeasibleMs;
+    r.bestMs = bestMs;
+    r.initialCap = initialCap;
+    r.attemptTrace = std::move(attemptTrace);
+    return r;
+  };
+
   // Reduced-cost fixing. Probe for any plan within `reducedCostGap` of the LP
   // bound: a feasible answer gives an incumbent tight enough for the reduced
   // costs to fix columns, while an infeasible answer proves the integrality
@@ -816,18 +855,22 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
           probeBudget = std::min(left, std::max(0.005, left * 0.25));
       }
       if (!limited || probeBudget > 0.0) {
+        const auto probeStart = std::chrono::steady_clock::now();
         const Result probe = solveWithCap(A, rows, b, c, options, probeCap, ceiling, probeBudget);
+        probeMs += std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - probeStart).count();
+        recordAttempt(probeCap, probeBudget, probe);
         if (debug)
           std::fprintf(stderr, "[solver] probe cap=%lld budget=%.2f status=%d obj=%lld t=%.3f\n",
                        (long long) probeCap, probeBudget, (int) probe.status,
                        (long long) probe.objective, elapsedSeconds());
         if (probe.status == PlanStatus::NUMERICAL_FAIL)
-          return probe;
+          return stamp(probe);
         // A plan strictly below the probe cap means the cap did not bind, so it
         // is already optimal for the uncapped problem.
         if (probe.status == PlanStatus::OK && probe.provenOptimal &&
             probe.objective < probeCap)
-          return probe;
+          return stamp(probe);
         if (probe.status == PlanStatus::OK &&
             (double) probe.objective >= lp.value) {
           // At an LP optimum `c^T x = LP + sum_r d_r x_r` for every feasible
@@ -881,8 +924,12 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
             if (limited)
               budget = options.maxTimeSeconds - elapsedSeconds();
             if (!limited || budget > 0.0) {
+              const auto reducedStart = std::chrono::steady_clock::now();
               Result out = solveWithCap(reduced, reducedRows, b, reducedC, options,
                                         probe.objective, ceiling, budget, keepUpper);
+              probeMs += std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - reducedStart).count();
+              recordAttempt(probe.objective, budget, out);
               if (debug)
                 std::fprintf(stderr,
                              "[solver] reduced cols=%u fixed=%u status=%d obj=%lld\n",
@@ -891,14 +938,14 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
               if (out.status == PlanStatus::OK) {
                 out.x = expandSolution(out.x, keep, A.cols);
                 out.fixedColumns = fixed;
-                return out;
+                return stamp(std::move(out));
               }
               if (out.status == PlanStatus::NUMERICAL_FAIL)
-                return out;
+                return stamp(std::move(out));
             }
             // Out of time, or the reduced solve found nothing usable: the probe
             // is still a valid plan.
-            return probe;
+            return stamp(probe);
           }
         }
       }
@@ -923,6 +970,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
     }
 
     Result current = solveWithCap(A, rows, b, c, options, cap, ceiling, budget);
+    recordAttempt(cap, budget, current);
     if (debug)
       std::fprintf(stderr,
                    "[solver] attempt=%d cap=%lld budget=%.2f status=%d obj=%lld "
@@ -935,7 +983,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
       // Flash mode takes the first feasible plan whatever it costs; there is
       // no incumbent to compare it against and no larger cap to try.
       if (options.flash)
-        return current;
+        return stamp(std::move(current));
       if (!haveBest || current.objective < best.objective) {
         best = std::move(current);
         haveBest = true;
@@ -943,9 +991,9 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
       // The cap did not bind, so no cheaper plan exists beyond it: the answer
       // is optimal for the problem, not just for the box.
       if (best.objective < cap)
-        return best;
+        return stamp(std::move(best));
     } else if (current.status == PlanStatus::NUMERICAL_FAIL) {
-      return current;
+      return stamp(std::move(current));
     } else if (current.status == PlanStatus::INFEASIBLE) {
       ++infeasibleAttempts;
     }
@@ -963,7 +1011,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   }
 
   if (haveBest)
-    return best;
+    return stamp(std::move(best));
 
   if (infeasibleAttempts == attempts && attempts > 0 && cap >= ceiling) {
     // This proves only the *capped* model infeasible. `ceiling` is the
@@ -974,7 +1022,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
     // must keep it rather than report this as a proof; planCrafting keeps its
     // greedy DAG plan for exactly this case.
     result.status = PlanStatus::INFEASIBLE;
-    return result;
+    return stamp(std::move(result));
   }
 
   // Nothing usable yet. A cap at the ceiling is both the only place where
@@ -987,19 +1035,20 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
     // the last-resort solve does not need the absolute ceiling as its cap.
     const int64_t lastCap = upperBound > 0 ? std::min(upperBound, ceiling) : ceiling;
     const Result last = solveWithCap(A, rows, b, c, options, lastCap, ceiling, remaining);
+    recordAttempt(lastCap, remaining, last);
     if (last.status == PlanStatus::OK)
-      return last;
+      return stamp(last);
     if (last.status == PlanStatus::INFEASIBLE) {
       result.status = PlanStatus::INFEASIBLE;
-      return result;
+      return stamp(std::move(result));
     }
     if (last.status == PlanStatus::NUMERICAL_FAIL)
-      return last;
+      return stamp(last);
   }
 
   // The budget ran out before a plan was found.
   result.status = PlanStatus::ITER_LIMIT;
-  return result;
+  return stamp(std::move(result));
 }
 
 }  // namespace aw::solver

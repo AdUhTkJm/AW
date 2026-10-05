@@ -125,6 +125,11 @@ def main():
                         help="log-uniform upper bound for group 3 amounts")
     parser.add_argument("--big-scc", action="store_true",
                         help="sample targets from the largest SCC instead of uniformly")
+    parser.add_argument("--big-scc-targets", default="0",
+                        help="draw this many targets from the largest SCC, mixed with "
+                             "--other-targets; enables the adversarial/typical panel")
+    parser.add_argument("--other-targets", default="0",
+                        help="draw this many targets from OUTSIDE the largest SCC")
     args = parser.parse_args()
 
     graph = Graph(args.awr).prepare()
@@ -138,15 +143,32 @@ def main():
 
     rng_targets = random.Random("%s:targets" % args.seed)
     produced = graph.produced_items()
-    pool = [i for i in produced if i in biggest_members] if args.big_scc else produced
-    if not pool:
-        raise SystemExit("no eligible targets")
-
-    if args.targets == "all":
-        chosen = sorted(pool)
+    n_big = int(args.big_scc_targets)
+    n_other = int(args.other_targets)
+    if n_big > 0 or n_other > 0:
+        # Mixed adversarial/typical sample. Drawn from two RNG calls on the
+        # same stream so the split is reproducible and each arm is a uniform
+        # sample of its own pool. The handles are merged and sorted so the
+        # target file stays stable and sharding can stride it.
+        big_pool = sorted(i for i in produced if i in biggest_members)
+        other_pool = sorted(i for i in produced if i not in biggest_members)
+        if n_big > len(big_pool):
+            raise SystemExit("only %d produced items in the largest SCC; asked for %d"
+                             % (len(big_pool), n_big))
+        if n_other > len(other_pool):
+            raise SystemExit("only %d produced items outside the largest SCC; asked for %d"
+                             % (len(other_pool), n_other))
+        chosen = sorted(rng_targets.sample(big_pool, n_big)
+                        + rng_targets.sample(other_pool, n_other))
     else:
-        count = min(int(args.targets), len(pool))
-        chosen = sorted(rng_targets.sample(sorted(pool), count))
+        pool = [i for i in produced if i in biggest_members] if args.big_scc else produced
+        if not pool:
+            raise SystemExit("no eligible targets")
+        if args.targets == "all":
+            chosen = sorted(pool)
+        else:
+            count = min(int(args.targets), len(pool))
+            chosen = sorted(rng_targets.sample(sorted(pool), count))
 
     rng_stock = random.Random("%s:random20" % args.seed)
     real_items = list(range(graph.n_real))
@@ -174,6 +196,8 @@ def main():
         out.write("seed\t%s\n" % args.seed)
         out.write("targets\t%s\n" % args.targets)
         out.write("big_scc_only\t%d\n" % (1 if args.big_scc else 0))
+        out.write("big_scc_targets\t%d\n" % int(args.big_scc_targets))
+        out.write("other_targets\t%d\n" % int(args.other_targets))
         out.write("amounts\t%s\n" % ",".join(str(a) for a in amounts))
         out.write("groups\t%s\n" % args.groups)
         out.write("leaf_stock\t%d\n" % args.leaf_stock)

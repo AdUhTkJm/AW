@@ -6,12 +6,27 @@ Configs
   aw-nonopt   AW in nonoptimal mode, the cumulative ablation stages (default all
               eight; `--stages` runs a subset and merges it into the existing JSONL)
   aw-optimal  AW in optimal mode with every pruning on: the ground truth
+  aw-ablation AW in OPTIMAL mode, the same cumulative ablation stages. This is the
+              ablation for the exact solver: how much each reduction helps prove
+              an optimum, rather than how much plan quality it costs.
   aw-flash    AW in nonoptimal mode with every pruning on; the solver stops at
               the FIRST feasible plan instead of optimizing it
   tb-v2       Thunderbolt `CraftPlannerV2` (shipped default planner)
   tb-cpsat    Thunderbolt `CpSatRankedFlowSolver` (opt-in OR-Tools planner)
   ae2vm       AE2VM `CraftingVM` driven offline, warm (>=1 prior pass)
   ae2vm-cold  AE2VM with `--warmup 0`: the first execution of every query.
+
+Sharding
+--------
+`--shards N` splits each cell's target list into N disjoint plan prefixes, all
+written before any worker starts (the barrier that prevents a race). `--jobs J`
+runs up to J cell/shard subprocesses concurrently. The canonical
+`<dataset>.<config>.jsonl` is reassembled from the shards afterwards, so every
+consumer sees exactly what a single-process run would have written. With one
+CP-SAT worker per shard, `--shards 16 --jobs 16` fills 16 physical cores
+without the poor utilisation of a sequential 16-worker sweep, and keeps each
+row deterministic. Use it on the large cells: `aw-optimal` at 32 targets x 6
+amounts x 3 groups is one ~7 h job otherwise.
 
 AE2VM is split in two on purpose: its warm path replays a memoized plan and can
 return a DIFFERENT ANSWER than the cold path (see bench/README.md section 7.3).
@@ -28,6 +43,11 @@ Typical use
   # refresh one point of the aw-nonopt ablation without re-running the rest
   python3 bench/run.py --datasets recipes-vanilla --configs aw-nonopt --stages satellite
 
+  # one large cell across 16 cores, one CP-SAT worker each
+  python3 bench/run.py --datasets recipes-atm --configs aw-optimal \\
+        --targets 32 --amounts 1,10,100,1000,10000,100000 \\
+        --shards 16 --jobs 16 --workers 1 --time-limit 300
+
   # overnight, the real thing
   nohup python3 bench/run.py --datasets recipes-nast,recipes-atm \\
         --time-limit 40 --warmup 1 --repeats 1 > bench/results/run.log 2>&1 &
@@ -39,8 +59,10 @@ Then `python3 bench/summarize.py`.
 """
 
 import argparse
+import concurrent.futures
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -59,14 +81,39 @@ DATASETS = {
 AW_STAGES = ["none", "seed", "direct", "recipe", "substitution", "tag", "pack",
              "satellite"]
 
-AW_CONFIGS = ("aw-nonopt", "aw-optimal", "aw-flash")
+AW_CONFIGS = ("aw-nonopt", "aw-optimal", "aw-flash", "aw-ablation")
+
+# How each AW config drives `aw_bench`:
+#   nonoptimal  registration-time switch (True = the pruned-looking model, False = exact)
+#   flash       stop at the first feasible plan
+#   stages      None -> the --stages selection (cumulative ladder, stage names as
+#               labels); a list -> fixed `profile[:label]` specs
+#   gap         relative gap; "0" for the exact modes
+#   by_stage    merge fresh rows into the existing JSONL per stage instead of
+#               replacing the whole file, so one ablation point can be refreshed
+AW_CONFIG_PLAN = {
+    "aw-nonopt": dict(nonoptimal=True, flash=False, stages=None, gap=None, by_stage=True),
+    "aw-optimal": dict(nonoptimal=False, flash=False, stages=["satellite:optimal"],
+                       gap="0", by_stage=False),
+    "aw-flash": dict(nonoptimal=True, flash=True, stages=["satellite"], gap=None,
+                     by_stage=False),
+    # The cumulative ladder run in OPTIMAL mode: measures how much each reduction
+    # helps the exact solver prove optima, rather than plan quality.
+    "aw-ablation": dict(nonoptimal=False, flash=False, stages=None, gap="0",
+                        by_stage=True),
+}
 TB_CONFIGS = ("tb-v2", "tb-cpsat")
 AE2VM_CONFIGS = ("ae2vm", "ae2vm-cold")
 ALL_CONFIGS = AW_CONFIGS + TB_CONFIGS + AE2VM_CONFIGS
 
 
+def rooted(path):
+    """Resolve `path` against the repo root so cwd does not matter."""
+    return path if os.path.isabs(path) else os.path.join(ROOT, path)
+
+
 def ensure_plan(args, dataset, awr, names):
-    prefix = os.path.join(args.plan_dir, dataset)
+    prefix = rooted(os.path.join(args.plan_dir, dataset))
     meta = prefix + ".meta.tsv"
     if os.path.exists(meta) and not args.regen_plan:
         return prefix
@@ -75,13 +122,18 @@ def ensure_plan(args, dataset, awr, names):
         "--dataset", dataset,
         "--awr", awr,
         "--names", names,
-        "--out-dir", args.plan_dir,
+        "--out-dir", rooted(args.plan_dir),
         "--seed", args.seed,
         "--targets", str(args.targets),
         "--amounts", args.amounts,
     ]
     if args.big_scc:
         command.append("--big-scc")
+    if int(args.big_scc_targets) or int(args.other_targets):
+        command += ["--big-scc-targets", str(args.big_scc_targets),
+                    "--other-targets", str(args.other_targets)]
+    if args.groups:
+        command += ["--groups", args.groups]
     print("[plan] " + " ".join(command), flush=True)
     subprocess.run(command, check=True, cwd=ROOT)
     return prefix
@@ -193,6 +245,131 @@ def merge_preprocess_output(out_path, fresh_path):
     os.remove(fresh_path)
 
 
+def plan_groups(prefix):
+    """Inventory groups recorded in a plan's meta file."""
+    with open(prefix + ".meta.tsv", encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith("groups\t"):
+                return [g for g in line.rstrip("\n").split("\t")[1].split(",") if g]
+    return ["none", "leaves", "random20"]
+
+
+def shard_path(args, dataset, k):
+    return os.path.join(rooted(args.plan_dir), "%s.s%d" % (dataset, k))
+
+
+def ensure_shard_plans(args, dataset, prefix, groups):
+    """Split a plan's target list into `--shards` disjoint plan prefixes.
+
+    The full plan is generated first and every shard file is written here,
+    before any worker starts: that is the barrier that keeps concurrent shards
+    from racing on the plan files. Only `.targets.tsv` differs between shards;
+    the meta and stock files are copied so every shard sees the same inventory.
+    Targets are assigned round-robin, which balances a handle-sorted list.
+    """
+    if args.shards <= 1:
+        return [prefix]
+    with open(prefix + ".targets.tsv", encoding="utf-8") as handle:
+        body = [line for line in handle if line.strip() and not line.startswith("#")]
+    # More shards than targets would produce empty plan files that aw_bench
+    # rejects, so cap it and say so.
+    shards = min(args.shards, len(body))
+    if shards < args.shards:
+        print("[plan] %s has %d targets; using %d shards instead of %d"
+              % (dataset, len(body), shards, args.shards), flush=True)
+    header = "# handle\tname\tamounts\tn_recipes\tin_big_scc\n"
+    result = []
+    for k in range(shards):
+        target_prefix = shard_path(args, dataset, k)
+        for suffix in [".meta.tsv"] + [".stock.%s.tsv" % g for g in groups]:
+            shutil.copyfile(prefix + suffix, target_prefix + suffix)
+        with open(target_prefix + ".targets.tsv", "w", encoding="utf-8") as handle:
+            handle.write(header)
+            handle.writelines(body[k::shards])
+        result.append(target_prefix)
+    return result
+
+
+def combine_shard_output(paths, out_path):
+    """Concatenate per-shard JSONLs into one file with a single header.
+
+    The config header and registration row come from the first shard; every
+    shard's query rows are appended in shard order. This reconstructs exactly
+    the file a single-process run would have written.
+    """
+    header = None
+    registration = None
+    queries = []
+    for path in paths:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                kind = row.get("type")
+                if kind == "config":
+                    if header is None:
+                        header = row
+                elif kind == "registration":
+                    if registration is None:
+                        registration = row
+                elif kind == "query":
+                    queries.append(row)
+    tmp_path = out_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        for row in ([header] if header else []) + ([registration] if registration else []) + queries:
+            handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+    os.replace(tmp_path, out_path)
+    for path in paths:
+        os.remove(path)
+
+
+def build_aw_command(args, dataset, awr, plan_prefix, config, names, out_path, stages):
+    plan = AW_CONFIG_PLAN[config]
+    specs = plan["stages"] if plan["stages"] is not None else stages
+    command = [
+        os.path.join(ROOT, "build", "aw_bench"),
+        "--dataset", dataset, "--awr", awr, "--plan", plan_prefix,
+        "--config", config, "--out", out_path, "--names", names,
+        "--nonoptimal", "1" if plan["nonoptimal"] else "0",
+        "--warmup", "0", "--repeats", args.repeats,
+        "--time-limit", args.time_limit,
+        "--gap", plan["gap"] if plan["gap"] is not None else args.gap,
+        "--workers", args.workers,
+        "--pack-seconds", args.pack_seconds,
+        "--satellite-seconds", args.satellite_seconds,
+    ]
+    if plan["flash"]:
+        command += ["--flash", "1"]
+    for spec in specs:
+        command += ["--stage", spec]
+    if args.trace_attempts:
+        command += ["--trace-attempts"]
+    if args.preprocess_only:
+        command += ["--preprocess-only"]
+    return command
+
+
+def build_baseline_command(args, dataset, awr, plan_prefix, config, names, out_path):
+    """The historical command for the two non-AW engine families."""
+    repo = os.path.join(ROOT, "compare",
+                        "thunderboltcore" if config.startswith("tb-") else "ae2vm")
+    warmup = "0" if config == "ae2vm-cold" else args.warmup
+    common_limit_ms = str(int(float(args.time_limit) * 1000))
+    bound_ms = (common_limit_ms if args.tb_deadline_ms == "same"
+                else str(int(float(args.tb_deadline_ms))))
+    child = ["--dataset", dataset, "--awr", awr, "--plan", plan_prefix,
+             "--config", config, "--out", out_path, "--names", names,
+             "--warmup", warmup, "--repeats", args.repeats,
+             "--deadline-ms", common_limit_ms]
+    if config == "tb-cpsat":
+        child += ["--bind-deadline-ms", bound_ms]
+    if args.preprocess_only:
+        child += ["--preprocess-only"]
+    return [os.path.join(repo, "gradlew"), "--no-daemon", "benchAwr",
+            "--args=" + " ".join(child)]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -209,6 +386,9 @@ def main():
     parser.add_argument("--seed", default="20260101")
     parser.add_argument("--targets", default="8")
     parser.add_argument("--amounts", default="1,100000")
+    parser.add_argument("--groups", default="",
+                        help="comma separated inventory groups to emit (default: make_plan's "
+                             "none,leaves,random20). Forwarded to make_plan.")
     parser.add_argument("--big-scc", action="store_true",
                         help="sample targets from the largest SCC")
     parser.add_argument("--regen-plan", action="store_true",
@@ -233,6 +413,23 @@ def main():
                              "'same' binds the common --time-limit so all engines share one "
                              "wall clock; '0' leaves Thunderbolt's own bounds in place (3 s "
                              "per native solve call, which is what a direct caller gets)")
+    parser.add_argument("--shards", type=int, default=1,
+                        help="split each cell's target list into this many disjoint shards. "
+                             "The full plan is written first, so shards never race on it. "
+                             "Use with --jobs to parallelize one large cell across cores. "
+                             "AW configs only.")
+    parser.add_argument("--jobs", type=int, default=1,
+                        help="run up to this many cell/shard subprocesses concurrently. "
+                             "Pairs with --shards: total workers = cells x shards.")
+    parser.add_argument("--trace-attempts", action="store_true",
+                        help="record the per-attempt objective-cap trajectory (cap, budget, "
+                             "status, objective, elapsed) on every query row. Use it on the "
+                             "ablation subset only; it grows the JSONL.")
+    parser.add_argument("--big-scc-targets", default="0",
+                        help="draw this many targets from the largest SCC; combined with "
+                             "--other-targets this is the mixed adversarial/typical panel")
+    parser.add_argument("--other-targets", default="0",
+                        help="draw this many targets from outside the largest SCC")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -249,117 +446,106 @@ def main():
     if not stages:
         raise SystemExit("--stages must list at least one stage")
 
-    os.makedirs(args.out_dir, exist_ok=True)
-    os.makedirs(args.plan_dir, exist_ok=True)
+    if args.shards < 1:
+        raise SystemExit("--shards must be >= 1")
+    if args.jobs < 1:
+        raise SystemExit("--jobs must be >= 1")
+    if args.preprocess_only and args.shards > 1:
+        raise SystemExit("--preprocess-only cannot be combined with --shards > 1")
 
-    if args.dry_run:
-        for dataset in datasets:
-            awr, names = DATASETS[dataset]
-            ensure_plan(args, dataset, awr, names)
-    else:
-        for dataset in datasets:
-            awr, names = DATASETS[dataset]
-            ensure_plan(args, dataset, awr, names)
+    os.makedirs(rooted(args.out_dir), exist_ok=True)
+    os.makedirs(rooted(args.plan_dir), exist_ok=True)
 
-    common_limit_ms = str(int(float(args.time_limit) * 1000))
-    bound_ms = (common_limit_ms if args.tb_deadline_ms == "same"
-                else str(int(float(args.tb_deadline_ms))))
-
-    failures = []
+    # ---- plan barrier ---------------------------------------------------
+    # Generate every full plan and every shard file before any worker starts.
+    # That is what keeps concurrent shards from racing on the plan directory.
+    plans = {}
     for dataset in datasets:
         awr, names = DATASETS[dataset]
-        awr = os.path.join(ROOT, awr) if not os.path.isabs(awr) else awr
-        names = os.path.join(ROOT, names) if not os.path.isabs(names) else names
-        prefix = os.path.join(ROOT, args.plan_dir, dataset)
+        full = ensure_plan(args, dataset, awr, names)
+        plans[dataset] = ensure_shard_plans(args, dataset, full, plan_groups(full))
 
+    # ---- job list -------------------------------------------------------
+    jobs = []
+    for dataset in datasets:
+        awr, names = DATASETS[dataset]
+        awr = rooted(awr)
+        names = rooted(names)
         for config in ALL_CONFIGS:
             if config not in configs:
                 continue
+            shard_prefixes = plans[dataset]
+            if config not in AW_CONFIG_PLAN and len(shard_prefixes) > 1:
+                raise SystemExit("--shards > 1 is only supported for AW configs, not %s"
+                                 % config)
             out = os.path.join(ROOT, args.out_dir, "%s.%s.jsonl" % (dataset, config))
-            log = os.path.join(ROOT, args.out_dir, "%s.%s.log" % (dataset, config))
-            if args.preprocess_only:
-                # A separate log keeps the full sweep's log (its command line and query
-                # output) intact; the JSONL itself is merged, not replaced.
-                log = os.path.join(ROOT, args.out_dir,
-                                   "%s.%s.preprocess.log" % (dataset, config))
-            preprocess_flags = ["--preprocess-only"] if args.preprocess_only else []
-
-            if config == "aw-nonopt":
-                # A subset of the cumulative stages is a legitimate re-run: only
-                # the selected `--stage` arguments are passed and the fresh rows
-                # are merged into the existing JSONL instead of clobbering it.
-                fresh = out + (".preprocess" if args.preprocess_only else ".fresh")
-                command = [os.path.join(ROOT, "build", "aw_bench"),
-                           "--dataset", dataset, "--awr", awr, "--plan", prefix,
-                           "--config", config, "--out", fresh, "--names", names,
-                           "--nonoptimal", "1",
-                           "--warmup", "0", "--repeats", args.repeats,
-                           "--time-limit", args.time_limit, "--gap", args.gap,
-                           "--workers", args.workers, "--pack-seconds", args.pack_seconds,
-                           "--satellite-seconds", args.satellite_seconds] + preprocess_flags
-                for stage in stages:
-                    command += ["--stage", stage]
-                code = run_logged(config, command, log, ROOT, args.dry_run)
-                if code == 0 and not args.dry_run:
-                    if args.preprocess_only:
-                        merge_preprocess_output(out, fresh)
+            single = len(shard_prefixes) == 1
+            for k, plan_prefix in enumerate(shard_prefixes):
+                if args.preprocess_only:
+                    log = out + ".preprocess.log"
+                    target = out + ".preprocess"
+                elif single:
+                    log = out + ".log"
+                    if config in AW_CONFIG_PLAN and AW_CONFIG_PLAN[config]["by_stage"]:
+                        target = out + ".fresh"
                     else:
-                        merge_stage_output(out, fresh, stages)
+                        target = out
+                else:
+                    log = out + ".shard%d.log" % k
+                    target = out + ".shard%d.fresh" % k
+                if config in AW_CONFIG_PLAN:
+                    command = build_aw_command(args, dataset, awr, plan_prefix, config,
+                                               names, target, stages)
+                else:
+                    command = build_baseline_command(args, dataset, awr, plan_prefix,
+                                                     config, names, target)
+                jobs.append(dict(dataset=dataset, config=config, shard=k,
+                                 name="%s/%s#%d" % (dataset, config, k),
+                                 command=command, log=log, target=target, out=out))
 
-            elif config == "aw-optimal":
-                target = out + ".preprocess" if args.preprocess_only else out
-                command = [os.path.join(ROOT, "build", "aw_bench"),
-                           "--dataset", dataset, "--awr", awr, "--plan", prefix,
-                           "--config", config, "--out", target, "--names", names,
-                           "--nonoptimal", "0", "--stage", "satellite:optimal",
-                           "--warmup", "0", "--repeats", args.repeats,
-                           "--time-limit", args.time_limit, "--gap", "0",
-                           "--workers", args.workers, "--pack-seconds", args.pack_seconds,
-                           "--satellite-seconds", args.satellite_seconds] + preprocess_flags
-                code = run_logged(config, command, log, ROOT, args.dry_run)
-                if args.preprocess_only and code == 0 and not args.dry_run:
-                    merge_preprocess_output(out, target)
+    # ---- run ------------------------------------------------------------
+    if args.dry_run:
+        for job in jobs:
+            run_logged(job["name"], job["command"], job["log"], ROOT, True)
+        return 0
 
-            elif config == "aw-flash":
-                # Flash mode: production pruning (nonoptimal) with every pass on,
-                # but the solver returns the first feasible plan. One row, so it
-                # lines up directly against the aw-nonopt `satellite` row and the
-                # aw-optimal ground truth. `aw_bench` is one process per config
-                # because `nonoptimal` is read at registration time.
-                target = out + ".preprocess" if args.preprocess_only else out
-                command = [os.path.join(ROOT, "build", "aw_bench"),
-                           "--dataset", dataset, "--awr", awr, "--plan", prefix,
-                           "--config", config, "--out", target, "--names", names,
-                           "--nonoptimal", "1", "--flash", "1", "--stage", "satellite",
-                           "--warmup", "0", "--repeats", args.repeats,
-                           "--time-limit", args.time_limit, "--gap", args.gap,
-                           "--workers", args.workers, "--pack-seconds", args.pack_seconds,
-                           "--satellite-seconds", args.satellite_seconds] + preprocess_flags
-                code = run_logged(config, command, log, ROOT, args.dry_run)
-                if args.preprocess_only and code == 0 and not args.dry_run:
-                    merge_preprocess_output(out, target)
+    if args.jobs <= 1:
+        for job in jobs:
+            job["code"] = run_logged(job["name"], job["command"], job["log"], ROOT, False)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futures = {pool.submit(run_logged, job["name"], job["command"], job["log"],
+                                   ROOT, False): job for job in jobs}
+            for future in concurrent.futures.as_completed(futures):
+                futures[future]["code"] = future.result()
 
+    # ---- merge shards into one file per (dataset, config) ---------------
+    failures = []
+    cells = {}
+    for job in jobs:
+        cells.setdefault((job["dataset"], job["config"]), []).append(job)
+
+    for (dataset, config), group in cells.items():
+        group.sort(key=lambda job: job["shard"])
+        out = group[0]["out"]
+        failed = [job for job in group if job["code"] != 0]
+        if failed:
+            failures += ["%s/%s#%d" % (job["dataset"], job["config"], job["shard"])
+                         for job in failed]
+            continue
+        plan = AW_CONFIG_PLAN.get(config)
+        if args.preprocess_only:
+            merge_preprocess_output(out, group[0]["target"])
+        elif len(group) == 1:
+            if plan is not None and plan["by_stage"]:
+                merge_stage_output(out, group[0]["target"], stages)
+        else:
+            combined = out + ".combined"
+            combine_shard_output([job["target"] for job in group], combined)
+            if plan is not None and plan["by_stage"]:
+                merge_stage_output(out, combined, stages)
             else:
-                repo = os.path.join(ROOT, "compare",
-                                    "thunderboltcore" if config.startswith("tb-") else "ae2vm")
-                # `ae2vm-cold` is the same harness with no warm-up pass at all.
-                warmup = "0" if config == "ae2vm-cold" else args.warmup
-                target = out + ".preprocess" if args.preprocess_only else out
-                child = ["--dataset", dataset, "--awr", awr, "--plan", prefix,
-                         "--config", config, "--out", target, "--names", names,
-                         "--warmup", warmup, "--repeats", args.repeats,
-                         "--deadline-ms", common_limit_ms]
-                if config == "tb-cpsat":
-                    child += ["--bind-deadline-ms", bound_ms]
-                child += preprocess_flags
-                command = [os.path.join(repo, "gradlew"), "--no-daemon", "benchAwr",
-                           "--args=" + " ".join(child)]
-                code = run_logged(config, command, log, repo, args.dry_run)
-                if args.preprocess_only and code == 0 and not args.dry_run:
-                    merge_preprocess_output(out, target)
-
-            if code != 0:
-                failures.append("%s/%s" % (dataset, config))
+                os.replace(combined, out)
 
     print()
     if failures:
