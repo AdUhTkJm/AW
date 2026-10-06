@@ -29,6 +29,18 @@ bool computeClosedIslandPruning(const Subgraph &sub, ItemId target,
                                 std::span<const Amount> sourceInventory,
                                 aw::vector<uint8_t> &drop) noexcept;
 
+// Interchangeable-variant (tag-orbit) elimination, on an already assembled
+// subgraph. Drops the conversions inside a class of items that every external
+// recipe reaches through the same tag: a plan that used a conversion already
+// directly produces at least as many class members as it spends on that tag,
+// and the tag accepts every member, so the conversions are never needed. See
+// docs/algorithm.typ ("变体类消除").
+//
+// `target` is a subgraph item and is excluded from every class. `drop` is
+// indexed by subgraph recipe, sized to `sub.graph.nRecipe`.
+bool computeVariantClassPruning(const Subgraph &sub, ItemId target,
+                                aw::vector<uint8_t> &drop) noexcept;
+
 }
 
 namespace aw::detail {

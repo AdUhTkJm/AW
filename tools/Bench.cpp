@@ -185,7 +185,7 @@ bool splitCommas(const std::string &text, aw::vector<std::string> &out) {
 
 // ---------------------------------------------------------------------- stages
 
-// One point on the cumulative ablation curve. The seven booleans are the
+// One point on the cumulative ablation curve. The eight booleans are the
 // query-time gates read by `reachableSubgraph`.
 struct Stage {
   const char *name;
@@ -196,19 +196,21 @@ struct Stage {
   bool tag;
   bool pack;
   bool sat;
+  bool variant;
 };
 
 // The agreed cumulative order:
-//   nothing -> seed -> direct -> recipe -> substitution -> tag -> pack -> satellite
+//   nothing -> seed -> direct -> recipe -> substitution -> tag -> pack -> variant -> satellite
 const Stage kStages[] = {
-    {"none", false, false, false, false, false, false, false},
-    {"seed", true, false, false, false, false, false, false},
-    {"direct", true, true, false, false, false, false, false},
-    {"recipe", true, true, true, false, false, false, false},
-    {"substitution", true, true, true, true, false, false, false},
-    {"tag", true, true, true, true, true, false, false},
-    {"pack", true, true, true, true, true, true, false},
-    {"satellite", true, true, true, true, true, true, true},
+    {"none", false, false, false, false, false, false, false, false},
+    {"seed", true, false, false, false, false, false, false, false},
+    {"direct", true, true, false, false, false, false, false, false},
+    {"recipe", true, true, true, false, false, false, false, false},
+    {"substitution", true, true, true, true, false, false, false, false},
+    {"tag", true, true, true, true, true, false, false, false},
+    {"pack", true, true, true, true, true, true, false, false},
+    {"variant", true, true, true, true, true, true, false, true},
+    {"satellite", true, true, true, true, true, true, true, true},
 };
 
 const Stage *findStage(const std::string &name) {
@@ -225,12 +227,14 @@ void applyStage(const Stage &stage) {
   aw::options.tagPruning = stage.tag;
   aw::options.pack.enabled = stage.pack;
   aw::options.satellite.enabled = stage.sat;
+  aw::options.variantClass.enabled = stage.variant;
 }
 
 // Everything the registration-time passes read. Must run before
 // `registerCraftingGraph`.
 void configureForRegistration(bool nonoptimal, aw::TagInlineMode inlineMode,
-                              double packSeconds, double satelliteSeconds) {
+                              double packSeconds, double satelliteSeconds,
+                              double variantSeconds) {
   aw::options.nonoptimal = nonoptimal;
   aw::options.tagInlining = inlineMode;
   // Pack certificates are always computed; the stage only chooses whether the
@@ -242,6 +246,9 @@ void configureForRegistration(bool nonoptimal, aw::TagInlineMode inlineMode,
   aw::SatellitePruneOptions satellite = aw::options.satellite;
   satellite.maxSeconds = satelliteSeconds;
   aw::options.satellite = satellite;
+  aw::VariantClassPruneOptions variant = aw::options.variantClass;
+  variant.maxSeconds = variantSeconds;
+  aw::options.variantClass = variant;
   // The other four are always on for the registration itself.
   aw::options.tagPruning = true;
   aw::options.recipePruning = true;
@@ -249,6 +256,7 @@ void configureForRegistration(bool nonoptimal, aw::TagInlineMode inlineMode,
   aw::options.substitutionPruning = true;
   aw::options.seedPruning = true;
   aw::options.satellite.enabled = true;
+  aw::options.variantClass.enabled = true;
 }
 
 // ------------------------------------------------------- derived missing set
@@ -336,7 +344,7 @@ void usage() {
                "                [--amounts 1,100000] [--groups none,leaves,random20]\n"
                "                [--warmup N] [--repeats R]\n"
                "                [--time-limit 40] [--gap 0.01] [--workers 16]\n"
-               "                [--pack-seconds 60] [--satellite-seconds 2]\n"
+               "                [--pack-seconds 60] [--satellite-seconds 2] [--variant-seconds 0.05]\n"
                "                [--names <path>] [--quiet] [--preprocess-only]\n"
                "                [--trace-attempts]\n"
                "                [--ws-percent 0..100] [--ws-seed <n>]\n"
@@ -350,7 +358,7 @@ void usage() {
                "--names defaults to the `.names.tsv` next to the .awr and --ws-seed to\n"
                "20260101, so the subset is reproducible across tools.\n"
                "\n"
-               "stages (cumulative): none seed direct recipe substitution tag pack satellite\n");
+               "stages (cumulative): none seed direct recipe substitution tag pack variant satellite\n");
 }
 
 // Parse the --inline-tags value. Returns false on an unknown spelling.
@@ -400,6 +408,7 @@ int main(int argc, char **argv) {
   double gap = 0.01;
   double packSeconds = 60.0;
   double satelliteSeconds = 2.0;
+  double variantSeconds = 0.05;
   double wsFraction = 1.0;
 
   for (int i = 1; i < argc; i++) {
@@ -452,6 +461,7 @@ int main(int argc, char **argv) {
     else if (arg == "--workers") { std::string v; next(v); long long p = 0; if (!parseI64(v, p) || p < 0) return EXIT_FAILURE; workers = p; }
     else if (arg == "--pack-seconds") { std::string v; next(v); if (!parseDouble(v, packSeconds)) return EXIT_FAILURE; }
     else if (arg == "--satellite-seconds") { std::string v; next(v); if (!parseDouble(v, satelliteSeconds)) return EXIT_FAILURE; }
+    else if (arg == "--variant-seconds") { std::string v; next(v); if (!parseDouble(v, variantSeconds)) return EXIT_FAILURE; }
     else if (arg == "--inline-tags") {
       std::string value;
       next(value);
@@ -607,7 +617,7 @@ int main(int argc, char **argv) {
   const double parseMs = sinceMs(parseStart);
 
   aw::options.inlineSingleMemberTags = singleMemberInline;
-  configureForRegistration(nonoptimal, inlineMode, packSeconds, satelliteSeconds);
+  configureForRegistration(nonoptimal, inlineMode, packSeconds, satelliteSeconds, variantSeconds);
   const auto registerStart = Clock::now();
   aw::registerCraftingGraph(bytes);
   const double registerMs = sinceMs(registerStart);
@@ -670,6 +680,7 @@ int main(int argc, char **argv) {
         .num("workers", workers)
         .real("pack_seconds", packSeconds)
         .real("satellite_seconds", satelliteSeconds)
+        .real("variant_seconds", variantSeconds)
         .real("parse_ms", parseMs)
         .str("preprocess_scope", "engine")
         .boolean("ws_sampled", sampleWorkstations)

@@ -103,6 +103,28 @@ struct SatellitePruneOptions {
   double maxSeconds = 0.05;
 };
 
+// Budget for the interchangeable-variant (tag-orbit) pass.
+//
+// The pass runs inside reachableSubgraph on the assembled subgraph. For every
+// tag whose members could be an interchangeable class it shrinks the class until
+// it is closed under the conversions, then drops the class's internal
+// conversions. Running out of budget or hitting a bound only leaves a class
+// alone, so it can weaken the pass but cannot make it unsound.
+struct VariantClassPruneOptions {
+  bool enabled = true;
+
+  // A candidate class with more members than this is skipped: the fixpoint is
+  // quadratic in the member count in the worst case, and a class this wide is
+  // not a colour orbit.
+  uint32_t maxClassNodes = 4096;
+
+  // At most this many candidate tags are examined per query.
+  uint32_t maxCandidates = 4096;
+
+  // Wall-clock budget for the whole pass on one query. <= 0 means no limit.
+  double maxSeconds = 0.05;
+};
+
 // Process-wide planner options. Minecraft is serial and the crafting graph is
 // a singleton, so there is no thread safety to worry about.
 //
@@ -140,6 +162,10 @@ struct Options {
   // corresponding pass.
   PackPruneOptions pack;
   SatellitePruneOptions satellite;
+
+  // Interchangeable-variant elimination. Read by `reachableSubgraph` on every
+  // query, so it can be flipped at any time.
+  VariantClassPruneOptions variantClass;
 
   // Query-time re-pruning of the reachable subgraph. Read by
   // `reachableSubgraph` on every query, so it can be flipped at any time.

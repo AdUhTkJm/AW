@@ -949,6 +949,7 @@ int main(int argc, char** argv) {
   ProfileGuard profileGuard;
   double packSeconds = -1.0;
   double satelliteSeconds = -1.0;
+  double variantSeconds = -1.0;
   uint64_t planAmount = 1;
   aw::solver::Options solverOptions;
   aw::Handle reach = 0;
@@ -963,6 +964,7 @@ int main(int argc, char** argv) {
   bool noSubstitutionPrune = false;
   bool noPackPrune = false;
   bool noSatellitePrune = false;
+  bool noVariantPrune = false;
   bool noSeedPrune = false;
   bool noTagTidy = false;
   bool optimalPruning = false;
@@ -994,6 +996,8 @@ int main(int argc, char** argv) {
       noPackPrune = true;
     } else if (arg == "--no-satellite-prune") {
       noSatellitePrune = true;
+    } else if (arg == "--no-variant-prune") {
+      noVariantPrune = true;
     } else if (arg == "--no-seed-prune") {
       noSeedPrune = true;
     } else if (arg == "--no-tag-tidy") {
@@ -1014,6 +1018,11 @@ int main(int argc, char** argv) {
     } else if (arg == "--satellite-seconds") {
       if (i + 1 >= argc || !parseDouble(argv[++i], satelliteSeconds)) {
         std::cerr << "--satellite-seconds needs a number of seconds\n";
+        return EXIT_FAILURE;
+      }
+    } else if (arg == "--variant-seconds") {
+      if (i + 1 >= argc || !parseDouble(argv[++i], variantSeconds)) {
+        std::cerr << "--variant-seconds needs a number of seconds\n";
         return EXIT_FAILURE;
       }
     } else if (arg == "--pack-seconds") {
@@ -1138,6 +1147,7 @@ int main(int argc, char** argv) {
                    "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                    "                   [--no-pack-prune]\n"
                    "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
+                   "                   [--no-variant-prune] [--variant-seconds <s>]\n"
                    "                   [--no-seed-prune] [--no-tag-tidy] [--optimal] [--flash] [--no-cycle-retries]\n"
                    "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
@@ -1160,6 +1170,7 @@ int main(int argc, char** argv) {
                  "                   [--no-prune] [--no-recipe-prune] [--no-direct-prune] [--no-substitution-prune]\n"
                  "                   [--no-pack-prune]\n"
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
+                 "                   [--no-variant-prune] [--variant-seconds <s>]\n"
                  "                   [--no-seed-prune] [--no-tag-tidy] [--optimal] [--flash] [--no-cycle-retries]\n"
                  "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
@@ -1217,6 +1228,16 @@ int main(int argc, char** argv) {
     if (satelliteSeconds >= 0.0)
       satelliteOptions.maxSeconds = satelliteSeconds;
     aw::options.satellite = satelliteOptions;
+  }
+
+  // Interchangeable-variant elimination runs per query as well.
+  {
+    aw::VariantClassPruneOptions variantOptions = aw::options.variantClass;
+    if (noVariantPrune || noPrune)
+      variantOptions.enabled = false;
+    if (variantSeconds >= 0.0)
+      variantOptions.maxSeconds = variantSeconds;
+    aw::options.variantClass = variantOptions;
   }
 
   // Seed pruning runs per query, after the walk and every pruning pass.

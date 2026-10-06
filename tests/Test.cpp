@@ -1183,6 +1183,47 @@ aw::vector<std::byte> buildClosedIslandSample() {
   return w.out;
 }
 
+// A colour orbit behind a generic tag, the shape variant-class elimination is
+// aimed at. Handles 1..7 are real, 8..10 are tags. Handle 1 is the target.
+//
+//   target   <- r0 (x1, ws [1], TE x1)           the exit
+//            <- r0 (x1, ws [1], A + TE x1)       when the named consumer is on
+//   A        <- r1 (x1, ws [1], resourceA x1)    the direct producers
+//            <- r2 (x1, ws [1], dyeA + P_A x1)   the dyes
+//   B        <- r3 (x1, ws [1], resourceB x1)
+//            <- r4 (x1, ws [1], dyeB + P_B x1)
+//   TE = {A, B}  <- r5, r6 (tag edges)
+//   P_A = {B}    <- r7 (tag edge)
+//   P_B = {A}    <- r8 (tag edge)
+//
+// TE accepts both members, so no plan needs to dye one colour into the other:
+// the plan already directly produces as many members as it spends through TE.
+// r2, r4 and the member edges of P_A/P_B (r7, r8) are dropped. With the named
+// consumer on, the exit wants A itself, so A leaves the orbit and r2 stays.
+aw::vector<std::byte> buildVariantClassSample(bool namedConsumer) {
+  AwrWriter w;
+  w.header(7, 6);
+  w.item(1, 1);
+  if (namedConsumer)
+    w.recipe(1, {1}, {{2, 1}, {8, 1}});
+  else
+    w.recipe(1, {1}, {{8, 1}});
+  w.item(2, 2);
+  w.recipe(1, {1}, {{4, 1}});
+  w.recipe(1, {1}, {{6, 1}, {9, 1}});
+  w.item(3, 2);
+  w.recipe(1, {1}, {{5, 1}});
+  w.recipe(1, {1}, {{7, 1}, {10, 1}});
+  w.item(8, 2);
+  w.recipe(1, {}, {{2, 1}});
+  w.recipe(1, {}, {{3, 1}});
+  w.item(9, 1);
+  w.recipe(1, {}, {{3, 1}});
+  w.item(10, 1);
+  w.recipe(1, {}, {{2, 1}});
+  return w.out;
+}
+
 aw::solver::Matrix makeMatrix(
     uint32_t rows, uint32_t cols,
     const aw::vector<aw::vector<std::pair<uint32_t, int64_t>>> &columns) {
@@ -3819,6 +3860,112 @@ void testClosedIslandPruning() {
   aw::options.reprune.enabled = false;
 }
 
+// A tag that every external consumer accepts makes its members interchangeable,
+// so dyeing one member into another is never needed. The other passes do not
+// see this: the class is not a satellite (it leaks its useful item) and no
+// recipe is componentwise dominated.
+void testVariantClassPruning() {
+  std::cout << "[Test] interchangeable-variant elimination\n";
+  const aw::Handle all[] = {1, 2, 3};
+
+  aw::options.tagPruning = false;
+  aw::options.recipePruning = false;
+  aw::options.directPruning = false;
+  aw::options.substitutionPruning = false;
+  aw::options.pack.enabled = false;
+  aw::options.satellite.enabled = false;
+
+  // Stock the four leaves so seed pruning keeps the chain alive.
+  auto stockedLeaves = []() {
+    aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    inventory[3] = 1000;  // handle 4, resourceA
+    inventory[4] = 1000;  // handle 5, resourceB
+    inventory[5] = 1000;  // handle 6, dyeA
+    inventory[6] = 1000;  // handle 7, dyeB
+    return inventory;
+  };
+
+  // The clean orbit: the dyes (r2, r4) and the P_A/P_B member edges (r7, r8)
+  // go, the direct producers and the TE member edges stay.
+  aw::registerCraftingGraph(buildVariantClassSample(false));
+  expect(aw::getCraftingError() == nullptr, "variant sample parses");
+  {
+    const aw::vector<aw::Amount> inventory = stockedLeaves();
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(!subgraphHasRecipe(sub, 2), "the A dye conversion is dropped");
+    expect(!subgraphHasRecipe(sub, 4), "the B dye conversion is dropped");
+    expect(!subgraphHasRecipe(sub, 7) && !subgraphHasRecipe(sub, 8),
+           "the dead conversion tags' member edges go with them");
+    expect(subgraphHasRecipe(sub, 0) && subgraphHasRecipe(sub, 5) &&
+               subgraphHasRecipe(sub, 6),
+           "the exit tag and its member edges survive");
+    expect(subgraphHasRecipe(sub, 1) && subgraphHasRecipe(sub, 3),
+           "the direct producers survive");
+  }
+
+  // A real recipe that wants A by name removes A from the orbit, so the
+  // conversion into A must stay.
+  aw::registerCraftingGraph(buildVariantClassSample(true));
+  expect(aw::getCraftingError() == nullptr, "variant sample with a consumer parses");
+  {
+    const aw::vector<aw::Amount> inventory = stockedLeaves();
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(subgraphHasRecipe(sub, 2), "a named member keeps its conversion");
+    expect(subgraphHasRecipe(sub, 0),
+           "the exit that names the member survives");
+  }
+
+  // Disabling the pass keeps everything.
+  aw::options.variantClass.enabled = false;
+  aw::registerCraftingGraph(buildVariantClassSample(false));
+  {
+    const aw::vector<aw::Amount> inventory = stockedLeaves();
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(subgraphHasRecipe(sub, 2) && subgraphHasRecipe(sub, 7),
+           "the pass can be switched off");
+  }
+  aw::options.variantClass.enabled = true;
+
+  // The optimum must not move for any amount: the direct route is one step,
+  // and so is a conversion, so the class is a pure wash the pass may remove.
+  {
+    const aw::vector<std::byte> bytes = buildVariantClassSample(false);
+    auto total = [](const aw::PlanResult &r) {
+      int64_t sum = 0;
+      for (int64_t x : r.exec)
+        sum += x;
+      return sum;
+    };
+    auto plan = [&](bool prune, aw::Amount amount) {
+      aw::options.variantClass.enabled = prune;
+      aw::registerCraftingGraph(bytes);
+      const aw::CraftingGraph &graph = aw::getCraftingGraph();
+      aw::vector<aw::Amount> inventory(graph.nItem, 0);
+      for (aw::ItemId leaf : {3u, 4u, 5u, 6u})
+        inventory[leaf] = 1000;
+      const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+      const aw::PlanResult r = aw::planCrafting(sub, sub.translate(0), amount, inventory);
+      return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
+    };
+    for (aw::Amount amount : {1, 3, 8}) {
+      const auto full = plan(false, amount);
+      const auto pruned = plan(true, amount);
+      expect(full.first == pruned.first,
+             "variant: status agrees with and without the pass");
+      expect(full.second == pruned.second,
+             "variant: optimum agrees with and without the pass");
+    }
+    aw::options.variantClass.enabled = true;
+  }
+
+  aw::options.tagPruning = true;
+  aw::options.recipePruning = true;
+  aw::options.directPruning = true;
+  aw::options.substitutionPruning = true;
+  aw::options.pack.enabled = true;
+  aw::options.satellite.enabled = true;
+}
+
 void testSatellitePruningParity() {
   std::cout << "[Test] satellite elimination preserves the optimum\n";
 
@@ -4651,6 +4798,7 @@ int main() {
   testSatellitePruning();
   testSatelliteLeakPruning();
   testClosedIslandPruning();
+  testVariantClassPruning();
   testSatellitePruningParity();
   testPlanProtocol();
   testByproducts();

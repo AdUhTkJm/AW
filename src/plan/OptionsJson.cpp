@@ -191,6 +191,16 @@ bool readSatelliteOptions(const json &j, SatellitePruneOptions &out,
                     error);
 }
 
+bool readVariantClassOptions(const json &j, VariantClassPruneOptions &out,
+                             std::string &error) {
+  return readBool(j, "enabled", out.enabled, error) &&
+         readU32(j, "maxClassNodes", out.maxClassNodes, error) &&
+         readU32(j, "maxCandidates", out.maxCandidates, error) &&
+         readDouble(j, "maxSeconds", out.maxSeconds, error) &&
+         checkKnown(j, {"enabled", "maxClassNodes", "maxCandidates", "maxSeconds"},
+                    error);
+}
+
 // A nested object is optional; when present it must really be an object.
 bool readNested(const json &j, const char *key, const json *&out, std::string &error) {
   const auto it = j.find(key);
@@ -259,6 +269,13 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
     if (satellite != nullptr && !readSatelliteOptions(*satellite, next.satellite, error))
       return false;
 
+    const json *variantClass = nullptr;
+    if (!readNested(j, "variantClass", variantClass, error))
+      return false;
+    if (variantClass != nullptr &&
+        !readVariantClassOptions(*variantClass, next.variantClass, error))
+      return false;
+
     if (!readSize(j, "maxTagMembers", next.maxTagMembers, error) ||
         !readU64(j, "maxTagPairs", next.maxTagPairs, error) ||
         !readU64(j, "maxTagCoverWork", next.maxTagCoverWork, error) ||
@@ -283,7 +300,8 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
                     {"nonoptimal", "tagPruning", "recipePruning", "directPruning",
                      "substitutionPruning", "deadNodePruning", "seedPruning",
                      "tagTidy", "outputPruningProfile",
-                     "tagInlining", "pack", "satellite", "maxTagMembers", "maxTagPairs",
+                     "tagInlining", "pack", "satellite", "variantClass", "maxTagMembers",
+                     "maxTagPairs",
                      "maxTagCoverWork", "maxWitnessPairs", "maxPrunePairs",
                      "maxSiblingRecipes", "maxWitnessProducers", "maxSubstitutionWork",
                      "maxSubstitutionCostWork", "maxSubstitutionDepth", "maxCostDepth",
@@ -374,6 +392,12 @@ std::string plannerOptionsJson() noexcept {
         {"maxComponentNodes", options.satellite.maxComponentNodes},
         {"maxIslandNodes", options.satellite.maxIslandNodes},
         {"maxSeconds", options.satellite.maxSeconds},
+    };
+    j["variantClass"] = {
+        {"enabled", options.variantClass.enabled},
+        {"maxClassNodes", options.variantClass.maxClassNodes},
+        {"maxCandidates", options.variantClass.maxCandidates},
+        {"maxSeconds", options.variantClass.maxSeconds},
     };
     j["maxTagMembers"] = options.maxTagMembers;
     j["maxTagPairs"] = options.maxTagPairs;
