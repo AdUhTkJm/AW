@@ -1,3 +1,5 @@
+> **Stale (paper workspace, 2026-10):** the dataset table, the target-sample design (§3.2), the budgets (§3.6) and the configuration list (§3.4) below predate the controlled two-panel collection the paper reports.  The current sampling frame and the exact command that regenerates the paper's tables are in `paper/scripts/collect_data.py`, `paper/tables/instances.tex` and `paper/Makefile`; the numbers in §3.1 no longer match the `.awr` files on disk.
+
 # Cross-engine crafting-planner benchmark
 
 Everything needed to compare **AW** against the two external baselines (**Thunderbolt
