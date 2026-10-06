@@ -14,7 +14,7 @@
 // a uniform cost always holds.
 //
 // The pass computes the greatest fixpoint of a candidate relation over pairs
-// (x, w), read "x is dominated by w", where x is a real item or a simple tag
+// (x, w), read "x is dominated by w", where x is a real item or a tag
 // and w is always a real item. `TagPruner` holds the pass state; each stage is
 // one member function, called by run() top to bottom.
 //
@@ -93,7 +93,7 @@ void mergeDisjoint(const aw::vector<ItemId> &a, const aw::vector<ItemId> &b,
 // State of one tag-pruning pass over the crafting graph. run() calls the
 // stages in this order:
 //
-//   findSimpleTags          which pseudo-items are simple tags, and their members
+//   findSimpleTags          which pseudo-items are tags, and their members
 //   budgetTagUniverse       admit tags into the relation within the pair budget
 //   buildMemberIndex        member -> tags containing it (CSR)
 //   buildConsumerIndex      tag -> real items consuming it (CSR)
@@ -498,7 +498,7 @@ void TagPruner::buildQualifiedInputs() noexcept {
 }
 
 // ---- The per-item union of those --------------------------------------
-// Per real item: the real items and simple tags that some recipe of it
+// Per real item: the real items and tags that some recipe of it
 // consumes in an amount at least equal to that recipe's output. `validItem`
 // reads the per-recipe lists directly; the closure below expands this union.
 void TagPruner::computeQualifiedInputs() noexcept {
@@ -738,7 +738,7 @@ Amount consume(aw::vector<std::pair<ItemId, Amount>> &pool, ItemId item,
 // ---- Column cover ------------------------------------------------------
 // Besides consuming a dominator (directly or through a tag), a recipe of m
 // can also be replaced by a recipe of the candidate dominator: it must yield
-// at least as much and consume no more of every item, with a simple tag it
+// at least as much and consume no more of every item, with a tag it
 // consumes allowed to pick any member. One execution of s then stands in for
 // one of r, so it must not cost more than r either; under a uniform cost that
 // is always true.
@@ -874,7 +874,7 @@ void TagPruner::fixRow(ItemId w) noexcept {
     if (!(rowState[x] & ROW_ALIVE))
       continue;
 
-    // A first component at or above nReal is a simple tag: its pair is the
+    // A first component at or above nReal is a tag: its pair is the
     // AND over its members, not a recipe scan.
     const bool tagPair = x >= nReal;
     if (tagPair ? validTag(x, w) : validItem(x, w))

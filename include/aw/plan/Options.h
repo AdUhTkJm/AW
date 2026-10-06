@@ -125,6 +125,46 @@ struct VariantClassPruneOptions {
   double maxSeconds = 0.05;
 };
 
+// Budget for the tag-exclusive producer pass.
+//
+// The pass runs inside reachableSubgraph on the assembled subgraph. A real item
+// is tag-exclusive for a tag T when every consumer of it is a member edge
+// of T. A real recipe whose outputs are all exclusive for the same T is dropped
+// when it produces no more M(T)-capacity than it consumes. The target is the
+// only guard; the inventory needs none. Running out of budget only leaves
+// recipes alone, so it can weaken the pass but cannot make it unsound.
+struct TagExclusivePruneOptions {
+  bool enabled = true;
+
+  // Wall-clock budget for the whole pass on one query. <= 0 means no limit.
+  double maxSeconds = 0.05;
+};
+
+// Budget for the variant-folding pass.
+//
+// The pass runs inside reachableSubgraph on the assembled subgraph. It looks
+// for the decorative twins of a resource: items that a tag, or a chain of
+// "same recipe, other item" copies, makes interchangeable with a more mundane
+// base, and that no real recipe outside that structure ever demands by name.
+// Such an item is folded into its base, and every recipe that mentions it is
+// dropped. The fold is only applied when a signature check proves that every
+// dropped recipe can be replayed by recipes that survive, so an exhausted
+// budget or a failed check only means nothing is pruned.
+//
+// See docs/algorithm.typ (多出口的推广) and VariantFoldPrune.cpp.
+struct VariantFoldPruneOptions {
+  bool enabled = true;
+
+  // A candidate fold with more items in it than this is skipped. The check is
+  // linear per recipe, so this only bounds the repair search.
+  uint32_t maxFoldItems = 4096;
+
+  // Wall-clock budget for the whole pass on one query. <= 0 means no limit.
+  // The pass folds a few hundred items on the ATM subgraph in about a third of
+  // a second; running out only means nothing is pruned.
+  double maxSeconds = 1.0;
+};
+
 // Process-wide planner options. Minecraft is serial and the crafting graph is
 // a singleton, so there is no thread safety to worry about.
 //
@@ -166,6 +206,14 @@ struct Options {
   // Interchangeable-variant elimination. Read by `reachableSubgraph` on every
   // query, so it can be flipped at any time.
   VariantClassPruneOptions variantClass;
+
+  // Tag-exclusive producer elimination. Read by `reachableSubgraph` on every
+  // query, so it can be flipped at any time.
+  TagExclusivePruneOptions tagExclusive;
+
+  // Variant-folding elimination. Read by `reachableSubgraph` on every query, so
+  // it can be flipped at any time.
+  VariantFoldPruneOptions variantFold;
 
   // Query-time re-pruning of the reachable subgraph. Read by
   // `reachableSubgraph` on every query, so it can be flipped at any time.

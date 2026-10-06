@@ -1731,6 +1731,56 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
     }
   }
 
+  // Tag-exclusive producer elimination. A query-time pass on the same
+  // post-variant graph, and likewise before the closed-island scan: removing a
+  // neutral producer can leave the tag it fed without a consumer. The variant
+  // pass ran first, so any consumer it removed is already gone and more items
+  // read as tag-exclusive here.
+  if (options.tagExclusive.enabled) {
+    const ItemId subTarget = result.translate(CraftingGraph::itemNode(output));
+    if (subTarget != UINT32_MAX) {
+      aw::vector<uint8_t> exclusive(result.graph.nRecipe, 0);
+      if (computeTagExclusivePruning(result, subTarget, exclusive)) {
+        size_t kept = 0;
+        for (size_t i = 0; i < built.size(); i++) {
+          if (exclusive.size() > i && exclusive[i])
+            continue;
+          if (kept != i)
+            built[kept] = std::move(built[i]);
+          kept++;
+        }
+        built.resize(kept);
+        dropUnusedItems(query.itemSeen, output, built);
+        result = assembleSubgraph(query.itemSeen, built);
+      }
+    }
+  }
+
+  // Variant folding. A decorative twin is folded onto its base when the
+  // signature check proves the drop is optimality preserving. It runs after
+  // the tag-exclusive pass so the recipes that one already removed are gone,
+  // and before the closed-island scan because folding can cut an island off
+  // from the items it used to reach.
+  if (options.variantFold.enabled) {
+    const ItemId subTarget = result.translate(CraftingGraph::itemNode(output));
+    if (subTarget != UINT32_MAX) {
+      aw::vector<uint8_t> folded(result.graph.nRecipe, 0);
+      if (computeVariantFoldPruning(result, subTarget, inventory, folded)) {
+        size_t kept = 0;
+        for (size_t i = 0; i < built.size(); i++) {
+          if (folded.size() > i && folded[i])
+            continue;
+          if (kept != i)
+            built[kept] = std::move(built[i]);
+          kept++;
+        }
+        built.resize(kept);
+        dropUnusedItems(query.itemSeen, output, built);
+        result = assembleSubgraph(query.itemSeen, built);
+      }
+    }
+  }
+
   // Escape-free satellite elimination. It has to come after the re-pruning:
   // removing a dominated recycling recipe can be what cuts a closed island off
   // from the needed items, so only the post-reprune graph is the one the

@@ -73,7 +73,7 @@ void addToColumn(const ColumnView &col,
 }
 
 // The cost relation. `costs(y, w)` is true when every way of producing one
-// unit of y consumes at least one unit of w. A simple tag is the AND over its
+// unit of y consumes at least one unit of w. A tag is the AND over its
 // members; a real item is the AND over its recipes, each of which needs one
 // amount-qualified input that is w or itself costs w. Cycles are cut, so the
 // relation is a least fixpoint and its true set is small.
@@ -88,7 +88,7 @@ void addToColumn(const ColumnView &col,
 //   * when an item enters, every real recipe consuming it as a qualified input
 //     becomes satisfied -- the recursion needs only one such input per recipe;
 //   * a real item enters once all of its recipes are satisfied, an eligible
-//     simple tag once all of its members have entered;
+//     tag once all of its members have entered;
 //   * the level counts derivation height, so stopping at options.maxCostDepth
 //     is exactly the old depth cap.
 //
@@ -105,7 +105,7 @@ struct CostContext {
   // over its own recipe.
   aw::vector<uint32_t> qualOffsets;   // nItem + 1
   aw::vector<uint32_t> qualRecipes;   // E
-  // Real member -> eligible simple tags containing it.
+  // Real member -> eligible tags containing it.
   aw::vector<uint32_t> memberTagOffsets;  // nReal + 1
   aw::vector<uint32_t> memberTagTargets;
   aw::vector<uint32_t> recipeCount;   // nReal
@@ -141,7 +141,7 @@ struct CostContext {
 };
 
 // Precomputes the two inverted indices the row closure walks: recipes per
-// amount-qualified input, and eligible simple tags per real member.
+// amount-qualified input, and eligible tags per real member.
 void CostContext::build(bool requireUnit, const aw::vector<uint8_t> &unitOutput) noexcept {
   const CraftingGraph &g = *graph;
 

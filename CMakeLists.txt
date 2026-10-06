@@ -80,7 +80,9 @@ add_library(aw_crafting STATIC
    src/plan/SubstitutionPrune.cpp
    src/plan/TagPrune.cpp
    src/plan/TagTidy.cpp
+   src/plan/TagExclusivePrune.cpp
    src/plan/VariantClassPrune.cpp
+   src/plan/VariantFoldPrune.cpp
 )
 target_include_directories(aw_crafting PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(aw_crafting PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -109,7 +111,9 @@ if(AW_STRICT_FLAGS)
       src/plan/SubstitutionPrune.cpp
       src/plan/TagPrune.cpp
       src/plan/TagTidy.cpp
+      src/plan/TagExclusivePrune.cpp
       src/plan/VariantClassPrune.cpp
+      src/plan/VariantFoldPrune.cpp
       PROPERTIES COMPILE_OPTIONS "${AW_STRICT_FLAGS}"
    )
 endif()

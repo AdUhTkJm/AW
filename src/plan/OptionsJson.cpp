@@ -201,6 +201,21 @@ bool readVariantClassOptions(const json &j, VariantClassPruneOptions &out,
                     error);
 }
 
+bool readTagExclusiveOptions(const json &j, TagExclusivePruneOptions &out,
+                             std::string &error) {
+  return readBool(j, "enabled", out.enabled, error) &&
+         readDouble(j, "maxSeconds", out.maxSeconds, error) &&
+         checkKnown(j, {"enabled", "maxSeconds"}, error);
+}
+
+bool readVariantFoldOptions(const json &j, VariantFoldPruneOptions &out,
+                            std::string &error) {
+  return readBool(j, "enabled", out.enabled, error) &&
+         readU32(j, "maxFoldItems", out.maxFoldItems, error) &&
+         readDouble(j, "maxSeconds", out.maxSeconds, error) &&
+         checkKnown(j, {"enabled", "maxFoldItems", "maxSeconds"}, error);
+}
+
 // A nested object is optional; when present it must really be an object.
 bool readNested(const json &j, const char *key, const json *&out, std::string &error) {
   const auto it = j.find(key);
@@ -276,6 +291,20 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
         !readVariantClassOptions(*variantClass, next.variantClass, error))
       return false;
 
+    const json *tagExclusive = nullptr;
+    if (!readNested(j, "tagExclusive", tagExclusive, error))
+      return false;
+    if (tagExclusive != nullptr &&
+        !readTagExclusiveOptions(*tagExclusive, next.tagExclusive, error))
+      return false;
+
+    const json *variantFold = nullptr;
+    if (!readNested(j, "variantFold", variantFold, error))
+      return false;
+    if (variantFold != nullptr &&
+        !readVariantFoldOptions(*variantFold, next.variantFold, error))
+      return false;
+
     if (!readSize(j, "maxTagMembers", next.maxTagMembers, error) ||
         !readU64(j, "maxTagPairs", next.maxTagPairs, error) ||
         !readU64(j, "maxTagCoverWork", next.maxTagCoverWork, error) ||
@@ -300,7 +329,8 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
                     {"nonoptimal", "tagPruning", "recipePruning", "directPruning",
                      "substitutionPruning", "deadNodePruning", "seedPruning",
                      "tagTidy", "outputPruningProfile",
-                     "tagInlining", "pack", "satellite", "variantClass", "maxTagMembers",
+                     "tagInlining", "pack", "satellite", "variantClass", "tagExclusive",
+                     "variantFold", "maxTagMembers",
                      "maxTagPairs",
                      "maxTagCoverWork", "maxWitnessPairs", "maxPrunePairs",
                      "maxSiblingRecipes", "maxWitnessProducers", "maxSubstitutionWork",
@@ -398,6 +428,15 @@ std::string plannerOptionsJson() noexcept {
         {"maxClassNodes", options.variantClass.maxClassNodes},
         {"maxCandidates", options.variantClass.maxCandidates},
         {"maxSeconds", options.variantClass.maxSeconds},
+    };
+    j["tagExclusive"] = {
+        {"enabled", options.tagExclusive.enabled},
+        {"maxSeconds", options.tagExclusive.maxSeconds},
+    };
+    j["variantFold"] = {
+        {"enabled", options.variantFold.enabled},
+        {"maxFoldItems", options.variantFold.maxFoldItems},
+        {"maxSeconds", options.variantFold.maxSeconds},
     };
     j["maxTagMembers"] = options.maxTagMembers;
     j["maxTagPairs"] = options.maxTagPairs;

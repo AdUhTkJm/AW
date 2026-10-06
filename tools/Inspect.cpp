@@ -950,6 +950,8 @@ int main(int argc, char** argv) {
   double packSeconds = -1.0;
   double satelliteSeconds = -1.0;
   double variantSeconds = -1.0;
+  double tagExclusiveSeconds = -1.0;
+  double variantFoldSeconds = -1.0;
   uint64_t planAmount = 1;
   aw::solver::Options solverOptions;
   aw::Handle reach = 0;
@@ -965,6 +967,8 @@ int main(int argc, char** argv) {
   bool noPackPrune = false;
   bool noSatellitePrune = false;
   bool noVariantPrune = false;
+  bool noTagExclusivePrune = false;
+  bool noVariantFoldPrune = false;
   bool noSeedPrune = false;
   bool noTagTidy = false;
   bool optimalPruning = false;
@@ -998,6 +1002,10 @@ int main(int argc, char** argv) {
       noSatellitePrune = true;
     } else if (arg == "--no-variant-prune") {
       noVariantPrune = true;
+    } else if (arg == "--no-tag-exclusive-prune") {
+      noTagExclusivePrune = true;
+    } else if (arg == "--no-variant-fold-prune") {
+      noVariantFoldPrune = true;
     } else if (arg == "--no-seed-prune") {
       noSeedPrune = true;
     } else if (arg == "--no-tag-tidy") {
@@ -1023,6 +1031,16 @@ int main(int argc, char** argv) {
     } else if (arg == "--variant-seconds") {
       if (i + 1 >= argc || !parseDouble(argv[++i], variantSeconds)) {
         std::cerr << "--variant-seconds needs a number of seconds\n";
+        return EXIT_FAILURE;
+      }
+    } else if (arg == "--tag-exclusive-seconds") {
+      if (i + 1 >= argc || !parseDouble(argv[++i], tagExclusiveSeconds)) {
+        std::cerr << "--tag-exclusive-seconds needs a number of seconds\n";
+        return EXIT_FAILURE;
+      }
+    } else if (arg == "--variant-fold-seconds") {
+      if (i + 1 >= argc || !parseDouble(argv[++i], variantFoldSeconds)) {
+        std::cerr << "--variant-fold-seconds needs a number of seconds\n";
         return EXIT_FAILURE;
       }
     } else if (arg == "--pack-seconds") {
@@ -1148,6 +1166,8 @@ int main(int argc, char** argv) {
                    "                   [--no-pack-prune]\n"
                    "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
                    "                   [--no-variant-prune] [--variant-seconds <s>]\n"
+                   "                   [--no-tag-exclusive-prune] [--tag-exclusive-seconds <s>]\n"
+                   "                   [--no-variant-fold-prune] [--variant-fold-seconds <s>]\n"
                    "                   [--no-seed-prune] [--no-tag-tidy] [--optimal] [--flash] [--no-cycle-retries]\n"
                    "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
@@ -1171,6 +1191,7 @@ int main(int argc, char** argv) {
                  "                   [--no-pack-prune]\n"
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
                  "                   [--no-variant-prune] [--variant-seconds <s>]\n"
+                 "                   [--no-tag-exclusive-prune] [--tag-exclusive-seconds <s>]\n"
                  "                   [--no-seed-prune] [--no-tag-tidy] [--optimal] [--flash] [--no-cycle-retries]\n"
                  "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
@@ -1238,6 +1259,26 @@ int main(int argc, char** argv) {
     if (variantSeconds >= 0.0)
       variantOptions.maxSeconds = variantSeconds;
     aw::options.variantClass = variantOptions;
+  }
+
+  // Tag-exclusive producer elimination runs per query as well.
+  {
+    aw::TagExclusivePruneOptions exclusiveOptions = aw::options.tagExclusive;
+    if (noTagExclusivePrune || noPrune)
+      exclusiveOptions.enabled = false;
+    if (tagExclusiveSeconds >= 0.0)
+      exclusiveOptions.maxSeconds = tagExclusiveSeconds;
+    aw::options.tagExclusive = exclusiveOptions;
+  }
+
+  // Variant folding runs per query as well.
+  {
+    aw::VariantFoldPruneOptions foldOptions = aw::options.variantFold;
+    if (noVariantFoldPrune || noPrune)
+      foldOptions.enabled = false;
+    if (variantFoldSeconds >= 0.0)
+      foldOptions.maxSeconds = variantFoldSeconds;
+    aw::options.variantFold = foldOptions;
   }
 
   // Seed pruning runs per query, after the walk and every pruning pass.

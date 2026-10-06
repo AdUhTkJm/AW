@@ -653,7 +653,7 @@ aw::vector<std::byte> buildTransitiveClosureSample() {
 // Dominated-input substitution. `X <- T` loses to `X x9 <- w` once every member
 // of the tag T is paid for with w: A is made directly from w, and B only through
 // C, which is the real-input chain the substitution has to follow upward. T is a
-// simple tag of {A, B}.
+// tag of {A, B}.
 //
 //   handle 1 X <- r0 (x1, ws [6], T x1)
 //              <- r1 (x9, ws [6], w x1)
@@ -1221,6 +1221,51 @@ aw::vector<std::byte> buildVariantClassSample(bool namedConsumer) {
   w.recipe(1, {}, {{3, 1}});
   w.item(10, 1);
   w.recipe(1, {}, {{2, 1}});
+  return w.out;
+}
+
+// A per-item tag-exclusive shape. Handles 1..9 are real, 10 is the tag; 2, 4
+// and 6 are leaves and 8 (side) is only ever a byproduct. Handle 1 is the
+// target.
+//
+//   target <- r0 (x1, ws [1], TE x1, other x1, side x1)
+//   B      <- r1 (x1, ws [1], resourceB x1)            stays, a net source
+//          <- r2 (x1, ws [1], A x1, dye x1)           drop, B is exclusive
+//          <- r3 (x1, ws [1], side x1; A x1, dye x1)  stays, side leaks out
+//   A      <- r4 (x1, ws [1], resourceA x1)
+//   other  <- r5 (x1, ws [1], A x1)
+//   C      <- r6 (x1, ws [1], TE x1)                   drop, TE itself pays
+//   TE = {A, B, C} <- r7, r8, r9 (tag edges)
+//
+// A has a real consumer (r5), so it leaves the variant class and r2's input A
+// stops paying under the class test; it is the per-item credit of any M(TE)
+// member that drops r2 here. r1 shows a net source must stay, r3 shows a
+// byproduct with a real consumer must stay, and r6 shows a tag input pays.
+aw::vector<std::byte> buildTagExclusiveSample() {
+  AwrWriter w;
+  w.header(9, 6);
+
+  w.item(1, 1);
+  w.recipe(1, {1}, {{7, 1}, {8, 1}, {10, 1}});
+
+  w.item(3, 3);
+  w.recipe(1, {1}, {{2, 1}});
+  w.recipe(1, {1}, {{5, 1}, {6, 1}});
+  w.recipe(1, {1}, {{8, 1}}, {{5, 1}, {6, 1}});
+
+  w.item(5, 1);
+  w.recipe(1, {1}, {{4, 1}});
+
+  w.item(7, 1);
+  w.recipe(1, {1}, {{5, 1}});
+
+  w.item(9, 1);
+  w.recipe(1, {1}, {{10, 1}});
+
+  w.item(10, 3);
+  w.recipe(1, {}, {{5, 1}});
+  w.recipe(1, {}, {{3, 1}});
+  w.recipe(1, {}, {{9, 1}});
   return w.out;
 }
 
@@ -3966,6 +4011,102 @@ void testVariantClassPruning() {
   aw::options.satellite.enabled = true;
 }
 
+void testTagExclusivePruning() {
+  std::cout << "[Test] tag-exclusive producer elimination\n";
+  const aw::Handle all[] = {1, 2, 3};
+
+  aw::options.tagPruning = false;
+  aw::options.recipePruning = false;
+  aw::options.directPruning = false;
+  aw::options.substitutionPruning = false;
+  aw::options.pack.enabled = false;
+  aw::options.satellite.enabled = false;
+  aw::options.variantClass.enabled = false;
+
+  // Stock the leaves so seed pruning keeps the chain alive. Handles 2, 4 and 6
+  // are items 1, 3 and 5.
+  auto stockedLeaves = []() {
+    aw::vector<aw::Amount> inventory(aw::getCraftingGraph().nItem, 0);
+    inventory[1] = 1000;  // handle 2, resourceB
+    inventory[3] = 1000;  // handle 4, resourceA
+    inventory[5] = 1000;  // handle 6, dye
+    return inventory;
+  };
+
+  // Canonical recipe order for this sample: 0 target, 1 B <- resourceB,
+  // 2 B <- A + dye, 3 B + side <- A + dye, 4 A <- resourceA, 5 other <- A,
+  // 6 C <- TE, 7 TE <- B, 8 TE <- A, 9 TE <- C.
+  aw::registerCraftingGraph(buildTagExclusiveSample());
+  expect(aw::getCraftingError() == nullptr, "tag-exclusive sample parses");
+  {
+    const aw::vector<aw::Amount> inventory = stockedLeaves();
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(!subgraphHasRecipe(sub, 2), "the neutral conversion into B is dropped");
+    expect(!subgraphHasRecipe(sub, 6), "the tag-fed C is dropped");
+    expect(subgraphHasRecipe(sub, 1), "the net source producer survives");
+    expect(subgraphHasRecipe(sub, 3), "the byproduct producer survives");
+    expect(subgraphHasRecipe(sub, 7) && subgraphHasRecipe(sub, 8),
+           "the member edges survive");
+  }
+
+  // A query that names B keeps its producers.
+  {
+    const aw::vector<aw::Amount> inventory = stockedLeaves();
+    const aw::Subgraph sub = aw::reachableSubgraph(3, all, inventory);
+    expect(subgraphHasRecipe(sub, 2), "a query for B keeps its producer");
+  }
+
+  // Switching the pass off keeps the conversions.
+  aw::options.tagExclusive.enabled = false;
+  aw::registerCraftingGraph(buildTagExclusiveSample());
+  {
+    const aw::vector<aw::Amount> inventory = stockedLeaves();
+    const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+    expect(subgraphHasRecipe(sub, 2) && subgraphHasRecipe(sub, 6),
+           "the pass can be switched off");
+  }
+  aw::options.tagExclusive.enabled = true;
+
+  // Parity: the dropped conversions are a wash, so the optimum must not move.
+  {
+    const aw::vector<std::byte> bytes = buildTagExclusiveSample();
+    auto total = [](const aw::PlanResult &r) {
+      int64_t sum = 0;
+      for (int64_t x : r.exec)
+        sum += x;
+      return sum;
+    };
+    auto plan = [&](bool prune, aw::Amount amount) {
+      aw::options.tagExclusive.enabled = prune;
+      aw::registerCraftingGraph(bytes);
+      const aw::CraftingGraph &graph = aw::getCraftingGraph();
+      aw::vector<aw::Amount> inventory(graph.nItem, 0);
+      for (aw::ItemId leaf : {1u, 3u, 5u})
+        inventory[leaf] = 1000;
+      const aw::Subgraph sub = aw::reachableSubgraph(1, all, inventory);
+      const aw::PlanResult r = aw::planCrafting(sub, sub.translate(0), amount, inventory);
+      return std::pair<aw::PlanStatus, int64_t>(r.status, total(r));
+    };
+    for (aw::Amount amount : {1, 2, 5}) {
+      const auto full = plan(false, amount);
+      const auto pruned = plan(true, amount);
+      expect(full.first == pruned.first,
+             "tag-exclusive: status agrees with and without the pass");
+      expect(full.second == pruned.second,
+             "tag-exclusive: optimum agrees with and without the pass");
+    }
+    aw::options.tagExclusive.enabled = true;
+  }
+
+  aw::options.tagPruning = true;
+  aw::options.recipePruning = true;
+  aw::options.directPruning = true;
+  aw::options.substitutionPruning = true;
+  aw::options.pack.enabled = true;
+  aw::options.satellite.enabled = true;
+  aw::options.variantClass.enabled = true;
+}
+
 void testSatellitePruningParity() {
   std::cout << "[Test] satellite elimination preserves the optimum\n";
 
@@ -4799,6 +4940,7 @@ int main() {
   testSatelliteLeakPruning();
   testClosedIslandPruning();
   testVariantClassPruning();
+  testTagExclusivePruning();
   testSatellitePruningParity();
   testPlanProtocol();
   testByproducts();
