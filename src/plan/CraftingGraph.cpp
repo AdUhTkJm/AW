@@ -1523,7 +1523,7 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
 
   // Scratch for one recipe's outputs (anchor plus byproducts) before they are
   // sorted, deduplicated and written to `r2o`.
-  aw::vector<std::pair<ItemId, Amount>> outputs;
+  aw::vector<ItemEntry> outputs;
   outputs.reserve(4);
 
   uint output = 0;
@@ -1570,10 +1570,10 @@ void registerCraftingGraph(std::span<const std::byte> bytes) noexcept {
       std::sort(outputs.begin(), outputs.end());
       size_t kept = 0;
       for (size_t k = 0; k < outputs.size();) {
-        const ItemId item = outputs[k].first;
+        const ItemId item = outputs[k].item;
         Amount sum = 0;
-        while (k < outputs.size() && outputs[k].first == item) {
-          sum += outputs[k].second;
+        while (k < outputs.size() && outputs[k].item == item) {
+          sum += outputs[k].amt;
           k++;
         }
         outputs[kept++] = {item, sum};

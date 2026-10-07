@@ -87,8 +87,8 @@ struct VariantFoldRun {
   aw::vector<Amount> accum;                    // nItem
   aw::vector<uint8_t> accumSet;                // nItem
   aw::vector<ItemId> touched;                  // nItem
-  aw::vector<std::pair<ItemId, Amount>> posScratch;
-  aw::vector<std::pair<ItemId, Amount>> needScratch;
+  aw::vector<ItemEntry> posScratch;
+  aw::vector<ItemEntry> needScratch;
   aw::vector<uint8_t> usedScratch;
   aw::vector<uint32_t> failing;
 
@@ -180,7 +180,7 @@ struct VariantFoldRun {
 };
 
 static bool matchInputs(const VariantFoldRun &run,
-                        std::span<const std::pair<ItemId, Amount>> required,
+                        std::span<const ItemEntry> required,
                         std::span<const ItemId> ins,
                         std::span<const Amount> inAmts, size_t index,
                         aw::vector<uint8_t> &used) noexcept;
@@ -190,7 +190,7 @@ static bool matchInputs(const VariantFoldRun &run,
 // recorded in `proposals`. Used by the growth step only; the check itself never
 // grows the fold.
 static bool matchInputsGrow(VariantFoldRun &run,
-                            std::span<const std::pair<ItemId, Amount>> required,
+                            std::span<const ItemEntry> required,
                             std::span<const ItemId> ins,
                             std::span<const Amount> inAmts, size_t index,
                             aw::vector<uint8_t> &used,
@@ -310,7 +310,7 @@ void collectCandidates(VariantFoldRun &run, CandidateWalk &walk,
         continue;
       // Orientation: the source must live in strictly fewer tags than the
       // base, and at least one of those tags must really be consumed by a
-      // recipe. Without the second half the material-form cycles (a dust and
+      // recipe. Without the amt half the material-form cycles (a dust and
       // an ingot that share an unused tag) would be folded too.
       if (!std::includes(run.memberTags[base].begin(), run.memberTags[base].end(),
                          run.memberTags[u].begin(), run.memberTags[u].end()) ||
@@ -429,9 +429,9 @@ bool VariantFoldRun::tryGrow(uint r) noexcept {
   // The whole column is one member against another: folding the consumed one
   // onto the produced one makes it empty.
   if (posScratch.size() == 1 && needScratch.size() == 1 &&
-      posScratch[0].second == needScratch[0].second) {
-    const ItemId to = posScratch[0].first;
-    const ItemId from = needScratch[0].first;
+      posScratch[0].amt == needScratch[0].amt) {
+    const ItemId to = posScratch[0].item;
+    const ItemId from = needScratch[0].item;
     if (from < nReal && to < nReal && comp[from] == comp[to] &&
         comp[from] != UINT32_MAX &&
         std::ranges::includes(memberTags[to], memberTags[from]))
@@ -443,13 +443,13 @@ bool VariantFoldRun::tryGrow(uint r) noexcept {
   uint64_t h = 1469598103934665603ull;
   aw::vector<Amount> shapeAmounts;
   for (const auto &row : posScratch)
-    shapeAmounts.push_back(row.second);
+    shapeAmounts.push_back(row.amt);
   std::sort(shapeAmounts.begin(), shapeAmounts.end());
   for (Amount a : shapeAmounts)
     h = mixRow(h, 0, a);
   shapeAmounts.clear();
   for (const auto &row : needScratch)
-    shapeAmounts.push_back(row.second);
+    shapeAmounts.push_back(row.amt);
   std::sort(shapeAmounts.begin(), shapeAmounts.end());
   for (Amount a : shapeAmounts)
     h = mixRow(h, 1, a);
@@ -575,7 +575,7 @@ static bool tagContains(const VariantFoldRun &run, ItemId node,
 // In the lemma, r^* can be any set of recipes. But here we specialize it to
 // a single recipe + optional tag forwarding.
 static bool matchInputs(const VariantFoldRun &run,
-                        std::span<const std::pair<ItemId, Amount>> required,
+                        std::span<const ItemEntry> required,
                         std::span<const ItemId> ins,
                         std::span<const Amount> inAmts, size_t index,
                         aw::vector<uint8_t> &used) noexcept {
@@ -596,7 +596,7 @@ static bool matchInputs(const VariantFoldRun &run,
 }
 
 static bool matchInputsGrow(VariantFoldRun &run,
-                            std::span<const std::pair<ItemId, Amount>> required,
+                            std::span<const ItemEntry> required,
                             std::span<const ItemId> ins,
                             std::span<const Amount> inAmts, size_t index,
                             aw::vector<uint8_t> &used,
@@ -637,7 +637,7 @@ bool VariantFoldRun::columnRealizable(uint r, Amount cost) noexcept {
     return false;
 
   // Filters out recipes that can possibly match.
-  for (uint witness : witnessesOf(posScratch[0].first)) {
+  for (uint witness : witnessesOf(posScratch[0].item)) {
     if (g.cost[witness] > cost)
       continue;
     const auto wOuts = g.outputsOf(witness);
@@ -647,8 +647,8 @@ bool VariantFoldRun::columnRealizable(uint r, Amount cost) noexcept {
     // Item ID and output amount must match exactly.
     bool same = true;
     for (size_t k = 0; k < wOuts.size(); k++) {
-      if (wOuts[k] != posScratch[k].first ||
-          g.outputAmountsOf(witness)[k] != posScratch[k].second) {
+      if (wOuts[k] != posScratch[k].item ||
+          g.outputAmountsOf(witness)[k] != posScratch[k].amt) {
         same = false;
         break;
       }

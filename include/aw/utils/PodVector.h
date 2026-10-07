@@ -204,6 +204,20 @@ public:
     dat[sz++] = val;
   }
 
+  template <typename... Args>
+  void emplace_back(Args &&...args) {
+    if (sz == cap) {
+      reserve(growth(sz + 1));
+    }
+
+    new ((void *) (dat + sz++)) T{std::forward<Args>(args)...};
+  }
+
+  template <typename... Args>
+  void emplace_back_unchecked(Args &&...args) {
+    new ((void *) (dat + sz++)) T{std::forward<Args>(args)...};
+  }
+
   void pop_back() noexcept {
     --sz;
   }

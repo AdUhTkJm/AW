@@ -46,7 +46,6 @@
 
 #include <algorithm>
 #include <span>
-#include <utility>
 
 #include "aw/plan/Options.h"
 #include "aw/plan/ProfileStep.h"
@@ -66,7 +65,7 @@ namespace aw::detail {
 RecipeVectors::RecipeVectors(const BaseCraftingGraph &graph) noexcept {
   const uint nRecipe = graph.nRecipe;
   offsets.assign(nRecipe + 1, 0);
-  aw::vector<std::pair<ItemId, Amount>> scratch;
+  aw::vector<ItemEntry> scratch;
   for (uint r = 0; r < nRecipe; r++) {
     scratch.clear();
     const auto outs = graph.outputsOf(r);
@@ -79,14 +78,14 @@ RecipeVectors::RecipeVectors(const BaseCraftingGraph &graph) noexcept {
       scratch.emplace_back(inputs[k], -weights[k]);
 
     std::sort(scratch.begin(), scratch.end(),
-              [](const auto &a, const auto &b) noexcept { return a.first < b.first; });
+              [](const auto &a, const auto &b) noexcept { return a.item < b.item; });
 
     // Sum equal rows and drop zero coefficients.
     for (size_t k = 0; k < scratch.size();) {
-      const ItemId item = scratch[k].first;
+      const ItemId item = scratch[k].item;
       Amount coeff = 0;
-      while (k < scratch.size() && scratch[k].first == item) {
-        coeff += scratch[k].second;
+      while (k < scratch.size() && scratch[k].item == item) {
+        coeff += scratch[k].amt;
         k++;
       }
       if (coeff != 0) {

@@ -20,6 +20,20 @@ bool computeVariantClassPruning(QUERY_PRUNE_PARAM_LIST) noexcept;
 bool computeVariantFoldPruning(QUERY_PRUNE_PARAM_LIST) noexcept;
 bool computeTagExclusivePruning(QUERY_PRUNE_PARAM_LIST) noexcept;
 
+// A pair of ItemId and Amount. Better readability than std::pair.
+// Moreover, this is now an element of PodVector rather than std::vector.
+struct ItemEntry {
+  ItemId item;
+  Amount amt;
+
+  ItemEntry() = default;
+  ItemEntry(ItemId item, Amount amt): item(item), amt(amt) {}
+
+  bool operator<(const ItemEntry &other) const {
+    return item == other.item ? amt < other.amt : item < other.item;
+  }
+};
+
 }
 
 namespace aw::detail {

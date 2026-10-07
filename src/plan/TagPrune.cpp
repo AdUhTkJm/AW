@@ -196,7 +196,7 @@ struct TagPruner {
 
   // Column-cover work budget and scratch, see covers().
   uint64_t coverBudget = 0;
-  aw::vector<std::pair<ItemId, Amount>> cap;
+  aw::vector<ItemEntry> cap;
 
   // The closure's global pair budget, carried across witness rows.
   uint64_t prunePairs = 0;
@@ -723,13 +723,13 @@ bool TagPruner::rowAliveOf(ItemId x) const noexcept {
 
 // Consumes up to `need` units of `item` from `pool`, and returns what is still missing.
 // The sizes are always small (mostly 1 item each), so we use a linear scan.
-Amount consume(aw::vector<std::pair<ItemId, Amount>> &pool, ItemId item,
+Amount consume(aw::vector<ItemEntry> &pool, ItemId item,
                Amount need) noexcept {
   for (auto &p : pool) {
-    if (p.first != item)
+    if (p.item != item)
       continue;
-    const Amount take = std::min(need, p.second);
-    p.second -= take;
+    const Amount take = std::min(need, p.amt);
+    p.amt -= take;
     return need - take;
   }
   return need;
