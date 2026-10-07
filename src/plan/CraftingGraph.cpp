@@ -1743,7 +1743,8 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
 
   runPass(options.variantClass.enabled, "variant class", computeVariantClassPruning);
   runPass(options.tagExclusive.enabled, "tag exclusive", computeTagExclusivePruning);
-  runPass(options.variantFold.enabled, "variant fold", computeVariantFoldPruning);
+  for (int i = 0; i < 30; i++)
+    runPass(options.variantFold.enabled, "variant fold", computeVariantFoldPruning);
   runPass(options.satellite.enabled, "closed island", computeClosedIslandPruning);
   return result;
 }

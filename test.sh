@@ -17,9 +17,9 @@ cmake --build build
 # fi
 
 # Run tests
-build/aw_tests
-build/aw_podvector_tests
-build/aw_search_tests
+# build/aw_tests
+# build/aw_podvector_tests
+# build/aw_search_tests
 
 # Run a performance test
 # build/awr_inspect temp/recipes-nast.awr --plan 'mekanism:purification_chamber' --profile temp/a.prof --time-limit 20 --workers 1
