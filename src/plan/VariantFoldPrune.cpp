@@ -102,6 +102,7 @@ struct VariantFoldRun {
   aw::vector<ItemId> touched;                  // nItem
   aw::vector<ItemEntry> posScratch;
   aw::vector<ItemEntry> needScratch;
+  aw::vector<std::pair<Amount, uint32_t>> shapeRows;  // (amount, class) of one row list
   aw::vector<uint8_t> usedScratch;
   aw::vector<uint32_t> failing;
 
@@ -181,6 +182,23 @@ struct VariantFoldRun {
   bool buildCandidates(std::span<const uint8_t> hasStock) noexcept;
   void buildWitnessIndex() noexcept;
   void buildShapeIndex() noexcept;
+  // Shape signature of `r`, and of the current projected column.
+  [[nodiscard]] uint64_t recipeShapeSignature(RecipeId r) noexcept;
+  [[nodiscard]] uint64_t columnShapeSignature() noexcept;
+  // Output pairing class of `item`: tag outputs and real outputs outside every
+  // conversion component have to be matched exactly, so their class is the item
+  // id; a real output inside a component only has to land in that component, so
+  // its class is the bitwise complement of the component id. A complement lies
+  // in [2^32 - nReal, 2^32), far above every item id, so the two kinds of class
+  // can never collide.
+  [[nodiscard]] uint32_t outputClass(ItemId item) const noexcept;
+  // Appends one (amount, class) row per item of a row list, then calls
+  // `foldShapeRows`. Inputs pass class 0: an amount is all their key carries.
+  void mixShapeRows(uint64_t &h, bool isOutput, std::span<const ItemId> items,
+                    std::span<const Amount> amts) noexcept;
+  void mixShapeRows(uint64_t &h, bool isOutput,
+                    std::span<const ItemEntry> rows) noexcept;
+  void foldShapeRows(uint64_t &h) noexcept;
   // Fills posScratch / needScratch from pi(A r). False when the column is 0.
   bool projectedColumn(uint r) noexcept;
   // True when a D-free recipe replays the projected column of r.
@@ -376,26 +394,67 @@ void VariantFoldRun::buildWitnessIndex() noexcept {
     witnessRecipes[witnessCursor[g.outputsOf(r)[0]]++] = r;
 }
 
+void VariantFoldRun::mixShapeRows(uint64_t &h, bool isOutput,
+                                  std::span<const ItemId> items,
+                                  std::span<const Amount> amts) noexcept {
+  shapeRows.clear();
+  for (size_t k = 0; k < items.size(); k++)
+    shapeRows.emplace_back(amts[k], isOutput ? outputClass(items[k]) : 0u);
+  foldShapeRows(h);
+}
+
+void VariantFoldRun::mixShapeRows(uint64_t &h, bool isOutput,
+                                  std::span<const ItemEntry> rows) noexcept {
+  shapeRows.clear();
+  for (const ItemEntry &row : rows)
+    shapeRows.emplace_back(row.amt, isOutput ? outputClass(row.item) : 0u);
+  foldShapeRows(h);
+}
+
+// Mixes the sorted (amount, class) rows into `h`. The classes keep the
+// dominant one-output shapes apart: without them a real 1-to-1 column shares
+// its bucket with every other real 1-to-1 recipe, and the tag edges pile in as
+// well, so every column scan pays for thousands of recipes that the exact
+// comparison then rejects one by one.
+void VariantFoldRun::foldShapeRows(uint64_t &h) noexcept {
+  std::sort(shapeRows.begin(), shapeRows.end());
+  for (const auto &[amt, cls] : shapeRows)
+    h = mixRow(h, cls, amt);
+}
+
+uint32_t VariantFoldRun::outputClass(ItemId item) const noexcept {
+  if (item >= nReal || comp[item] == UINT32_MAX)
+    return item;
+  return ~comp[item];
+}
+
+// We design a hash for shape-identical recipes. We used to hash only by amounts,
+// but there are quite a lot 1:1 conversion recipes, so we decide to also classify
+// output item.
+//
+// A real projected output can only be replayed by a real witness output of the same
+// component (or by the very same item), and a tag output only by that same tag,
+// so the class has to agree. The input half stays amount-only: a tag input may
+// also feed a real required item, so its class must not be part of the key.
+uint64_t VariantFoldRun::recipeShapeSignature(RecipeId r) noexcept {
+  uint64_t h = 1469598103934665603ull;
+  mixShapeRows(h, true, g.outputsOf(r), g.outputAmountsOf(r));
+  mixShapeRows(h, false, g.inputsOf(r), g.inputAmountsOf(r));
+  return h;
+}
+
+uint64_t VariantFoldRun::columnShapeSignature() noexcept {
+  uint64_t h = 1469598103934665603ull;
+  mixShapeRows(h, true, posScratch);
+  mixShapeRows(h, false, needScratch);
+  return h;
+}
+
 void VariantFoldRun::buildShapeIndex() noexcept {
   byShape.clear();
   byShape.reserve(nRecipe * 2);
-  aw::vector<Amount> amounts;
-  for (uint r = 0; r < nRecipe; r++) {
-    uint64_t h = 1469598103934665603ull;
-    amounts.clear();
-    for (size_t k = 0; k < g.outputsOf(r).size(); k++)
-      amounts.push_back(g.outputAmountsOf(r)[k]);
-    std::sort(amounts.begin(), amounts.end());
-    for (Amount a : amounts)
-      h = mixRow(h, 0, a);
-    amounts.clear();
-    for (size_t k = 0; k < g.inputsOf(r).size(); k++)
-      amounts.push_back(g.inputAmountsOf(r)[k]);
-    std::sort(amounts.begin(), amounts.end());
-    for (Amount a : amounts)
-      h = mixRow(h, 1, a);
-    byShape[h].push_back(r);
-  }
+  for (uint r = 0; r < nRecipe; r++)
+    byShape[recipeShapeSignature(r)].push_back(r);
 }
 
 bool VariantFoldRun::proposeFold(ItemId from, ItemId to) noexcept {
@@ -436,19 +495,7 @@ bool VariantFoldRun::tryGrow(uint r) noexcept {
 
   // A recipe with the same output amounts and the same required inputs, whose
   // differing outputs are exactly the unfolded twins of pi's outputs.
-  uint64_t h = 1469598103934665603ull;
-  aw::vector<Amount> shapeAmounts;
-  for (const auto &row : posScratch)
-    shapeAmounts.push_back(row.amt);
-  std::sort(shapeAmounts.begin(), shapeAmounts.end());
-  for (Amount a : shapeAmounts)
-    h = mixRow(h, 0, a);
-  shapeAmounts.clear();
-  for (const auto &row : needScratch)
-    shapeAmounts.push_back(row.amt);
-  std::sort(shapeAmounts.begin(), shapeAmounts.end());
-  for (Amount a : shapeAmounts)
-    h = mixRow(h, 1, a);
+  const uint64_t h = columnShapeSignature();
   const auto it = byShape.find(h);
   if (it == byShape.end())
     return false;
@@ -587,7 +634,7 @@ bool VariantFoldRun::matchInputs(MATCH_INPUTS_PARAM_LIST) noexcept {
 }
 
 bool VariantFoldRun::matchInputsGrow(MATCH_INPUTS_PARAM_LIST,
-                                       aw::vector<std::pair<ItemId, ItemId>> &proposals) noexcept {
+                                     aw::vector<std::pair<ItemId, ItemId>> &proposals) noexcept {
   if (index == required.size())
     return true;
   const auto [x, a] = required[index];
