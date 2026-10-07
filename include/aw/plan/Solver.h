@@ -35,86 +35,36 @@ struct Matrix {
   Matrix(uint32_t rows, uint32_t cols): rows(rows), cols(cols) {}
 };
 
+// Solver budget. The list below is the only place a field is declared: this
+// struct expands it into members, and OptionsJson.cpp expands the same list
+// into the JSON reader, writer and known-key set. See docs/options.typ for
+// what each field means.
+//
+//   X(type, member, default)
+#define AW_SOLVER_OPTION_FIELDS(X)                                         \
+  X(double, relativeGap, 0.01)                                             \
+  X(int64_t, absoluteGap, 0)                                               \
+  X(double, maxTimeSeconds, 2.0)                                           \
+  X(int, numWorkers, 16)                                                   \
+  X(int, randomSeed, 1)                                                    \
+  X(int64_t, objectiveCap, 0)                                              \
+  X(int64_t, objectiveUpperBound, 0)                                       \
+  X(double, reducedCostGap, 0.0)                                           \
+  X(int, maxCycleRetries, 3)                                               \
+  X(uint32_t, maxStartupGroups, 1024)                                      \
+  X(uint32_t, maxStartupGroupMembers, 32)
+
 struct Options {
-  // The fraction by which the difference between returned and optimal solution is allowed.
-  double relativeGap = 0.01;
-  // Absolute gap floor. 0 leaves only the relative rule in force.
-  int64_t absoluteGap = 0;
+#define AW_SOLVER_OPTION_MEMBER(type, name, default) type name = default;
+  AW_SOLVER_OPTION_FIELDS(AW_SOLVER_OPTION_MEMBER)
+#undef AW_SOLVER_OPTION_MEMBER
+};
 
-  // Wall-clock budget. <= 0 means no limit. On expiry, CP-SAT gives a feasible plan.
-  double maxTimeSeconds = 2.0;
-
-  // Search threads. 0 for auto.
-  int numWorkers = 16;
-
-  // Only observable with numWorkers == 1. CP-SAT's own default is 1.
-  int randomSeed = 1;
-  
-  // Starting cap on the total objective, and therefore on every variable.
-  // 0 derives one from a lower bound on the optimum. See implementation details.
-  int64_t objectiveCap = 0;
-
-  // Known-feasible objective value, from a heuristic pre-pass. 0 means none.
-  // Unlike `objectiveCap` this does NOT replace the derived starting cap; it
-  // only clamps it and bounds the cap-growth retries. A loose heuristic plan
-  // can be orders of magnitude above the optimum, and seeding the variable
-  // domains with it makes propagation blow up, so it is used purely as an
-  // upper bound: a plan exists at this objective, hence no cap above it is
-  // ever worth a retry.
-  int64_t objectiveUpperBound = 0;
-
-  // Reduced-cost fixing. The solver probes for any plan within this much of
-  // the LP relaxation; if one exists, every column is bounded by
-  // floor((incumbent - LP) / d_r), so columns whose bound is 0 are dropped and
-  // the rest get a tightened domain before the final solve. 0 disables the
-  // pass.
-  //
-  // Off by default. The probe is a second full CP-SAT solve (model load and
-  // presolve, plus proving the tightened cap), which measured 0.5-1.0 s on the
-  // recipe graphs. There the integer optimum sits far enough above the LP bound
-  // that the probe is infeasible and fixes nothing, so the time is pure
-  // overhead; enable it explicitly on instances where the optimum is known to
-  // be close to the LP bound. The probe is also skipped while forbidden
-  // assignments or startup entry cuts are present, because both are expressed
-  // in the full column space and the probe solves a sub-model.
-  double reducedCostGap = 0.0;
-
-  // Optional warm start: one suggested value per column of the model handed to
-  // `solve`. It is installed as a CP-SAT solution hint, so it guides the search
-  // toward a known plan without constraining it. Values are clamped into the
-  // column domain, and the hint is ignored entirely when its length does not
-  // match the model being solved (for example after reduced-cost column
-  // fixing). The planner fills this from its greedy DAG pre-pass.
-  std::span<const int64_t> solutionHint;
-
-  // Plans a post-solve check already rejected.
-  //
-  // Each entry is a full assignment, one value per column of the model handed
-  // to `solve`, and is added as a CP-SAT forbidden-assignment table, so the
-  // next solve cannot return that exact vector again. `planCrafting` appends
-  // the plan its fireability check rejected and re-solves, up to
-  // `maxCycleRetries` times. The entries are matched against the original
-  // column space, so they stay valid across the cap retries inside one `solve`
-  // call; a reduced-cost probe is skipped while they are present. See
-  // docs/algorithm.typ, "启动切断".
-  aw::vector<aw::vector<int64_t>> noGoods;
-
-  // How many extra solves a caller may run after rejecting a plan. 0 turns the
-  // retry off, which is the behaviour before no-goods existed.
-  int maxCycleRetries = 3;
-
-  // Return the first balance-feasible plan instead of a cheap one.
-  //
-  // This is the per-solve copy of the process-wide `aw::options.flash`;
-  // `planCrafting` sets it from that switch and may clear it again. A first
-  // incumbent is only useful while it is startable, so once the fireability
-  // check rejects one, the retries run this flag off: the heuristic that put
-  // the rejected plan there has failed, and an optimized incumbent is far more
-  // likely to be realizable. Leaving it set is what made flash return
-  // CYCLE_UNFULFILLED on instances the optimizing solve answers. See
-  // docs/algorithm.typ, "启动可达性".
-  bool flash = false;
-
+// The part of a solve that is not configuration: it is derived from one query
+// (the subgraph, the inventory, the greedy pre-pass) and a caller that retries
+// after rejecting a plan mutates it between solves. `planCrafting` owns the
+// loop and is the reference caller; see docs/algorithm.typ, "启动可达性".
+struct State {
   // Startup entry cuts.
   //
   // The balance model can return a plan whose cycle has no seed: an
@@ -221,16 +171,37 @@ struct Options {
   };
   aw::vector<SeedCut> seedCuts;
 
-  // Budget for the eager cycle enumeration: how many groups and how many seed
-  // cuts it may add, and how many columns one group may hold. 0 for either
-  // disables the pass, which leaves only the groups added after a rejection.
-  uint32_t maxStartupGroups = 1024;
+  // Return the first balance-feasible plan instead of a cheap one.
+  //
+  // This is the per-solve copy of the process-wide `aw::options.flash`;
+  // `planCrafting` sets it from that switch and may clear it again. A first
+  // incumbent is only useful while it is startable, so once the fireability
+  // check rejects one, the retries run this flag off: the heuristic that put
+  // the rejected plan there has failed, and an optimized incumbent is far more
+  // likely to be realizable. Leaving it set is what made flash return
+  // CYCLE_UNFULFILLED on instances the optimizing solve answers. See
+  // docs/algorithm.typ, "启动可达性".
+  bool flash = false;
 
-  // A cycle with more members than this is skipped. The mutual-consumption
-  // components of a large modpack merge into one huge blob, and cutting that
-  // would cost more than it is worth; the tight little cycles this pass is for
-  // are well under the bound.
-  uint32_t maxStartupGroupMembers = 32;
+  // Optional warm start: one suggested value per column of the model handed to
+  // `solve`. It is installed as a CP-SAT solution hint, so it guides the search
+  // toward a known plan without constraining it. Values are clamped into the
+  // column domain, and the hint is ignored entirely when its length does not
+  // match the model being solved (for example after reduced-cost column
+  // fixing). The planner fills this from its greedy DAG pre-pass.
+  std::span<const int64_t> solutionHint;
+
+  // Plans a post-solve check already rejected.
+  //
+  // Each entry is a full assignment, one value per column of the model handed
+  // to `solve`, and is added as a CP-SAT forbidden-assignment table, so the
+  // next solve cannot return that exact vector again. `planCrafting` appends
+  // the plan its fireability check rejected and re-solves, up to
+  // `Options::maxCycleRetries` times. The entries are matched against the
+  // original column space, so they stay valid across the cap retries inside one
+  // `solve` call; a reduced-cost probe is skipped while they are present. See
+  // docs/algorithm.typ, "启动切断".
+  aw::vector<aw::vector<int64_t>> noGoods;
 
   // Physical stock per row, in the solver's row space. The startup cuts use it
   // as the seed that stock contributes; an empty span means "derive from b"
@@ -312,7 +283,8 @@ struct Result {
 // optimum always exists inside the cap. `ceiling` (see `absoluteCap`) is the
 // int64-range fallback when a zero-cost column produces into nothing.
 Result solve(const Matrix& A, std::span<const int64_t> b,
-             std::span<const int64_t> c, const Options& options = {});
+             std::span<const int64_t> c, const Options& options = {},
+             const State& state = {});
 
 }  // namespace aw::solver
 

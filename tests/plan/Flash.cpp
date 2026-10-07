@@ -247,13 +247,10 @@ AW_TEST(testFlashProbe) {
     expect(plan.exec == on.flashExec, "planCrafting returns the probe's own vector");
     expect(plan.greedyMs == 0.0, "the probe's plan costs planCrafting no greedy time");
 
-    // The mod sets `flash` on the solver options rather than the planner ones,
-    // so the probe has to read both or it never runs in game.
+    // The probe reads the process-wide planner switch directly.
     aw::options.flash = false;
-    aw::solverOptions.flash = true;
-    const aw::Subgraph viaSolver = aw::reachableSubgraph(1, all, {}, amount);
-    expect(!viaSolver.flashExec.empty(), "the probe reads the solver's flash switch too");
-    aw::solverOptions.flash = false;
+    const aw::Subgraph offAgain = aw::reachableSubgraph(1, all, {}, amount);
+    expect(offAgain.flashExec.empty(), "clearing the planner switch disables the probe");
 
     aw::options.flash = true;
     const bool savedProbe = aw::options.flashProbe;

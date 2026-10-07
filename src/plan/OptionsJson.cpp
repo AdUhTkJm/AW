@@ -1,8 +1,12 @@
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <initializer_list>
+#include <limits>
+#include <string_view>
+#include <type_traits>
 
 #include "aw/plan/Options.h"
 #include "aw/plan/OptionsJson.h"
@@ -15,150 +19,43 @@ namespace {
 using json = nlohmann::json;
 
 // ---------------------------------------------------------------------------
-// Scalar readers.
+// The option codec.
 //
-// Each one returns true when the key is absent, so a patch only overrides what
-// it names. `key` doubles as the error label.
+// A field is declared once, in one of the X-macro lists in Options.h and
+// Solver.h, as `X(type, member, default)`. The list expands into the struct's
+// members (see the headers) and into `readOption`/`writeOption` calls below.
+// The reader is chosen from the member's type, so there is no per-field
+// boilerplate left to keep in sync. docs/options.typ holds the per-field prose.
+//
+// A reader returns true when the key is absent, so a patch only overrides what
+// it names; an update is a partial patch on purpose.
 // ---------------------------------------------------------------------------
 
-bool readBool(const json &j, const char *key, bool &out, std::string &error) {
-  const auto it = j.find(key);
-  if (it == j.end())
-    return true;
-  if (!it->is_boolean()) {
-    error = std::string(key) + " must be a boolean";
-    return false;
-  }
-  out = it->get<bool>();
-  return true;
-}
+// Enum <-> JSON name table. A newly serialized enum needs one specialization.
+template <typename E>
+struct EnumCodec;
 
-bool readU64(const json &j, const char *key, uint64_t &out, std::string &error) {
-  const auto it = j.find(key);
-  if (it == j.end())
-    return true;
-  if (it->is_number_unsigned()) {
-    out = it->get<uint64_t>();
-    return true;
-  }
-  if (it->is_number_integer()) {
-    const int64_t value = it->get<int64_t>();
-    if (value < 0) {
-      error = std::string(key) + " must not be negative";
-      return false;
-    }
-    out = (uint64_t) value;
-    return true;
-  }
-  error = std::string(key) + " must be a non-negative integer";
-  return false;
-}
+template <>
+struct EnumCodec<TagInlineMode> {
+  static constexpr std::array<std::pair<std::string_view, TagInlineMode>, 4> kValues{{
+      {"off", TagInlineMode::OFF},
+      {"prePrune", TagInlineMode::PRE_PRUNE},
+      {"queryTime", TagInlineMode::QUERY_TIME},
+      {"both", TagInlineMode::BOTH},
+  }};
+};
 
-// The three narrow readers below go through a wider local, so they have to test
-// for the key themselves: `readU64`/`readI64` leave `out` alone when the key is
-// absent, but assigning the local unconditionally would turn every omitted
-// option into a zero. A partial patch has to keep the values it does not
-// mention -- that is the whole point of `Options next = options`.
-bool readU32(const json &j, const char *key, uint32_t &out, std::string &error) {
-  if (j.find(key) == j.end())
-    return true;
-  uint64_t wide = 0;
-  if (!readU64(j, key, wide, error))
-    return false;
-  if (wide > UINT32_MAX) {
-    error = std::string(key) + " does not fit in 32 bits";
-    return false;
-  }
-  out = (uint32_t) wide;
-  return true;
-}
-
-bool readSize(const json &j, const char *key, size_t &out, std::string &error) {
-  if (j.find(key) == j.end())
-    return true;
-  uint64_t wide = 0;
-  if (!readU64(j, key, wide, error))
-    return false;
-  out = (size_t) wide;
-  return true;
-}
-
-bool readI64(const json &j, const char *key, int64_t &out, std::string &error) {
-  const auto it = j.find(key);
-  if (it == j.end())
-    return true;
-  if (it->is_number_unsigned()) {
-    const uint64_t value = it->get<uint64_t>();
-    if (value > (uint64_t) INT64_MAX) {
-      error = std::string(key) + " does not fit in 64 bits";
-      return false;
-    }
-    out = (int64_t) value;
-    return true;
-  }
-  if (it->is_number_integer()) {
-    out = it->get<int64_t>();
-    return true;
-  }
-  error = std::string(key) + " must be an integer";
-  return false;
-}
-
-bool readInt(const json &j, const char *key, int &out, std::string &error) {
-  if (j.find(key) == j.end())
-    return true;
-  int64_t wide = 0;
-  if (!readI64(j, key, wide, error))
-    return false;
-  if (wide < INT32_MIN || wide > INT32_MAX) {
-    error = std::string(key) + " does not fit in 32 bits";
-    return false;
-  }
-  out = (int) wide;
-  return true;
-}
-
-bool readDouble(const json &j, const char *key, double &out, std::string &error) {
-  const auto it = j.find(key);
-  if (it == j.end())
-    return true;
-  if (!it->is_number()) {
-    error = std::string(key) + " must be a number";
-    return false;
-  }
-  out = it->get<double>();
-  return true;
-}
-
-// Tag inlining is the one enum, so it takes its values by name; the raw ordinal
-// is accepted too, which keeps the Java side free to send either.
-bool readTagInlining(const json &j, const char *key, TagInlineMode &out,
-                     std::string &error) {
-  const auto it = j.find(key);
-  if (it == j.end())
-    return true;
-  if (it->is_string()) {
-    const std::string value = it->get<std::string>();
-    if (value == "off") out = TagInlineMode::OFF;
-    else if (value == "prePrune") out = TagInlineMode::PRE_PRUNE;
-    else if (value == "queryTime") out = TagInlineMode::QUERY_TIME;
-    else if (value == "both") out = TagInlineMode::BOTH;
-    else {
-      error = std::string(key) + " must be one of off, prePrune, queryTime, both";
-      return false;
-    }
-    return true;
-  }
-  uint32_t ordinal = 0;
-  if (!readU32(j, key, ordinal, error))
-    return false;
-  if (ordinal > (uint32_t) TagInlineMode::BOTH) {
-    error = std::string(key) + " must be between 0 and 3";
-    return false;
-  }
-  out = (TagInlineMode) ordinal;
-  return true;
-}
+// Defined once, then expanded by each list below. `j`, `out` and `error` are
+// the enclosing function's parameters; the definitions name them that way so
+// the macro needs no arguments beyond the field.
+#define AW_FIELD_READ(type, name, default) \
+  if (!readOption(j, #name, out.name, error)) return false;
+#define AW_FIELD_WRITE(type, name, default) writeOption(j, #name, out.name);
+#define AW_FIELD_KEY(type, name, default) #name,
+#define AW_OBJECT_READ(type, name) \
+  if (!readOption(j, #name, out.name, error)) return false;
+#define AW_OBJECT_WRITE(type, name) writeOption(j, #name, out.name);
+#define AW_OBJECT_KEY(type, name) #name,
 
 // Rejects a key the C++ side would otherwise ignore. Without this a config typo
 // would look like a no-op.
@@ -179,67 +76,183 @@ bool checkKnown(const json &j, std::initializer_list<const char *> known,
   return true;
 }
 
-bool readPackOptions(const json &j, PackPruneOptions &out, std::string &error) {
-  return readBool(j, "enabled", out.enabled, error) &&
-         readU32(j, "maxPackRecipes", out.maxPackRecipes, error) &&
-         readI64(j, "maxPackValue", out.maxPackValue, error) &&
-         readU32(j, "maxBranchDepth", out.maxBranchDepth, error) &&
-         readU32(j, "maxBranchNodes", out.maxBranchNodes, error) &&
-         readU32(j, "maxZeroStockItems", out.maxZeroStockItems, error) &&
-         readDouble(j, "maxSeconds", out.maxSeconds, error) &&
-         checkKnown(j, {"enabled", "maxPackRecipes", "maxPackValue", "maxBranchDepth",
-                        "maxBranchNodes", "maxZeroStockItems", "maxSeconds"},
-                    error);
-}
+// The nested option blocks read and write as objects. Declared here so the
+// generic codec below can recurse into them; defined after it.
+bool readObject(const json &j, PackPruneOptions &out, std::string &error);
+bool readObject(const json &j, SatellitePruneOptions &out, std::string &error);
+bool readObject(const json &j, VariantClassPruneOptions &out, std::string &error);
+bool readObject(const json &j, TagExclusivePruneOptions &out, std::string &error);
+bool readObject(const json &j, VariantFoldPruneOptions &out, std::string &error);
+json writeObject(const PackPruneOptions &out);
+json writeObject(const SatellitePruneOptions &out);
+json writeObject(const VariantClassPruneOptions &out);
+json writeObject(const TagExclusivePruneOptions &out);
+json writeObject(const VariantFoldPruneOptions &out);
 
-bool readSatelliteOptions(const json &j, SatellitePruneOptions &out,
-                          std::string &error) {
-  return readBool(j, "enabled", out.enabled, error) &&
-         readU32(j, "maxComponentNodes", out.maxComponentNodes, error) &&
-         readU32(j, "maxIslandNodes", out.maxIslandNodes, error) &&
-         readDouble(j, "maxSeconds", out.maxSeconds, error) &&
-         checkKnown(j, {"enabled", "maxComponentNodes", "maxIslandNodes", "maxSeconds"},
-                    error);
-}
-
-bool readVariantClassOptions(const json &j, VariantClassPruneOptions &out,
-                             std::string &error) {
-  return readBool(j, "enabled", out.enabled, error) &&
-         readU32(j, "maxClassNodes", out.maxClassNodes, error) &&
-         readU32(j, "maxCandidates", out.maxCandidates, error) &&
-         readDouble(j, "maxSeconds", out.maxSeconds, error) &&
-         checkKnown(j, {"enabled", "maxClassNodes", "maxCandidates", "maxSeconds"},
-                    error);
-}
-
-bool readTagExclusiveOptions(const json &j, TagExclusivePruneOptions &out,
-                             std::string &error) {
-  return readBool(j, "enabled", out.enabled, error) &&
-         readDouble(j, "maxSeconds", out.maxSeconds, error) &&
-         checkKnown(j, {"enabled", "maxSeconds"}, error);
-}
-
-bool readVariantFoldOptions(const json &j, VariantFoldPruneOptions &out,
-                            std::string &error) {
-  return readBool(j, "enabled", out.enabled, error) &&
-         readU32(j, "maxFoldItems", out.maxFoldItems, error) &&
-         readDouble(j, "maxSeconds", out.maxSeconds, error) &&
-         checkKnown(j, {"enabled", "maxFoldItems", "maxSeconds"}, error);
-}
-
-// A nested object is optional; when present it must really be an object.
-bool readNested(const json &j, const char *key, const json *&out, std::string &error) {
+// The one reader. A missing key leaves `out` untouched.
+template <typename T>
+bool readOption(const json &j, const char *key, T &out, std::string &error) {
   const auto it = j.find(key);
-  if (it == j.end()) {
-    out = nullptr;
+  if (it == j.end())
     return true;
-  }
-  if (!it->is_object()) {
-    error = std::string(key) + " must be an object";
+
+  if constexpr (std::is_class_v<T>) {
+    // A nested object is optional; when present it must really be an object.
+    if (!it->is_object()) {
+      error = std::string(key) + " must be an object";
+      return false;
+    }
+    return readObject(*it, out, error);
+  } else if constexpr (std::is_same_v<T, bool>) {
+    if (!it->is_boolean()) {
+      error = std::string(key) + " must be a boolean";
+      return false;
+    }
+    out = it->get<bool>();
+    return true;
+  } else if constexpr (std::is_enum_v<T>) {
+    if (it->is_string()) {
+      const std::string text = it->get<std::string>();
+      for (const auto &[name, value] : EnumCodec<T>::kValues)
+        if (text == name) {
+          out = value;
+          return true;
+        }
+      error = std::string(key) + " is not a known mode";
+      return false;
+    }
+    // The raw ordinal is accepted too, which keeps the Java side free to send
+    // either a name or a number.
+    if (!it->is_number_integer() && !it->is_number_unsigned()) {
+      error = std::string(key) + " must be a string or an integer";
+      return false;
+    }
+    if (!it->is_number_unsigned() ||
+        it->get<uint64_t>() < (uint64_t) EnumCodec<T>::kValues.size()) {
+      const int64_t ordinal = it->get<int64_t>();
+      if (ordinal >= 0 && ordinal < (int64_t) EnumCodec<T>::kValues.size()) {
+        out = EnumCodec<T>::kValues[(size_t) ordinal].second;
+        return true;
+      }
+    }
+    error = std::string(key) + " is out of range";
     return false;
+  } else if constexpr (std::is_floating_point_v<T>) {
+    if (!it->is_number()) {
+      error = std::string(key) + " must be a number";
+      return false;
+    }
+    out = (T) it->get<double>();
+    return true;
+  } else if constexpr (std::is_integral_v<T>) {
+    if (!it->is_number_integer() && !it->is_number_unsigned()) {
+      error = std::string(key) +
+              (std::is_signed_v<T> ? " must be an integer"
+                                   : " must be a non-negative integer");
+      return false;
+    }
+    if (it->is_number_unsigned()) {
+      const uint64_t value = it->get<uint64_t>();
+      if (value > (uint64_t) std::numeric_limits<T>::max()) {
+        error = std::string(key) + " does not fit";
+        return false;
+      }
+      out = (T) value;
+      return true;
+    }
+    const int64_t value = it->get<int64_t>();
+    if constexpr (std::is_signed_v<T>) {
+      if (value < (int64_t) std::numeric_limits<T>::min() ||
+          value > (int64_t) std::numeric_limits<T>::max()) {
+        error = std::string(key) + " does not fit";
+        return false;
+      }
+    } else {
+      if (value < 0) {
+        error = std::string(key) + " must not be negative";
+        return false;
+      }
+      if ((uint64_t) value > (uint64_t) std::numeric_limits<T>::max()) {
+        error = std::string(key) + " does not fit";
+        return false;
+      }
+    }
+    out = (T) value;
+    return true;
+  } else {
+    static_assert(!sizeof(T), "no JSON codec for this option type");
   }
-  out = &*it;
-  return true;
+}
+
+template <typename T>
+void writeOption(json &j, const char *key, const T &value) {
+  if constexpr (std::is_class_v<T>) {
+    j[key] = writeObject(value);
+  } else if constexpr (std::is_enum_v<T>) {
+    for (const auto &[name, candidate] : EnumCodec<T>::kValues)
+      if (candidate == value) {
+        j[key] = std::string(name);
+        return;
+      }
+    j[key] = nullptr;
+  } else {
+    j[key] = value;
+  }
+}
+
+bool readObject(const json &j, PackPruneOptions &out, std::string &error) {
+  AW_PACK_OPTION_FIELDS(AW_FIELD_READ)
+  return checkKnown(j, {AW_PACK_OPTION_FIELDS(AW_FIELD_KEY)}, error);
+}
+
+bool readObject(const json &j, SatellitePruneOptions &out, std::string &error) {
+  AW_SATELLITE_OPTION_FIELDS(AW_FIELD_READ)
+  return checkKnown(j, {AW_SATELLITE_OPTION_FIELDS(AW_FIELD_KEY)}, error);
+}
+
+bool readObject(const json &j, VariantClassPruneOptions &out, std::string &error) {
+  AW_VARIANT_CLASS_OPTION_FIELDS(AW_FIELD_READ)
+  return checkKnown(j, {AW_VARIANT_CLASS_OPTION_FIELDS(AW_FIELD_KEY)}, error);
+}
+
+bool readObject(const json &j, TagExclusivePruneOptions &out, std::string &error) {
+  AW_TAG_EXCLUSIVE_OPTION_FIELDS(AW_FIELD_READ)
+  return checkKnown(j, {AW_TAG_EXCLUSIVE_OPTION_FIELDS(AW_FIELD_KEY)}, error);
+}
+
+bool readObject(const json &j, VariantFoldPruneOptions &out, std::string &error) {
+  AW_VARIANT_FOLD_OPTION_FIELDS(AW_FIELD_READ)
+  return checkKnown(j, {AW_VARIANT_FOLD_OPTION_FIELDS(AW_FIELD_KEY)}, error);
+}
+
+json writeObject(const PackPruneOptions &out) {
+  json j;
+  AW_PACK_OPTION_FIELDS(AW_FIELD_WRITE)
+  return j;
+}
+
+json writeObject(const SatellitePruneOptions &out) {
+  json j;
+  AW_SATELLITE_OPTION_FIELDS(AW_FIELD_WRITE)
+  return j;
+}
+
+json writeObject(const VariantClassPruneOptions &out) {
+  json j;
+  AW_VARIANT_CLASS_OPTION_FIELDS(AW_FIELD_WRITE)
+  return j;
+}
+
+json writeObject(const TagExclusivePruneOptions &out) {
+  json j;
+  AW_TAG_EXCLUSIVE_OPTION_FIELDS(AW_FIELD_WRITE)
+  return j;
+}
+
+json writeObject(const VariantFoldPruneOptions &out) {
+  json j;
+  AW_VARIANT_FOLD_OPTION_FIELDS(AW_FIELD_WRITE)
+  return j;
 }
 
 }  // namespace
@@ -254,105 +267,37 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
 
     // Patched in place on a copy so a mid-way failure cannot leave the running
     // configuration half updated.
-    Options next = options;
+    Options out = options;
 
-    if (!readBool(j, "nonoptimal", next.nonoptimal, error) ||
-        !readBool(j, "tagPruning", next.tagPruning, error) ||
-        !readBool(j, "recipePruning", next.recipePruning, error) ||
-        !readBool(j, "directPruning", next.directPruning, error) ||
-        !readBool(j, "substitutionPruning", next.substitutionPruning, error) ||
-        !readBool(j, "seedPruning", next.seedPruning, error) ||
-        !readBool(j, "tagTidy", next.tagTidy, error) ||
-        !readBool(j, "flash", next.flash, error) ||
-        !readBool(j, "flashProbe", next.flashProbe, error))
-      return false;
+    AW_PLANNER_OPTION_FIELDS(AW_FIELD_READ)
+    AW_PLANNER_OPTION_OBJECTS(AW_OBJECT_READ)
 
     {
       // Always accepted, even when the build has no profiling pass to switch:
-      // the mod sends one options document on every platform.
+      // the mod sends one options document on every platform. It is not
+      // written back, so it is not part of the macro lists.
       [[maybe_unused]] bool ignored = false;
-      if (!readBool(j, "outputPruningProfile",
+      if (!readOption(j, "outputPruningProfile",
 #ifdef AW_PROFILE_PRUNING
-                    next.outputPruningProfile,
+                      out.outputPruningProfile,
 #else
-                    ignored,
+                      ignored,
 #endif
-                    error))
+                      error))
         return false;
     }
 
-    if (!readTagInlining(j, "tagInlining", next.tagInlining, error))
-      return false;
-
-    const json *pack = nullptr;
-    if (!readNested(j, "pack", pack, error))
-      return false;
-    if (pack != nullptr && !readPackOptions(*pack, next.pack, error))
-      return false;
-
-    const json *satellite = nullptr;
-    if (!readNested(j, "satellite", satellite, error))
-      return false;
-    if (satellite != nullptr && !readSatelliteOptions(*satellite, next.satellite, error))
-      return false;
-
-    const json *variantClass = nullptr;
-    if (!readNested(j, "variantClass", variantClass, error))
-      return false;
-    if (variantClass != nullptr &&
-        !readVariantClassOptions(*variantClass, next.variantClass, error))
-      return false;
-
-    const json *tagExclusive = nullptr;
-    if (!readNested(j, "tagExclusive", tagExclusive, error))
-      return false;
-    if (tagExclusive != nullptr &&
-        !readTagExclusiveOptions(*tagExclusive, next.tagExclusive, error))
-      return false;
-
-    const json *variantFold = nullptr;
-    if (!readNested(j, "variantFold", variantFold, error))
-      return false;
-    if (variantFold != nullptr &&
-        !readVariantFoldOptions(*variantFold, next.variantFold, error))
-      return false;
-
-    if (!readSize(j, "maxTagMembers", next.maxTagMembers, error) ||
-        !readU64(j, "maxTagPairs", next.maxTagPairs, error) ||
-        !readU64(j, "maxTagCoverWork", next.maxTagCoverWork, error) ||
-        !readU64(j, "maxWitnessPairs", next.maxWitnessPairs, error) ||
-        !readU64(j, "maxPrunePairs", next.maxPrunePairs, error) ||
-        !readSize(j, "maxSiblingRecipes", next.maxSiblingRecipes, error) ||
-        !readSize(j, "maxWitnessProducers", next.maxWitnessProducers, error) ||
-        !readU64(j, "maxSubstitutionWork", next.maxSubstitutionWork, error) ||
-        !readU64(j, "maxSubstitutionCostWork", next.maxSubstitutionCostWork, error) ||
-        !readU32(j, "maxSubstitutionDepth", next.maxSubstitutionDepth, error) ||
-        !readU32(j, "maxCostDepth", next.maxCostDepth, error) ||
-        !readSize(j, "maxSubstitutionGuardItems", next.maxSubstitutionGuardItems, error) ||
-        !readSize(j, "maxSubstitutionGuardTotal", next.maxSubstitutionGuardTotal, error) ||
-        !readI64(j, "maxNeed", next.maxNeed, error) ||
-        !readInt(j, "maxPropIterations", next.maxPropIterations, error))
-      return false;
-
-    // `deadNodePruning` is a retired knob: seed pruning subsumes it. It is kept
-    // in the known set so an older client that still sends it is not rejected;
-    // the value is ignored, and it is not written back by plannerOptionsJson.
+    // `deadNodePruning` and `maxCostMemo` are retired knobs. They stay in the
+    // known set so an older client that still sends them is not rejected; the
+    // values are ignored, and neither is written back by plannerOptionsJson.
     if (!checkKnown(j,
-                    {"nonoptimal", "tagPruning", "recipePruning", "directPruning",
-                     "substitutionPruning", "deadNodePruning", "seedPruning",
-                     "tagTidy", "outputPruningProfile", "flashProbe",
-                     "tagInlining", "pack", "satellite", "variantClass", "tagExclusive",
-                     "variantFold", "maxTagMembers",
-                     "maxTagPairs",
-                     "maxTagCoverWork", "maxWitnessPairs", "maxPrunePairs",
-                     "maxSiblingRecipes", "maxWitnessProducers", "maxSubstitutionWork",
-                     "maxSubstitutionCostWork", "maxSubstitutionDepth", "maxCostDepth",
-                     "maxCostMemo", "maxSubstitutionGuardItems",
-                     "maxSubstitutionGuardTotal", "maxNeed", "maxPropIterations"},
+                    {AW_PLANNER_OPTION_FIELDS(AW_FIELD_KEY)
+                     AW_PLANNER_OPTION_OBJECTS(AW_OBJECT_KEY)
+                     "deadNodePruning", "maxCostMemo", "outputPruningProfile"},
                     error))
       return false;
 
-    options = next;
+    options = out;
     return true;
   } catch (const std::exception &e) {
     error = e.what();
@@ -371,29 +316,18 @@ bool applySolverOptionsJson(std::string_view text, std::string &error) noexcept 
       return false;
     }
 
-    solver::Options next = solverOptions;
-    if (!readDouble(j, "relativeGap", next.relativeGap, error) ||
-        !readI64(j, "absoluteGap", next.absoluteGap, error) ||
-        !readDouble(j, "maxTimeSeconds", next.maxTimeSeconds, error) ||
-        !readInt(j, "numWorkers", next.numWorkers, error) ||
-        !readInt(j, "randomSeed", next.randomSeed, error) ||
-        !readI64(j, "objectiveCap", next.objectiveCap, error) ||
-        !readI64(j, "objectiveUpperBound", next.objectiveUpperBound, error) ||
-        !readDouble(j, "reducedCostGap", next.reducedCostGap, error) ||
-        !readInt(j, "maxCycleRetries", next.maxCycleRetries, error) ||
-        !readU32(j, "maxStartupGroups", next.maxStartupGroups, error) ||
-        !readU32(j, "maxStartupGroupMembers", next.maxStartupGroupMembers, error))
+    solver::Options out = solverOptions;
+
+    AW_SOLVER_OPTION_FIELDS(AW_FIELD_READ)
+
+    // `flash` is no longer a solver option: it is per-solve state
+    // (solver::State) seeded from the process-wide `aw::options.flash`. It
+    // stays in the known set so an older client that still sends it is not
+    // rejected; the value is ignored.
+    if (!checkKnown(j, {AW_SOLVER_OPTION_FIELDS(AW_FIELD_KEY) "flash"}, error))
       return false;
 
-    if (!checkKnown(j,
-                    {"relativeGap", "absoluteGap", "maxTimeSeconds", "numWorkers",
-                     "randomSeed", "objectiveCap", "objectiveUpperBound",
-                     "reducedCostGap", "maxCycleRetries", "maxStartupGroups",
-                     "maxStartupGroupMembers", "flash"},
-                    error))
-      return false;
-
-    solverOptions = next;
+    solverOptions = out;
     return true;
   } catch (const std::exception &e) {
     error = e.what();
@@ -407,65 +341,9 @@ bool applySolverOptionsJson(std::string_view text, std::string &error) noexcept 
 std::string plannerOptionsJson() noexcept {
   try {
     json j;
-    j["nonoptimal"] = options.nonoptimal;
-    j["tagPruning"] = options.tagPruning;
-    j["recipePruning"] = options.recipePruning;
-    j["directPruning"] = options.directPruning;
-    j["substitutionPruning"] = options.substitutionPruning;
-    j["seedPruning"] = options.seedPruning;
-    j["tagTidy"] = options.tagTidy;
-    switch (options.tagInlining) {
-      case TagInlineMode::OFF: j["tagInlining"] = "off"; break;
-      case TagInlineMode::PRE_PRUNE: j["tagInlining"] = "prePrune"; break;
-      case TagInlineMode::QUERY_TIME: j["tagInlining"] = "queryTime"; break;
-      case TagInlineMode::BOTH: j["tagInlining"] = "both"; break;
-    }
-    j["pack"] = {
-        {"enabled", options.pack.enabled},
-        {"maxPackRecipes", options.pack.maxPackRecipes},
-        {"maxPackValue", options.pack.maxPackValue},
-        {"maxBranchDepth", options.pack.maxBranchDepth},
-        {"maxBranchNodes", options.pack.maxBranchNodes},
-        {"maxZeroStockItems", options.pack.maxZeroStockItems},
-        {"maxSeconds", options.pack.maxSeconds},
-    };
-    j["satellite"] = {
-        {"enabled", options.satellite.enabled},
-        {"maxComponentNodes", options.satellite.maxComponentNodes},
-        {"maxIslandNodes", options.satellite.maxIslandNodes},
-        {"maxSeconds", options.satellite.maxSeconds},
-    };
-    j["variantClass"] = {
-        {"enabled", options.variantClass.enabled},
-        {"maxClassNodes", options.variantClass.maxClassNodes},
-        {"maxCandidates", options.variantClass.maxCandidates},
-        {"maxSeconds", options.variantClass.maxSeconds},
-    };
-    j["tagExclusive"] = {
-        {"enabled", options.tagExclusive.enabled},
-        {"maxSeconds", options.tagExclusive.maxSeconds},
-    };
-    j["variantFold"] = {
-        {"enabled", options.variantFold.enabled},
-        {"maxFoldItems", options.variantFold.maxFoldItems},
-        {"maxSeconds", options.variantFold.maxSeconds},
-    };
-    j["flashProbe"] = options.flashProbe;
-    j["maxTagMembers"] = options.maxTagMembers;
-    j["maxTagPairs"] = options.maxTagPairs;
-    j["maxTagCoverWork"] = options.maxTagCoverWork;
-    j["maxWitnessPairs"] = options.maxWitnessPairs;
-    j["maxPrunePairs"] = options.maxPrunePairs;
-    j["maxSiblingRecipes"] = options.maxSiblingRecipes;
-    j["maxWitnessProducers"] = options.maxWitnessProducers;
-    j["maxSubstitutionWork"] = options.maxSubstitutionWork;
-    j["maxSubstitutionCostWork"] = options.maxSubstitutionCostWork;
-    j["maxSubstitutionDepth"] = options.maxSubstitutionDepth;
-    j["maxCostDepth"] = options.maxCostDepth;
-    j["maxSubstitutionGuardItems"] = options.maxSubstitutionGuardItems;
-    j["maxSubstitutionGuardTotal"] = options.maxSubstitutionGuardTotal;
-    j["maxNeed"] = options.maxNeed;
-    j["maxPropIterations"] = options.maxPropIterations;
+    const Options &out = options;
+    AW_PLANNER_OPTION_FIELDS(AW_FIELD_WRITE)
+    AW_PLANNER_OPTION_OBJECTS(AW_OBJECT_WRITE)
     return j.dump(2);
   } catch (...) {
     return "{}";
@@ -475,17 +353,8 @@ std::string plannerOptionsJson() noexcept {
 std::string solverOptionsJson() noexcept {
   try {
     json j;
-    j["relativeGap"] = solverOptions.relativeGap;
-    j["absoluteGap"] = solverOptions.absoluteGap;
-    j["maxTimeSeconds"] = solverOptions.maxTimeSeconds;
-    j["numWorkers"] = solverOptions.numWorkers;
-    j["randomSeed"] = solverOptions.randomSeed;
-    j["objectiveCap"] = solverOptions.objectiveCap;
-    j["objectiveUpperBound"] = solverOptions.objectiveUpperBound;
-    j["reducedCostGap"] = solverOptions.reducedCostGap;
-    j["maxCycleRetries"] = solverOptions.maxCycleRetries;
-    j["maxStartupGroups"] = solverOptions.maxStartupGroups;
-    j["maxStartupGroupMembers"] = solverOptions.maxStartupGroupMembers;
+    const solver::Options &out = solverOptions;
+    AW_SOLVER_OPTION_FIELDS(AW_FIELD_WRITE)
     return j.dump(2);
   } catch (...) {
     return "{}";

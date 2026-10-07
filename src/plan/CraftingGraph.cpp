@@ -1871,10 +1871,9 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   // the cheap subgraph first, and only pay for the expensive passes when there
   // is no plan to be had. See docs/algorithm.typ (快速模式).
   //
-  // The switch lives in two places and `planCrafting` ORs them, because the mod
-  // sets the solver's copy. Reading only the planner's here would leave the mod
-  // on the slow path.
-  const bool probe = (options.flash || solverOptions.flash) && options.flashProbe;
+  // The process-wide planner switch is the one the tools and the mod flip. See
+  // Options::flash.
+  const bool probe = options.flash && options.flashProbe;
 
   Subgraph result;
   reachableQuery(args, probe, result);

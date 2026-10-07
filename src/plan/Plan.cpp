@@ -14,9 +14,9 @@ namespace {
 // True when some posted group already covers exactly this set of columns, so a
 // retry that reports the same deadlock does not post a duplicate. The sizes are
 // compared first, which turns the subset test into an equality test.
-bool hasEntryGroup(const aw::vector<solver::Options::EntryGroup> &groups,
+bool hasEntryGroup(const aw::vector<solver::State::EntryGroup> &groups,
                    std::span<const uint32_t> columns) noexcept {
-  for (const solver::Options::EntryGroup &group : groups) {
+  for (const solver::State::EntryGroup &group : groups) {
     if (group.columns.size() != columns.size())
       continue;
     bool all = true;
@@ -145,7 +145,7 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
   // `amount` is the one the probe was told about, which is this one, and a plan
   // from a different subgraph cannot match `nRecipe`. See
   // Subgraph::flashExec.
-  if ((options.flash || aw::options.flash) && sub.flashExec.size() == g.nRecipe &&
+  if (aw::options.flash && sub.flashExec.size() == g.nRecipe &&
       !sub.flashExec.empty()) {
     if (planIsFireable(sub, invSrc,
                        std::span<const int64_t>(sub.flashExec.data(),
@@ -263,14 +263,16 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
   result.greedyMs = std::chrono::duration<double, std::milli>(
                        std::chrono::steady_clock::now() - greedyStart).count();
   solver::Options solveOptions = options;
-  // The process-wide switch is the one the tools and the mod flip, so it is the
-  // source of truth; the per-solve copy is what the retry loop below can clear
-  // once a plan has been rejected.
-  solveOptions.flash = solveOptions.flash || aw::options.flash;
+  // The per-solve state: the warm start, the no-goods, the startup cuts and
+  // flash. The process-wide switch is the one the tools and the mod flip, so it
+  // seeds `state.flash`, which the retry loop below can clear once a plan has
+  // been rejected.
+  solver::State state;
+  state.flash = aw::options.flash;
 
   // Startup cuts need the physical stock per row, and they are the only reason
   // a solve ever needs it, so it is filled on demand. See
-  // Options::EntryGroup and Options::SeedCut.
+  // State::EntryGroup and State::SeedCut.
   aw::vector<int64_t> stockPerRow;
   const auto installStock = [&]() {
     if (!stockPerRow.empty())
@@ -282,7 +284,7 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
       const ItemId source = sub.itemOrigin[i];
       stockPerRow[i] = source < invSrc.size() ? (int64_t) invSrc[source] : 0;
     }
-    solveOptions.stock = std::span<const int64_t>(stockPerRow.data(), stockPerRow.size());
+    state.stock = std::span<const int64_t>(stockPerRow.data(), stockPerRow.size());
   };
 
   bool greedyUsable = false;
@@ -292,7 +294,7 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
       greedyCost += (aw::int128) objective[r] * greedy[r];
     greedyUsable = greedyCost > 0 && greedyCost <= (aw::int128) INT64_MAX;
   }
-  if (greedyUsable && solveOptions.flash) {
+  if (greedyUsable && state.flash) {
     // A hit is the whole answer in flash mode: the greedy plan is acyclic, so
     // the fireability check only ever confirms it. A plan that cannot be fired
     // is not an answer, though, so a rejected one is dropped rather than
@@ -314,7 +316,7 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
   if (greedyUsable) {
     if (greedyCost <= (aw::int128) costLowerBound(A, rhs, objective) * GREEDY_QUALITY_FACTOR) {
       solveOptions.objectiveUpperBound = (int64_t) greedyCost;
-      solveOptions.solutionHint = std::span<const int64_t>(greedy.data(), greedy.size());
+      state.solutionHint = std::span<const int64_t>(greedy.data(), greedy.size());
     }
   }
 
@@ -354,14 +356,14 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
   // instead of CYCLE_UNFULFILLED when no firing sequence exists at all. A
   // greedy hit above never reaches this point. See buildStartupCuts.
   if (solveOptions.maxStartupGroups > 0)
-    buildStartupCuts(sub, solveOptions.entryGroups, solveOptions.seedCuts,
+    buildStartupCuts(sub, state.entryGroups, state.seedCuts,
                      solveOptions.maxStartupGroups, solveOptions.maxStartupGroupMembers);
-  if (!solveOptions.entryGroups.empty() || !solveOptions.seedCuts.empty())
+  if (!state.entryGroups.empty() || !state.seedCuts.empty())
     installStock();
 
   // Re-solve while the post-solve fireability check rejects the plan. Every
   // rejected vector becomes a no-good, so the next solve has to return a
-  // different one; see solver::Options::noGoods and PlanStatus. The retries
+  // different one; see solver::State::noGoods and PlanStatus. The retries
   // share the caller's wall-clock budget instead of each getting a fresh one,
   // so a rejection cannot silently multiply the latency.
   const double totalBudget = solveOptions.maxTimeSeconds;
@@ -383,7 +385,7 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
       }
       solveOptions.maxTimeSeconds = left;
     }
-    const solver::Result solved = solver::solve(A, rhs, objective, solveOptions);
+    const solver::Result solved = solver::solve(A, rhs, objective, solveOptions, state);
     conflicts += solved.numConflicts;
     branches += solved.numBranches;
     result.numConflicts = conflicts;
@@ -458,7 +460,7 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
     // sequence. This is what keeps flash from answering CYCLE_UNFULFILLED on
     // instances the optimizing solve answers with the same subgraph and the
     // same budget.
-    solveOptions.flash = false;
+    state.flash = false;
 
     // Post one entry group over the whole deadlocked component, not one group
     // per recipe. Grouping is what makes the cut bite: the group's own members
@@ -472,10 +474,10 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
     const std::span<const uint32_t> component(witness.recipe.data(),
                                               witness.recipe.size());
     bool addedCut = false;
-    if (!hasEntryGroup(solveOptions.entryGroups, component)) {
-      solver::Options::EntryGroup group;
+    if (!hasEntryGroup(state.entryGroups, component)) {
+      solver::State::EntryGroup group;
       if (buildEntryGroup(sub, component, group)) {
-        solveOptions.entryGroups.push_back(std::move(group));
+        state.entryGroups.push_back(std::move(group));
         addedCut = true;
       }
     }
@@ -484,8 +486,8 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
 
     // The rejected plan stays in `result.exec`, so a caller still sees what was
     // refused. Drop the warm start: it points at the vector just forbidden.
-    solveOptions.noGoods.push_back(solved.x);
-    solveOptions.solutionHint = {};
+    state.noGoods.push_back(solved.x);
+    state.solutionHint = {};
   }
 }
 

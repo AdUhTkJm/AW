@@ -113,6 +113,13 @@ AW_TEST(testOptionsJson) {
   expect(!aw::options.flashProbe, "the flash probe switch is updated");
   aw::options.flashProbe = true;
 
+  // Flash is a planner option: the process-wide switch lives here, and the
+  // solver takes its per-solve copy from it (solver::State::flash).
+  expect(aw::applyPlannerOptionsJson(R"({"flash": true})", error),
+         "the planner patch accepts flash");
+  expect(aw::options.flash, "the flash switch is updated");
+  aw::options.flash = false;
+
   error.clear();
   expect(!aw::applyPlannerOptionsJson(R"({"nope": 1})", error) && !error.empty(),
          "an unknown planner key is rejected");
@@ -130,13 +137,19 @@ AW_TEST(testOptionsJson) {
   const std::string dumped = aw::plannerOptionsJson();
   expect(aw::applyPlannerOptionsJson(dumped, error), "the dumped planner options apply verbatim");
   expect(error.empty(), "round-tripping the planner options reports no error");
+  expect(dumped.find("\"flash\"") != std::string::npos,
+         "the dump carries the flash switch");
 
   error.clear();
+  // "flash" is retired on the solver side and must still be accepted, so an
+  // older client that sends it is not rejected; the value is ignored.
   expect(aw::applySolverOptionsJson(R"({"flash": true, "numWorkers": 1, "maxTimeSeconds": 0.5})", error),
          "a partial solver patch applies");
   expect(aw::solverOptions.numWorkers == 1, "solver scalars are updated");
   expect(aw::solverOptions.maxTimeSeconds == 0.5, "a solver double is updated");
   expect(aw::solverOptions.relativeGap == savedSolver.relativeGap, "an absent solver key keeps its value");
+  expect(!aw::applySolverOptionsJson(R"({"nope": true})", error),
+         "an unknown solver key is rejected");
   expect(!aw::applySolverOptionsJson(R"({"maxTimeSeconds": "slow"})", error),
          "a wrong solver type is rejected");
 

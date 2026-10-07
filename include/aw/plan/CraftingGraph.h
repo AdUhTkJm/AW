@@ -340,9 +340,9 @@ struct Subgraph {
 // available. A directly dominated recipe is dropped without a stock check:
 // nothing is inlined, so the dominator replaces it whatever the inventory.
 //
-// With flash mode on -- `options.flash` or `solverOptions.flash`, whichever the
-// caller set, since the mod sets the latter -- this first asks the greedy
-// pre-pass for a plan on the cheaply pruned subgraph: everything except
+// With flash mode on -- `options.flash`, the process-wide planner switch --
+// this first asks the greedy pre-pass for a plan on the cheaply pruned
+// subgraph: everything except
 // satellite elimination and the variant passes, which together are more than
 // nine tenths of a reach query on a large corpus. A hit is returned as
 // `flashExec` on the subgraph it was found on; a miss falls through to the full

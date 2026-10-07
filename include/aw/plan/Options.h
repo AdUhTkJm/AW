@@ -41,261 +41,188 @@ enum class TagInlineMode : uint8_t {
   BOTH = 3,
 };
 
-// Budget for the multi-item "wasteful pack" certificates. The defaults keep
-// registration bounded on the full 12k-item graphs; running out of budget only
-// turns a search branch into a leaf, which weakens the pack but never makes it
-// unsound.
+// Pack-prune budget. The pass looks for a multi-item "wasteful pack"
+// certificate at registration time. The defaults keep it bounded on the full
+// 12k-item graphs, and running out of budget only turns a search branch into a
+// leaf, which weakens the pack but never makes it unsound. See docs/options.typ.
+//
+//   X(type, member, default)
+#define AW_PACK_OPTION_FIELDS(X)    \
+  X(bool, enabled, true)            \
+  X(uint32_t, maxPackRecipes, 128)  \
+  X(int64_t, maxPackValue, 1024)    \
+  X(uint32_t, maxBranchDepth, 8)    \
+  X(uint32_t, maxBranchNodes, 4096) \
+  X(uint32_t, maxZeroStockItems, 32) \
+  X(double, maxSeconds, 60.0)
+
 struct PackPruneOptions {
-  bool enabled = true;
-
-  // Pack size: at most this many distinct recipes, and at most this total
-  // count across the pack.
-  uint32_t maxPackRecipes = 128;
-  int64_t maxPackValue = 1024;
-
-  // R3 search budget. Exceeding either turns the node into a leaf.
-  uint32_t maxBranchDepth = 8;
-  uint32_t maxBranchNodes = 4096;
-
-  // Cap on the pack's zero-stock set. A derivation that needs more is dropped.
-  uint32_t maxZeroStockItems = 32;
-
-  // Wall-clock budget for the whole pass. <= 0 means no limit.
-  double maxSeconds = 60.0;
+#define AW_OPTION_MEMBER(type, name, default) type name = default;
+  AW_PACK_OPTION_FIELDS(AW_OPTION_MEMBER)
+#undef AW_OPTION_MEMBER
 };
 
-// Query-time re-pruning of the reachable subgraph. This might give us more
-// per-query information.
+// Query-time satellite elimination, run inside reachableSubgraph where the
+// target and the inventory are known: it drops groups of recipes whose only net
+// output to the rest of the subgraph is one item, hold no stock inside, and
+// cannot repay that item. Running out of a budget only leaves a group alone,
+// which can weaken the pass but never makes it unsound. See docs/options.typ.
+// The undirected articulation components and the wider "input-leaking" islands
+// found by the escape enumeration are the two ways to find such a group.
+#define AW_SATELLITE_OPTION_FIELDS(X)   \
+  X(bool, enabled, true)                \
+  X(bool, enabledOnFlash, false)        \
+  X(uint32_t, maxComponentNodes, 512)   \
+  X(uint32_t, maxIslandNodes, 4096)     \
+  X(double, maxSeconds, 0.05)
+
+struct SatellitePruneOptions {
+#define AW_OPTION_MEMBER(type, name, default) type name = default;
+  AW_SATELLITE_OPTION_FIELDS(AW_OPTION_MEMBER)
+#undef AW_OPTION_MEMBER
+};
+
+// Interchangeable-variant (tag-orbit) elimination, run inside
+// reachableSubgraph on the assembled subgraph. For every tag whose members
+// could be an interchangeable class it shrinks the class until it is closed
+// under the conversions, then drops the class's internal conversions. Running
+// out of budget or hitting a bound only leaves a class alone, so it can weaken
+// the pass but cannot make it unsound. See docs/options.typ.
+#define AW_VARIANT_CLASS_OPTION_FIELDS(X) \
+  X(bool, enabled, true)                  \
+  X(uint32_t, maxClassNodes, 4096)        \
+  X(uint32_t, maxCandidates, 4096)        \
+  X(double, maxSeconds, 0.05)
+
+struct VariantClassPruneOptions {
+#define AW_OPTION_MEMBER(type, name, default) type name = default;
+  AW_VARIANT_CLASS_OPTION_FIELDS(AW_OPTION_MEMBER)
+#undef AW_OPTION_MEMBER
+};
+
+// Tag-exclusive producer elimination, run inside reachableSubgraph on the
+// assembled subgraph. A real item is tag-exclusive for a tag T when every
+// consumer of it is a member edge of T. A real recipe whose outputs are all
+// exclusive for the same T is dropped when it produces no more M(T)-capacity
+// than it consumes. The target is the only guard; the inventory needs none.
+// Running out of budget only leaves recipes alone, so it can weaken the pass
+// but cannot make it unsound. See docs/options.typ.
+#define AW_TAG_EXCLUSIVE_OPTION_FIELDS(X) \
+  X(bool, enabled, true)                  \
+  X(double, maxSeconds, 0.05)
+
+struct TagExclusivePruneOptions {
+#define AW_OPTION_MEMBER(type, name, default) type name = default;
+  AW_TAG_EXCLUSIVE_OPTION_FIELDS(AW_OPTION_MEMBER)
+#undef AW_OPTION_MEMBER
+};
+
+// Variant-folding elimination, run inside reachableSubgraph on the assembled
+// subgraph. It looks for the decorative twins of a resource: items that a tag,
+// or a chain of "same recipe, other item" copies, makes interchangeable with a
+// more mundane base, and that no real recipe outside that structure ever
+// demands by name. Such an item is folded into its base, and every recipe that
+// mentions it is dropped. The fold is only applied when a signature check
+// proves that every dropped recipe can be replayed by recipes that survive, so
+// an exhausted budget or a failed check only means nothing is pruned. See
+// docs/algorithm.typ (多出口的推广) and VariantFoldPrune.cpp; the fields are in
+// docs/options.typ.
+#define AW_VARIANT_FOLD_OPTION_FIELDS(X) \
+  X(bool, enabled, true)                 \
+  X(uint32_t, maxFoldItems, 4096)        \
+  X(double, maxSeconds, 1.0)
+
+struct VariantFoldPruneOptions {
+#define AW_OPTION_MEMBER(type, name, default) type name = default;
+  AW_VARIANT_FOLD_OPTION_FIELDS(AW_OPTION_MEMBER)
+#undef AW_OPTION_MEMBER
+};
+
+// Query-time re-pruning of the reachable subgraph. Not serialized; it is a
+// development switch, see tests/plan/Main.cpp.
 struct SubgraphRepruneOptions {
   bool enabled = true;
   bool enabledOnFlash = false;
-
-  // Use the exact relation instead of the nonoptimal relaxation.
-  // The nonoptimal mode might cause solution downgrade.
+  // Use the exact relation instead of the nonoptimal relaxation. The
+  // nonoptimal mode might cause solution downgrade.
   bool exact = true;
 };
 
-// Budget for the satellite-elimination pass.
+// The planner's own pruning switches and budgets. The X-macro lists below are
+// the only place a serialized field is declared: this struct expands them into
+// members, and OptionsJson.cpp expands the same lists into the JSON reader,
+// writer and known-key set. A field is therefore written once. See
+// docs/options.typ for what each one means.
 //
-// The pass runs inside reachableSubgraph, where the target and the inventory
-// are known: it looks for groups of recipes whose only net output to the rest
-// of the subgraph is one item, hold no stock inside, and cannot repay that
-// item, and drops them. The undirected articulation components and the wider
-// "input-leaking" islands found by the escape enumeration are two ways to find
-// such groups. Everything else is a budget, and running out of one only means a
-// group is left alone.
-struct SatellitePruneOptions {
-  bool enabled = true;
-
-  // A component with more nodes than this is skipped. A wide component is
-  // never a "variants hanging off a basic form" island, and its LP would
-  // dominate the pass.
-  uint32_t maxComponentNodes = 512;
-
-  // Budget for the generalized escape enumeration. The island of a single
-  // escape can be much wider than an undirected component (the maximal closed
-  // set is taken), so it has its own, larger bound; `maxComponentNodes` still
-  // bounds the undirected pass. The count is items plus recipes.
-  uint32_t maxIslandNodes = 4096;
-
-  // Wall-clock budget for one round of the pass, on top of the reachability
-  // walk. reachableSubgraph runs at most four rounds. <= 0 means no limit.
-  double maxSeconds = 0.05;
-};
-
-// Budget for the interchangeable-variant (tag-orbit) pass.
+// Minecraft is serial and the crafting graph is a singleton, so there is no
+// thread safety to worry about. The registration-time knobs (tag inlining and
+// the dominance and pack passes) are read once by registerCraftingGraph, so
+// they must be set before registering a graph; the query-time ones (satellite
+// elimination, seed pruning and the query-time half of tag inlining) can be
+// flipped at any time.
 //
-// The pass runs inside reachableSubgraph on the assembled subgraph. For every
-// tag whose members could be an interchangeable class it shrinks the class until
-// it is closed under the conversions, then drops the class's internal
-// conversions. Running out of budget or hitting a bound only leaves a class
-// alone, so it can weaken the pass but cannot make it unsound.
-struct VariantClassPruneOptions {
-  bool enabled = true;
+//   X(type, member, default)
+#define AW_PLANNER_OPTION_FIELDS(X)                        \
+  X(bool, nonoptimal, true)                                \
+  X(bool, tagPruning, true)                                \
+  X(bool, recipePruning, true)                             \
+  X(bool, directPruning, true)                             \
+  X(bool, substitutionPruning, true)                       \
+  X(bool, seedPruning, true)                               \
+  X(bool, tagTidy, true)                                   \
+  X(bool, flash, false)                                    \
+  X(bool, flashProbe, true)                                \
+  X(TagInlineMode, tagInlining, TagInlineMode::QUERY_TIME) \
+  X(size_t, maxTagMembers, 1024)                           \
+  X(uint64_t, maxTagPairs, 4'000'000)                      \
+  X(uint64_t, maxTagCoverWork, 64'000'000)                 \
+  X(uint64_t, maxWitnessPairs, 4'000'000)                  \
+  X(uint64_t, maxPrunePairs, 4'000'000)                    \
+  X(size_t, maxSiblingRecipes, 2048)                       \
+  X(size_t, maxWitnessProducers, 2048)                     \
+  X(uint64_t, maxSubstitutionWork, 64'000'000)             \
+  X(uint64_t, maxSubstitutionCostWork, 256'000'000)        \
+  X(uint32_t, maxSubstitutionDepth, 4)                     \
+  X(uint32_t, maxCostDepth, 16)                            \
+  X(size_t, maxSubstitutionGuardItems, 256)                \
+  X(size_t, maxSubstitutionGuardTotal, 1'000'000)          \
+  X(int64_t, maxNeed, int64_t{1} << 40)                    \
+  X(int, maxPropIterations, 4096)
 
-  // A candidate class with more members than this is skipped: the fixpoint is
-  // quadratic in the member count in the worst case, and a class this wide is
-  // not a colour orbit.
-  uint32_t maxClassNodes = 4096;
+// The nested option blocks, read as JSON objects.
+//   X(type, member)
+#define AW_PLANNER_OPTION_OBJECTS(X)          \
+  X(PackPruneOptions, pack)                   \
+  X(SatellitePruneOptions, satellite)         \
+  X(VariantClassPruneOptions, variantClass)   \
+  X(TagExclusivePruneOptions, tagExclusive)   \
+  X(VariantFoldPruneOptions, variantFold)
 
-  // At most this many candidate tags are examined per query.
-  uint32_t maxCandidates = 4096;
-
-  // Wall-clock budget for the whole pass on one query. <= 0 means no limit.
-  double maxSeconds = 0.05;
-};
-
-// Budget for the tag-exclusive producer pass.
-//
-// The pass runs inside reachableSubgraph on the assembled subgraph. A real item
-// is tag-exclusive for a tag T when every consumer of it is a member edge
-// of T. A real recipe whose outputs are all exclusive for the same T is dropped
-// when it produces no more M(T)-capacity than it consumes. The target is the
-// only guard; the inventory needs none. Running out of budget only leaves
-// recipes alone, so it can weaken the pass but cannot make it unsound.
-struct TagExclusivePruneOptions {
-  bool enabled = true;
-
-  // Wall-clock budget for the whole pass on one query. <= 0 means no limit.
-  double maxSeconds = 0.05;
-};
-
-// Budget for the variant-folding pass.
-//
-// The pass runs inside reachableSubgraph on the assembled subgraph. It looks
-// for the decorative twins of a resource: items that a tag, or a chain of
-// "same recipe, other item" copies, makes interchangeable with a more mundane
-// base, and that no real recipe outside that structure ever demands by name.
-// Such an item is folded into its base, and every recipe that mentions it is
-// dropped. The fold is only applied when a signature check proves that every
-// dropped recipe can be replayed by recipes that survive, so an exhausted
-// budget or a failed check only means nothing is pruned.
-//
-// See docs/algorithm.typ (多出口的推广) and VariantFoldPrune.cpp.
-struct VariantFoldPruneOptions {
-  bool enabled = true;
-
-  // A candidate fold with more items in it than this is skipped. The check is
-  // linear per recipe, so this only bounds the repair search.
-  uint32_t maxFoldItems = 4096;
-
-  // Wall-clock budget for the whole pass on one query. <= 0 means no limit.
-  // The pass folds a few hundred items on the ATM subgraph in about a third of
-  // a second; running out only means nothing is pruned.
-  double maxSeconds = 1.0;
-};
-
-// Process-wide planner options. Minecraft is serial and the crafting graph is
-// a singleton, so there is no thread safety to worry about.
-//
-// This is the single home for every pruning switch and tuning bound. The
-// registration-time knobs (tag inlining, the dominance and pack passes) are
-// read once by registerCraftingGraph, so they must be set before registering a
-// graph; the query-time ones (satellite elimination, seed pruning and the
-// query-time half of tag inlining) can be flipped at any time.
 struct Options {
-  // Integrality relaxation for the dominance passes. On by default.
-  bool nonoptimal = true;
-  
-  bool tagPruning = true;
-  bool recipePruning = true;
-  bool directPruning = true;
-  bool substitutionPruning = true;
-  bool seedPruning = true;
-
-  bool tagTidy = true;
-  bool flash = false;
-  // Flash mode's early greedy probe. On by default. When set, a flash query
-  // asks the greedy pre-pass for a plan on the cheaply pruned subgraph before
-  // satellite elimination and the variant passes run, and skips them entirely
-  // when it gets one. See reachableSubgraph.
-  //
-  // The probe answers with a cheaper-to-find plan than the pruned subgraph
-  // would, because the passes it skips also remove routes the greedy pre-pass
-  // can use. Ablation over the four bench corpora puts the median difference at
-  // zero and the worst case at about 1.2x, so it is on; this switch exists so
-  // the tail can be traded back for the latency.
-  bool flashProbe = true;
-#ifdef AW_PROFILE_PRUNING
-  bool outputPruningProfile = false;
-  bool outputRepruningProfile = false;
-#endif
-
-  // Where single-use tag inlining runs. Read at registration time.
-  TagInlineMode tagInlining = TagInlineMode::QUERY_TIME;
+#define AW_OPTION_MEMBER(type, name, default) type name = default;
+  AW_PLANNER_OPTION_FIELDS(AW_OPTION_MEMBER)
+#undef AW_OPTION_MEMBER
+#define AW_OPTION_OBJECT(type, name) type name;
+  AW_PLANNER_OPTION_OBJECTS(AW_OPTION_OBJECT)
+#undef AW_OPTION_OBJECT
 
   // The single-member half of the inliner, see inlineSingleUseTagsCore. On by
-  // default; it is a plain substitution and never grows the recipe list, but it
-  // is separable because the many-member half has a very different cost.
+  // default; it is a plain substitution and never grows the recipe list, but
+  // it is separable because the many-member half has a very different cost.
+  // Not serialized; it is an experiment.
   bool inlineSingleMemberTags = true;
-
-  // Pack and satellite budgets. Their `enabled` field is the switch for the
-  // corresponding pass.
-  PackPruneOptions pack;
-  SatellitePruneOptions satellite;
-
-  // Interchangeable-variant elimination. Read by `reachableSubgraph` on every
-  // query, so it can be flipped at any time.
-  VariantClassPruneOptions variantClass;
-
-  // Tag-exclusive producer elimination. Read by `reachableSubgraph` on every
-  // query, so it can be flipped at any time.
-  TagExclusivePruneOptions tagExclusive;
-
-  // Variant-folding elimination. Read by `reachableSubgraph` on every query, so
-  // it can be flipped at any time.
-  VariantFoldPruneOptions variantFold;
 
   // Query-time re-pruning of the reachable subgraph. Read by
   // `reachableSubgraph` on every query, so it can be flipped at any time.
+  // Not serialized.
   SubgraphRepruneOptions reprune;
 
-  // -------------------------------------------------------------------------
-  // Tag-pruning budgets.
-  // -------------------------------------------------------------------------
-
-  // Only prune tags with at most this member count.
-  size_t maxTagMembers = 1024;
-
-  // Only prune tags with at most this amount of alive-pairs.
-  uint64_t maxTagPairs = 4'000'000;
-
-  // Global ceiling on the number of column-cover tests.
-  uint64_t maxTagCoverWork = 64'000'000;
-
-  // Ceiling on the gating pairs loop (a) contributes.
-  uint64_t maxWitnessPairs = 4'000'000;
-
-  // Ceiling on the pair universe. The seeds are always kept; the transitive
-  // closure stops once the total reaches this. It is a heuristic bound: on the
-  // 12k-item NAST pack it keeps registration near one second, and running out
-  // only leaves pairs out of the relation, which can only make the pass prune
-  // less. Paying more here mostly buys the deeper real-input chains, so the
-  // marginal tag edges fall off quickly past this point.
-  uint64_t maxPrunePairs = 4'000'000;
-
-  // A real item with more recipes than this is left unpruned. The composite
-  // pass compares every pair of an item's recipes; ATM10 has items with 35k
-  // recipes, where comparing all pairs is both quadratic in time and gigabytes
-  // of adjacency. Keeping recipes can only cost the planner time, never
-  // correctness.
-  size_t maxSiblingRecipes = 2048;
-
-  // A witness input produced by more recipes than this is skipped, because the
-  // composite test has to hold for every producer of the witness. Skipping a
-  // witness just leaves its recipe without a guard. ATM10 has 8 items above
-  // this (up to 35k producers); the test graphs top out at 1985.
-  size_t maxWitnessProducers = 2048;
-
-  // -------------------------------------------------------------------------
-  // Substitution-pruning budgets.
-  // -------------------------------------------------------------------------
-
-  // Substitution budgets. The pass compares every pair of an item's recipes and
-  // asks the cost relation about the pairs that could cover a deficit. Running
-  // out only leaves recipes unpruned. A collapse also produces a stock guard: a
-  // real input is a single item, but a tag expands into its members, and a
-  // catch-all tag is left alone rather than recorded as a per-recipe guard list.
-  //
-  // The cost relation is solved one witness at a time by an upward closure, so
-  // maxSubstitutionCostWork counts closure steps and maxCostMemo bounds the
-  // total number of true pairs kept. The true side of the relation is tiny (a
-  // few thousand pairs on the large packs) while the false bulk is huge, which
-  // is why the closure only ever visits the true side.
-  uint64_t maxSubstitutionWork = 64'000'000;
-  uint64_t maxSubstitutionCostWork = 256'000'000;
-  uint32_t maxSubstitutionDepth = 4;
-  // Longest derivation chain the cost relation accepts, taking one qualified
-  // input per recipe.
-  uint32_t maxCostDepth = 16;
-  size_t maxSubstitutionGuardItems = 256;
-  size_t maxSubstitutionGuardTotal = 1'000'000;
-
-  // -------------------------------------------------------------------------
-  // Pack-pruning budgets.
-  // -------------------------------------------------------------------------
-  int64_t maxNeed = int64_t{1} << 40;
-  int maxPropIterations = 4096;
+#ifdef AW_PROFILE_PRUNING
+  // Profiling switches, compiled in only for the desktop development build.
+  // Not serialized.
+  bool outputPruningProfile = false;
+  bool outputRepruningProfile = false;
+#endif
 };
 
 // The singleton option block.
@@ -305,7 +232,8 @@ extern Options options;
 // apart from `options` because it is a different struct with a different
 // lifetime: `options` holds the planner's own pruning switches, and the solver
 // budget is re-read per query so the mod config can retune it without
-// re-registering the graph.
+// re-registering the graph. Flash is not here; it is per-solve state, see
+// solver::State.
 extern solver::Options solverOptions;
 
 }  // namespace aw

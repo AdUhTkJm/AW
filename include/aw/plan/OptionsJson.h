@@ -8,6 +8,10 @@
 // as JSON and nlohmann parses them on the native side. Field names are the C++
 // member names, `camelCase`, and the mapping is one to one in both directions.
 //
+// The field list is not repeated here: it is the X-macro lists in Options.h and
+// Solver.h, which declare the members and this file's readers/writers from one
+// source. See OptionsJson.cpp and docs/options.typ.
+//
 // An update is a partial patch: a key that is absent keeps its current value. A
 // key that is present but unknown is an error, because a typo in a config file
 // should say so rather than be silently ignored. The whole patch is applied to

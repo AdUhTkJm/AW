@@ -41,7 +41,7 @@
 // time, and an amplifier pair passes it and still cannot start: `A x64 <- B x16`
 // needs sixteen B, `B x1 <- A x1` needs one A, and a shelf with eight A answers
 // the second while the first is what the cycle actually costs. See
-// `addPairSeedCuts` for the derivation and `solver::Options::SeedCut` for what
+// `addPairSeedCuts` for the derivation and `solver::State::SeedCut` for what
 // is posted.
 
 #include "StartupCut.h"
@@ -93,9 +93,9 @@ struct InputMerger {
   }
 
   // One need per distinct input item of the merged recipe.
-  void appendNeeds(RecipeId r, aw::vector<solver::Options::EntryNeed> &needs) const noexcept {
+  void appendNeeds(RecipeId r, aw::vector<solver::State::EntryNeed> &needs) const noexcept {
     for (ItemId item : touched)
-      needs.push_back(solver::Options::EntryNeed{item, r, gross[item]});
+      needs.push_back(solver::State::EntryNeed{item, r, gross[item]});
   }
 };
 
@@ -214,13 +214,13 @@ bool mulFits(Amount x, Amount y, int64_t &out) noexcept {
 // Add `weight` on `row` to a cut's terms, merging with a term that already
 // names the row. A cycle whose two recipes share an item puts that item on both
 // sides of the derivation, and two separate terms would have it counted once.
-void appendTerm(aw::vector<solver::Options::SeedTerm> &terms, ItemId row, Amount weight) noexcept {
-  for (solver::Options::SeedTerm &term : terms)
+void appendTerm(aw::vector<solver::State::SeedTerm> &terms, ItemId row, Amount weight) noexcept {
+  for (solver::State::SeedTerm &term : terms)
     if (term.row == row) {
       term.weight += weight;
       return;
     }
-  terms.push_back(solver::Options::SeedTerm{row, weight});
+  terms.push_back(solver::State::SeedTerm{row, weight});
 }
 
 // The joint seed cuts of the ordered pair (a, b) of a two-recipe cycle: `a` eats
@@ -256,7 +256,7 @@ void appendTerm(aw::vector<solver::Options::SeedTerm> &terms, ItemId row, Amount
 // only happens for a recipe that eats what it makes. Under-stating the shelf
 // can only weaken the cut, never make it wrong.
 void addPairSeedCuts(const BaseCraftingGraph &g, RecipeId a, RecipeId b, InputMerger &inputs,
-                     aw::vector<solver::Options::SeedCut> &out, uint32_t maxSeeds) noexcept {
+                     aw::vector<solver::State::SeedCut> &out, uint32_t maxSeeds) noexcept {
   inputs.merge(g, a);
   InputSnapshot aIn;
   aIn.take(inputs);
@@ -282,7 +282,7 @@ void addPairSeedCuts(const BaseCraftingGraph &g, RecipeId a, RecipeId b, InputMe
       for (int direction = 0; direction < 2; direction++) {
         if (out.size() >= maxSeeds)
           return;
-        solver::Options::SeedCut cut;
+        solver::State::SeedCut cut;
         cut.members.push_back(a);
         cut.members.push_back(b);
         cut.demand = demand;
@@ -347,8 +347,8 @@ bool unitePartners(const BaseCraftingGraph &g, RecipeId r, const InputMerger &in
 
 }  // namespace
 
-void buildStartupCuts(const Subgraph &sub, aw::vector<solver::Options::EntryGroup> &groups,
-                      aw::vector<solver::Options::SeedCut> &seeds, uint32_t maxGroups,
+void buildStartupCuts(const Subgraph &sub, aw::vector<solver::State::EntryGroup> &groups,
+                      aw::vector<solver::State::SeedCut> &seeds, uint32_t maxGroups,
                       uint32_t maxMembers) noexcept {
   const BaseCraftingGraph &g = sub.graph;
   const uint32_t n = g.nRecipe;
@@ -406,7 +406,7 @@ void buildStartupCuts(const Subgraph &sub, aw::vector<solver::Options::EntryGrou
     const uint32_t first = offset[root];
     const uint32_t count = memberCount[root];
     if (groups.size() < maxGroups) {
-      solver::Options::EntryGroup group;
+      solver::State::EntryGroup group;
       if (buildEntryGroup(sub,
                           std::span<const uint32_t>(members.data() + first, count), group))
         groups.push_back(std::move(group));
@@ -417,7 +417,7 @@ void buildStartupCuts(const Subgraph &sub, aw::vector<solver::Options::EntryGrou
 }
 
 bool buildEntryGroup(const Subgraph &sub, std::span<const uint32_t> columns,
-                     solver::Options::EntryGroup &out) noexcept {
+                     solver::State::EntryGroup &out) noexcept {
   out.columns.clear();
   out.needs.clear();
   const BaseCraftingGraph &g = sub.graph;

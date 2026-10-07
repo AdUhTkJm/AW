@@ -370,8 +370,8 @@ struct EntryContext {
   std::span<const int64_t> stock;  // empty: derive from b
   absl::Span<const sat::IntVar> variables;
   const aw::vector<int64_t> &domain;
-  const aw::vector<Options::EntryGroup> &groups;
-  const aw::vector<Options::SeedCut> &seeds;
+  const aw::vector<State::EntryGroup> &groups;
+  const aw::vector<State::SeedCut> &seeds;
 };
 
 bool isGroupColumn(std::span<const uint32_t> group, uint32_t column) noexcept {
@@ -420,11 +420,11 @@ bool fundingOf(const EntryContext &ctx, uint32_t row, std::span<const uint32_t> 
   return true;
 }
 
-// Adds the cuts described on Options::EntryGroup: for each group, one start bit
+// Adds the cuts described on State::EntryGroup: for each group, one start bit
 // per member, the coupling that forces an entry whenever the group is used, and
 // one inequality per gross input of that entry.
 void addEntryGroups(const EntryContext &ctx) {
-  for (const Options::EntryGroup &group : ctx.groups) {
+  for (const State::EntryGroup &group : ctx.groups) {
     if (group.columns.empty() || group.needs.empty())
       continue;
     bool inRange = true;
@@ -454,7 +454,7 @@ void addEntryGroups(const EntryContext &ctx) {
                                   sat::LinearExpr(start[k]));
     }
 
-    for (const Options::EntryNeed &need : group.needs) {
+    for (const State::EntryNeed &need : group.needs) {
       const uint32_t row = need.row;
       if (row >= ctx.A.rows || need.amount <= 0)
         continue;
@@ -476,11 +476,11 @@ void addEntryGroups(const EntryContext &ctx) {
 // their positive net output outside `members`, with each row's weight folded
 // in. False when a coefficient leaves the int64 range, in which case the cut is
 // skipped and the model simply stays weaker.
-bool weightedFundingOf(const EntryContext &ctx, const Options::SeedCut &cut,
+bool weightedFundingOf(const EntryContext &ctx, const State::SeedCut &cut,
                        sat::LinearExpr &funding, int64_t &stock) noexcept {
   uint64_t capacity = 0;
   uint64_t stockSum = 0;
-  for (const Options::SeedTerm &term : cut.terms) {
+  for (const State::SeedTerm &term : cut.terms) {
     const uint32_t row = term.row;
     if (row >= ctx.A.rows || term.weight <= 0)
       continue;
@@ -505,11 +505,11 @@ bool weightedFundingOf(const EntryContext &ctx, const Options::SeedCut &cut,
   return true;
 }
 
-// Adds the cuts described on Options::SeedCut: one fresh Boolean per cut, tied
+// Adds the cuts described on State::SeedCut: one fresh Boolean per cut, tied
 // to its trigger column, and the weighted availability that has to cover the
 // cut's demand when that trigger is used.
 void addSeedCuts(const EntryContext &ctx) {
-  for (const Options::SeedCut &cut : ctx.seeds) {
+  for (const State::SeedCut &cut : ctx.seeds) {
     if (cut.trigger >= ctx.A.cols || cut.demand <= 0 || cut.terms.empty())
       continue;
     sat::LinearExpr funding;
@@ -534,8 +534,8 @@ void addSeedCuts(const EntryContext &ctx) {
 // `timeLimitSeconds` <= 0 means no limit.
 Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64_t> b,
                     std::span<const int64_t> c, const Options &options,
-                    int64_t cap, int64_t ceiling, double timeLimitSeconds,
-                    std::span<const int64_t> upper = {}) {
+                    const State &state, int64_t cap, int64_t ceiling,
+                    double timeLimitSeconds, std::span<const int64_t> upper = {}) {
   Result result;
 
   const aw::vector<int64_t> domain = columnDomains(A, rows, b, c, cap, ceiling, upper);
@@ -549,9 +549,9 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
   // Warm start from the greedy pre-pass, when it matches this column space.
   // A hint only guides the search; clamping keeps it inside the domains this
   // solve actually built.
-  if (options.solutionHint.size() == (size_t) A.cols) {
+  if (state.solutionHint.size() == (size_t) A.cols) {
     for (uint32_t r = 0; r < A.cols; r++) {
-      int64_t value = options.solutionHint[r];
+      int64_t value = state.solutionHint[r];
       if (value < 0)
         value = 0;
       if (value > domain[r])
@@ -563,23 +563,23 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
   // Plans a caller already rejected. A forbidden-assignment table over every
   // column forbids exactly those full vectors; a shorter or longer entry does
   // not name this model and is ignored.
-  if (!options.noGoods.empty()) {
+  if (!state.noGoods.empty()) {
     const absl::Span<const sat::IntVar> all(variables);
     sat::TableConstraint table = model.AddForbiddenAssignments(all);
-    for (const aw::vector<int64_t> &point : options.noGoods) {
+    for (const aw::vector<int64_t> &point : state.noGoods) {
       if (point.size() != (size_t) A.cols)
         continue;
       table.AddTuple(absl::Span<const int64_t>(point.data(), point.size()));
     }
   }
 
-  if (!options.entryGroups.empty() || !options.seedCuts.empty()) {
-    const EntryContext ctx{model, A, rows, b, options.stock,
+  if (!state.entryGroups.empty() || !state.seedCuts.empty()) {
+    const EntryContext ctx{model, A, rows, b, state.stock,
                            absl::Span<const sat::IntVar>(variables), domain,
-                           options.entryGroups, options.seedCuts};
-    if (!options.entryGroups.empty())
+                           state.entryGroups, state.seedCuts};
+    if (!state.entryGroups.empty())
       addEntryGroups(ctx);
-    if (!options.seedCuts.empty())
+    if (!state.seedCuts.empty())
       addSeedCuts(ctx);
   }
 
@@ -647,7 +647,7 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
   parameters.set_linearization_level(2);
   parameters.set_search_branching(operations_research::sat::SatParameters::LP_SEARCH);
   parameters.set_use_feasibility_pump(true);
-  parameters.set_stop_after_first_solution(options.flash);
+  parameters.set_stop_after_first_solution(state.flash);
 
   // For instances large enough, presolving actually harms.
   if (A.cols > 30000)
@@ -729,7 +729,8 @@ Result solveWithCap(const Matrix &A, const RowMajor &rows, std::span<const int64
 // `c` is the per-recipe cost: 1 for an ordinary recipe, the batch size for a
 // level of a chanced recipe, 0 for a tag edge. See BaseCraftingGraph::cost.
 Result solve(const Matrix &A, std::span<const int64_t> b,
-             std::span<const int64_t> c, const Options &options) {
+             std::span<const int64_t> c, const Options &options,
+             const State &state) {
   // Check validity of A.
   // Should be alright so let's not include this in release mode.
   Result result;
@@ -840,8 +841,8 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
   // bound: a feasible answer gives an incumbent tight enough for the reduced
   // costs to fix columns, while an infeasible answer proves the integrality
   // gap is too wide to bother. See docs/algorithm.typ.
-  if (!options.flash && options.noGoods.empty() && options.entryGroups.empty() &&
-      options.seedCuts.empty() &&
+  if (!state.flash && state.noGoods.empty() && state.entryGroups.empty() &&
+      state.seedCuts.empty() &&
       envDouble("AW_RC_GAP", options.reducedCostGap) > 0.0 && lp.ok &&
       std::isfinite(lp.value) && lp.value >= 0.0 && A.cols > 0) {
     const int64_t probeCap = std::clamp<int64_t>(
@@ -856,7 +857,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
       }
       if (!limited || probeBudget > 0.0) {
         const auto probeStart = std::chrono::steady_clock::now();
-        const Result probe = solveWithCap(A, rows, b, c, options, probeCap, ceiling, probeBudget);
+        const Result probe = solveWithCap(A, rows, b, c, options, state, probeCap, ceiling, probeBudget);
         probeMs += std::chrono::duration<double, std::milli>(
                        std::chrono::steady_clock::now() - probeStart).count();
         recordAttempt(probeCap, probeBudget, probe);
@@ -925,7 +926,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
               budget = options.maxTimeSeconds - elapsedSeconds();
             if (!limited || budget > 0.0) {
               const auto reducedStart = std::chrono::steady_clock::now();
-              Result out = solveWithCap(reduced, reducedRows, b, reducedC, options,
+              Result out = solveWithCap(reduced, reducedRows, b, reducedC, options, state,
                                         probe.objective, ceiling, budget, keepUpper);
               probeMs += std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - reducedStart).count();
@@ -969,7 +970,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
       budget = remaining;
     }
 
-    Result current = solveWithCap(A, rows, b, c, options, cap, ceiling, budget);
+    Result current = solveWithCap(A, rows, b, c, options, state, cap, ceiling, budget);
     recordAttempt(cap, budget, current);
     if (debug)
       std::fprintf(stderr,
@@ -982,7 +983,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
     if (current.status == PlanStatus::OK) {
       // Flash mode takes the first feasible plan whatever it costs; there is
       // no incumbent to compare it against and no larger cap to try.
-      if (options.flash)
+      if (state.flash)
         return stamp(std::move(current));
       if (!haveBest || current.objective < best.objective) {
         best = std::move(current);
@@ -1034,7 +1035,7 @@ Result solve(const Matrix &A, std::span<const int64_t> b,
     // A heuristic upper bound means a feasible plan exists at or below it, so
     // the last-resort solve does not need the absolute ceiling as its cap.
     const int64_t lastCap = upperBound > 0 ? std::min(upperBound, ceiling) : ceiling;
-    const Result last = solveWithCap(A, rows, b, c, options, lastCap, ceiling, remaining);
+    const Result last = solveWithCap(A, rows, b, c, options, state, lastCap, ceiling, remaining);
     recordAttempt(lastCap, remaining, last);
     if (last.status == PlanStatus::OK)
       return stamp(last);

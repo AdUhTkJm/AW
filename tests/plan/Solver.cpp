@@ -191,9 +191,9 @@ AW_TEST(testReducedCostFixing) {
 AW_TEST(testFlash) {
   std::cout << "[Test] flash mode\n";
 
-  // The solver reads its own `flash` switch; `planCrafting` copies the
-  // process-wide `aw::options.flash` into it and clears it again once a plan
-  // has been rejected, so these direct `solve` calls set it on the options.
+  // Flash is per-solve state; `planCrafting` seeds `State::flash` from the
+  // process-wide `aw::options.flash` and clears it again once a plan has been
+  // rejected, so these direct `solve` calls set it on the state.
 
   // min x0 + x1  s.t.  x0 + 2 x1 >= 4, x0 >= 1.  The optimum is 3. Flash may
   // return any feasible point, so assert feasibility and a sound objective
@@ -202,9 +202,9 @@ AW_TEST(testFlash) {
     const aw::solver::Matrix A = makeMatrix(2, 2, {{{0, 1}, {1, 1}}, {{0, 2}}});
     const aw::vector<int64_t> b = {4, 1};
     const aw::vector<int64_t> c = {1, 1};
-    aw::solver::Options options;
-    options.flash = true;
-    const aw::solver::Result r = aw::solver::solve(A, b, c, options);
+    aw::solver::State state;
+    state.flash = true;
+    const aw::solver::Result r = aw::solver::solve(A, b, c, {}, state);
     expect(r.status == aw::PlanStatus::OK, "flash returns a plan");
     expect(r.x.size() == 2 && r.x[0] + 2 * r.x[1] >= 4 && r.x[0] >= 1,
            "the flash plan is feasible");
@@ -220,9 +220,10 @@ AW_TEST(testFlash) {
     const aw::vector<int64_t> b = {5};
     const aw::vector<int64_t> c = {1};
     aw::solver::Options options;
-    options.flash = true;
     options.objectiveCap = 1;
-    const aw::solver::Result r = aw::solver::solve(A, b, c, options);
+    aw::solver::State state;
+    state.flash = true;
+    const aw::solver::Result r = aw::solver::solve(A, b, c, options, state);
     expect(r.status == aw::PlanStatus::OK && r.objective >= 5,
            "flash grows a binding cap until the plan fits");
   }
@@ -235,8 +236,9 @@ AW_TEST(testFlash) {
     const aw::vector<int64_t> c = {1, 1};
     aw::solver::Options options;
     options.reducedCostGap = 0.5;
-    options.flash = true;
-    const aw::solver::Result r = aw::solver::solve(A, b, c, options);
+    aw::solver::State state;
+    state.flash = true;
+    const aw::solver::Result r = aw::solver::solve(A, b, c, options, state);
     expect(r.status == aw::PlanStatus::OK && r.fixedColumns == 0,
            "flash skips reduced-cost fixing");
   }
@@ -249,7 +251,6 @@ AW_TEST(testFlash) {
     const aw::vector<int64_t> c = {1, 1};
     aw::solver::Options options;
     options.reducedCostGap = 0.5;
-    options.flash = false;
     const aw::solver::Result r = aw::solver::solve(A, b, c, options);
     expect(r.status == aw::PlanStatus::OK && r.fixedColumns > 0,
            "with flash off the reduced-cost probe runs again");
