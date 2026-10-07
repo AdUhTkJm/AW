@@ -8,6 +8,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <span>
+#include <tuple>
 #include <utility>
 
 #include "aw/utils/Int128.h"
@@ -1266,6 +1267,42 @@ aw::vector<std::byte> buildTagExclusiveSample() {
   w.recipe(1, {}, {{5, 1}});
   w.recipe(1, {}, {{3, 1}});
   w.recipe(1, {}, {{9, 1}});
+  return w.out;
+}
+
+// A target that is itself a decorative twin, which the folding pass must never
+// put into D. Handles 1..5 are real and 6, 7 are tags; handle 4 is the target.
+//
+//   Y (1) <- (leaf)                 D (5) <- (leaf)
+//   X (2) <- Y x4                   the folded twin
+//   B (3) <- Y x4, D x1             the base's recipe
+//   T (4) <- X x4, D x1             the target, touches the folded X
+//          <- B x4                  the conversion that puts T in X's orbit
+//   D (5) <- #t1 x1, #t2 x1         real tag consumers, so neither tag is dead
+//   #t1 = {Y, X}, #t2 = {Y}         X's tag set is a strict subset of Y's
+//
+// Folding X into Y leaves T's recipe touching D, and its projection is exactly
+// B's recipe column. The growth path therefore used to propose folding T into
+// B, and the whole fold verified -- but pi maps every D item to 0, so the
+// target could no longer be produced and the query came out infeasible.
+aw::vector<std::byte> buildVariantFoldTargetSample() {
+  AwrWriter w;
+  w.header(5, 6);
+  w.item(2, 1);
+  w.recipe(4, {1}, {{1, 4}});
+  w.item(3, 1);
+  w.recipe(4, {1}, {{1, 4}, {5, 1}});
+  w.item(4, 2);
+  w.recipe(4, {1}, {{2, 4}, {5, 1}});
+  w.recipe(4, {1}, {{3, 4}});
+  w.item(5, 2);
+  w.recipe(1, {1}, {{6, 1}});
+  w.recipe(1, {1}, {{7, 1}});
+  w.item(6, 2);
+  w.recipe(1, {}, {{2, 1}});
+  w.recipe(1, {}, {{1, 1}});
+  w.item(7, 1);
+  w.recipe(1, {}, {{1, 1}});
   return w.out;
 }
 
@@ -4107,6 +4144,56 @@ void testTagExclusivePruning() {
   aw::options.variantClass.enabled = true;
 }
 
+void testVariantFoldTarget() {
+  std::cout << "[Test] variant folding keeps the target out of D\n";
+  const aw::Handle all[] = {1, 2, 3, 4, 5};
+
+  aw::options.tagPruning = false;
+  aw::options.satellite.enabled = false;
+  aw::options.variantClass.enabled = false;
+  aw::options.tagExclusive.enabled = false;
+
+  // Handle 4 is the target, so its node is 3. Y (handle 1) and D (handle 5)
+  // are the leaves, stocked so the walk keeps the chain.
+  auto run = [&](bool fold) {
+    aw::options.variantFold.enabled = fold;
+    aw::registerCraftingGraph(buildVariantFoldTargetSample());
+    const aw::CraftingGraph &graph = aw::getCraftingGraph();
+    aw::vector<aw::Amount> inventory(graph.nItem, 0);
+    inventory[0] = 1000;  // Y
+    inventory[4] = 1000;  // D
+    const aw::Subgraph sub = aw::reachableSubgraph(4, all, inventory);
+    const aw::ItemId target = sub.translate(3);
+    bool producer = false;
+    for (uint32_t r = 0; r < sub.graph.nRecipe; r++)
+      for (aw::ItemId o : sub.graph.outputsOf(r))
+        producer |= o == target;
+    const aw::PlanResult plan = aw::planCrafting(sub, target, 1, inventory);
+    int64_t total = 0;
+    for (int64_t x : plan.exec)
+      total += x;
+    return std::make_tuple(plan.status, total, producer);
+  };
+
+  aw::registerCraftingGraph(buildVariantFoldTargetSample());
+  expect(aw::getCraftingError() == nullptr, "variant-fold sample parses");
+  const auto off = run(false);
+  const auto on = run(true);
+  expect(std::get<0>(off) == aw::PlanStatus::OK,
+         "the target plans with folding disabled");
+  expect(std::get<2>(on), "folding keeps a producer for the target");
+  expect(std::get<0>(on) == std::get<0>(off),
+         "folding keeps the target feasible");
+  expect(std::get<1>(on) == std::get<1>(off),
+         "folding keeps the target's optimum");
+
+  aw::options.variantFold.enabled = true;
+  aw::options.tagPruning = true;
+  aw::options.satellite.enabled = true;
+  aw::options.variantClass.enabled = true;
+  aw::options.tagExclusive.enabled = true;
+}
+
 void testSatellitePruningParity() {
   std::cout << "[Test] satellite elimination preserves the optimum\n";
 
@@ -5024,6 +5111,7 @@ int main() {
   testClosedIslandPruning();
   testVariantClassPruning();
   testTagExclusivePruning();
+  testVariantFoldTarget();
   testSatellitePruningParity();
   testPlanProtocol();
   testByproducts();

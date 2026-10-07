@@ -501,7 +501,14 @@ void VariantFoldRun::buildShapeIndex() noexcept {
 bool VariantFoldRun::proposeFold(ItemId from, ItemId to) noexcept {
   if (from >= nReal || to >= nReal || from == to)
     return false;
-  if (to == target || stocked[from])
+  // The target must stay out of the folded set D: the projection lemma needs
+  // the demand b_target > 0 to survive, while pi sends every item of D to 0.
+  // `to == target` always was rejected here; `from == target` is the other
+  // half, and the growth path used to propose it. The seed pass already skips
+  // the target on the key side, so only growth could fold it away -- and a
+  // decorative twin of the target then verified cleanly, because the target's
+  // own recipes project onto the base's recipes.
+  if (from == target || to == target || stocked[from])
     return false;
   if (rejected[from])
     return false;
