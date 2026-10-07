@@ -32,7 +32,7 @@
 #include <unordered_map>
 
 #include "aw/plan/Options.h"
-#include "aw/plan/Profiler.h"
+#include "aw/plan/Profiler.h" // IWYU pragma: keep
 
 namespace aw {
 
@@ -62,9 +62,9 @@ struct VariantFoldRun {
 
   const std::chrono::steady_clock::time_point started;
 
-  // Tag index. `members` is only filled for simple tags (every producer is a
-  // one-member edge); `memberTags` is the reverse index, ascending.
-  aw::vector<uint8_t> simple;                  // nItem
+  // Tag index: `memberTags[m]` lists the tags whose member list contains the
+  // real item m, ascending. Every item handle at or above `nReal` is a tag, so
+  // no separate "is this a tag" flag is needed.
   aw::vector<aw::vector<ItemId>> memberTags;   // nReal
   aw::vector<uint8_t> tagHasRealConsumer;      // nItem
 
@@ -168,37 +168,24 @@ static bool matchInputsGrow(VariantFoldRun &run,
                             aw::vector<std::pair<ItemId, ItemId>> &proposals) noexcept;
 
 void VariantFoldRun::buildTagIndex() noexcept {
-  simple.assign(nItem, 0);
   memberTags.assign(nReal, {});
   tagHasRealConsumer.assign(nItem, 0);
 
-  aw::vector<ItemId> scratch;
+  // The dataset only ever emits `T <- m` member edges: one real member in,
+  // amount 1, free. Every item handle at or above `nReal` is therefore a tag,
+  // and its members are just the inputs of its producers, deduplicated.
   for (ItemId t = nReal; t < nItem; t++) {
-    const auto recipes = g.producersOf(t);
-    if (recipes.empty())
-      continue;
-    scratch.clear();
-    bool ok = true;
-    for (RecipeId r : recipes) {
-      const auto outs = g.outputsOf(r);
-      const auto ins = g.inputsOf(r);
-      if (outs.size() != 1 || ins.size() != 1 || ins[0] >= nReal) {
-        ok = false;
-        break;
-      }
-      scratch.push_back(ins[0]);
-    }
-    if (!ok)
-      continue;
-    std::sort(scratch.begin(), scratch.end());
-    scratch.erase(std::unique(scratch.begin(), scratch.end()), scratch.end());
-    simple[t] = 1;
-    for (ItemId m : scratch)
+    aw::vector<ItemId> members;
+    for (RecipeId r : g.producersOf(t))
+      members.push_back(g.inputsOf(r)[0]);
+    std::sort(members.begin(), members.end());
+    members.erase(std::unique(members.begin(), members.end()), members.end());
+    for (ItemId m : members)
       memberTags[m].push_back(t);
   }
   for (uint r = 0; r < nRealRecipe; r++)
     for (ItemId in : g.inputsOf(r))
-      if (in >= nReal && simple[in])
+      if (in >= nReal)
         tagHasRealConsumer[in] = 1;
 }
 
@@ -521,11 +508,11 @@ bool VariantFoldRun::projectedColumn(uint r) noexcept {
   return any;
 }
 
-// True when `node` is a simple tag that contains `member`.
+// True when `node` is a tag that contains `member`.
 [[nodiscard]]
 static bool tagContains(const VariantFoldRun &run, ItemId node,
                         ItemId member) noexcept {
-  if (node < run.nReal || !run.simple[node] || member >= run.nReal)
+  if (node < run.nReal || member >= run.nReal)
     return false;
   const auto &tags = run.memberTags[member];
   return std::binary_search(tags.begin(), tags.end(), node);
@@ -688,9 +675,7 @@ bool VariantFoldRun::verifyAndRepair() noexcept {
 
 }  // namespace
 
-bool computeVariantFoldPruning(const Subgraph &sub, ItemId target,
-                               std::span<const Amount> inventory,
-                               aw::vector<uint8_t> &drop) noexcept {
+bool computeVariantFoldPruning(QUERY_PRUNE_PARAM_LIST) noexcept {
   const BaseCraftingGraph &g = sub.graph;
   if (!options.variantFold.enabled)
     return false;
@@ -708,7 +693,7 @@ bool computeVariantFoldPruning(const Subgraph &sub, ItemId target,
   aw::vector<uint8_t> hasStock(g.nItem, 0);
   for (ItemId i = 0; i < g.nItem; i++) {
     const ItemId source = sub.itemOrigin[i];
-    if (source < inventory.size() && inventory[source] > 0)
+    if (source < sourceInventory.size() && sourceInventory[source] > 0)
       hasStock[i] = 1;
   }
   if (!run.buildCandidates(hasStock))

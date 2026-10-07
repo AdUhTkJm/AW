@@ -36,6 +36,7 @@
 #include <chrono>
 #include <span>
 
+#include "aw/plan/CraftingGraph.h"
 #include "aw/plan/Options.h"
 
 namespace aw {
@@ -55,11 +56,10 @@ struct VariantClassRun {
   // Real recipes are a prefix of the recipe list, tag edges the suffix.
   const uint nRealRecipe;
 
-  // Tag structure, indexed by pseudo item for `members` and by real item for
-  // the two back indices.
+  // From tag to its members.
   aw::vector<aw::vector<ItemId>> members;          // nItem, pseudo entries only
-  aw::vector<uint8_t> simple;                      // nItem
   aw::vector<uint8_t> tagHasRealConsumer;          // nItem
+  // From real item to tags that it participates in.
   aw::vector<aw::vector<ItemId>> memberTags;       // nReal
   aw::vector<aw::vector<RecipeId>> realConsumers;  // nReal
 
@@ -77,7 +77,11 @@ struct VariantClassRun {
                   std::chrono::steady_clock::time_point started) noexcept
       : g(sub.graph), target(target), nReal(sub.graph.nReal),
         nItem(sub.graph.nItem), nRecipe(sub.graph.nRecipe),
-        nRealRecipe(firstTagEdge(sub.graph)), started(started) {}
+        nRealRecipe(firstTagEdge(sub.graph)),
+        members(nItem, aw::vector<ItemId> {}), tagHasRealConsumer(nItem, 0),
+        memberTags(nReal, aw::vector<ItemId> {}), realConsumers(nReal, aw::vector<ItemId> {}), 
+        inV(nReal, 0), vtag(nItem, 0),
+        internalR(nRecipe, 0), dead(nItem, 0), started(started) {}
 
   // Index of the first synthetic tag edge, i.e. the count of real recipes.
   static uint firstTagEdge(const BaseCraftingGraph &graph) noexcept {
@@ -97,45 +101,22 @@ struct VariantClassRun {
     return elapsed < options.variantClass.maxSeconds;
   }
 
-  // A tag is simple when every recipe producing it is a single-member edge.
   void buildTagIndex() noexcept {
-    members.assign(nItem, {});
-    simple.assign(nItem, 0);
-    tagHasRealConsumer.assign(nItem, 0);
-    memberTags.assign(nReal, {});
-    realConsumers.assign(nReal, {});
-
-    aw::vector<ItemId> scratch;
     for (ItemId t = nReal; t < nItem; t++) {
-      const auto recipes = g.producersOf(t);
-      if (recipes.empty())
-        continue;
-      scratch.clear();
-      bool ok = true;
-      for (RecipeId r : recipes) {
-        const auto outs = g.outputsOf(r);
-        const auto ins = g.inputsOf(r);
-        if (outs.size() != 1 || ins.size() != 1 || ins[0] >= nReal) {
-          ok = false;
-          break;
-        }
-        scratch.push_back(ins[0]);
-      }
-      if (!ok)
-        continue;
-      std::sort(scratch.begin(), scratch.end());
-      scratch.erase(std::unique(scratch.begin(), scratch.end()), scratch.end());
-      simple[t] = 1;
-      for (ItemId m : scratch)
+      aw::vector<ItemId> &list = members[t];
+      for (RecipeId r : g.producersOf(t))
+        list.push_back(g.inputsOf(r)[0]);
+      std::sort(list.begin(), list.end());
+      list.erase(std::unique(list.begin(), list.end()), list.end());
+      for (ItemId m : list)
         memberTags[m].push_back(t);
-      members[t].assign(scratch.begin(), scratch.end());
     }
 
     for (uint r = 0; r < nRealRecipe; r++)
       for (ItemId in : g.inputsOf(r)) {
         if (in < nReal)
           realConsumers[in].push_back(r);
-        else if (simple[in])
+        else
           tagHasRealConsumer[in] = 1;
       }
   }
@@ -143,17 +124,11 @@ struct VariantClassRun {
   // vtag[t] = every member of t is currently in V.
   void computeTags() noexcept {
     for (ItemId t = nReal; t < nItem; t++) {
-      if (!simple[t] || members[t].empty()) {
+      if (members[t].empty()) {
         vtag[t] = 0;
         continue;
       }
-      bool all = true;
-      for (ItemId m : members[t])
-        if (!inV[m]) {
-          all = false;
-          break;
-        }
-      vtag[t] = all ? 1 : 0;
+      vtag[t] = std::ranges::all_of(members[t], [&](ItemId m) { return inV[m]; });
     }
   }
 
@@ -314,15 +289,11 @@ bool computeVariantClassPruning(QUERY_PRUNE_PARAM_LIST) noexcept {
   const auto started = std::chrono::steady_clock::now();
   VariantClassRun run(sub, target, started);
   run.buildTagIndex();
-  run.inV.assign(g.nReal, 0);
-  run.vtag.assign(g.nItem, 0);
-  run.internalR.assign(g.nRecipe, 0);
-  run.dead.assign(g.nItem, 0);
 
   bool any = false;
   uint candidates = 0;
   for (ItemId t0 = g.nReal; t0 < g.nItem; t0++) {
-    if (!run.simple[t0] || !run.tagHasRealConsumer[t0])
+    if (run.members[t0].empty() || !run.tagHasRealConsumer[t0])
       continue;
     if (candidates++ >= options.variantClass.maxCandidates || !run.timeLeft())
       break;
