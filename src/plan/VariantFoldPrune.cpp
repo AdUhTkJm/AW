@@ -51,6 +51,19 @@ inline uint64_t mixRow(uint64_t h, ItemId item, Amount amount) noexcept {
   return h;
 }
 
+// The candidate walk's scratch. `seen` and `inReach` are reused across seeds,
+// while `component` and `reach` are refilled for each one. Held in one struct
+// so that the recursions below take a reference rather than a handful of
+// parallel arrays.
+struct CandidateWalk {
+  aw::vector<uint8_t> seen;      // nReal, 0/1: component flood fill
+  aw::vector<uint8_t> inReach;   // nReal, 0/1: downstream closure of the base
+  aw::vector<ItemId> component;  // the seed's weakly connected component
+  aw::vector<ItemId> reach;      // everything the base converts into
+
+  explicit CandidateWalk(uint nReal): seen(nReal, 0), inReach(nReal, 0) {}
+};
+
 // One query's indexes plus the fold and its signature check.
 struct VariantFoldRun {
   const BaseCraftingGraph &g;
@@ -177,24 +190,23 @@ struct VariantFoldRun {
   bool proposeFold(ItemId from, ItemId to) noexcept;
   void collectFailures() noexcept;
   bool verifyAndRepair() noexcept;
+
+  // Helpers.
+#define MATCH_INPUTS_PARAM_LIST std::span<const ItemEntry> required, \
+                       std::span<const ItemId> ins, \
+                       std::span<const Amount> inAmts, size_t index, \
+                       aw::vector<uint8_t> &used
+
+  bool matchInputsGrow(MATCH_INPUTS_PARAM_LIST, aw::vector<std::pair<ItemId, ItemId>> &proposals) noexcept;
+  bool matchInputs(MATCH_INPUTS_PARAM_LIST) noexcept;
+
+  void collectComponent(CandidateWalk &walk, ItemId u) noexcept;
+  void collectReach(CandidateWalk &walk, ItemId u) noexcept;
+  void collectCandidates(CandidateWalk &walk, std::span<const uint8_t> hasStock) noexcept;
+
+  [[nodiscard]]
+  bool tagContains(ItemId node, ItemId member) noexcept;
 };
-
-static bool matchInputs(const VariantFoldRun &run,
-                        std::span<const ItemEntry> required,
-                        std::span<const ItemId> ins,
-                        std::span<const Amount> inAmts, size_t index,
-                        aw::vector<uint8_t> &used) noexcept;
-
-// Like `matchInputs`, but a required item that no witness input can take may be
-// folded onto a witness input of the same conversion component, and the fold is
-// recorded in `proposals`. Used by the growth step only; the check itself never
-// grows the fold.
-static bool matchInputsGrow(VariantFoldRun &run,
-                            std::span<const ItemEntry> required,
-                            std::span<const ItemId> ins,
-                            std::span<const Amount> inAmts, size_t index,
-                            aw::vector<uint8_t> &used,
-                            aw::vector<std::pair<ItemId, ItemId>> &proposals) noexcept;
 
 void VariantFoldRun::buildTagIndex() noexcept {
   for (ItemId t = nReal; t < nItem; t++) {
@@ -226,85 +238,71 @@ void VariantFoldRun::buildConversions() noexcept {
   }
 }
 
-// The candidate walk's scratch. `seen` and `inReach` are reused across seeds,
-// while `component` and `reach` are refilled for each one. Held in one struct
-// so that the recursions below take a reference rather than a handful of
-// parallel arrays.
-struct CandidateWalk {
-  aw::vector<uint8_t> seen;      // nReal, 0/1: component flood fill
-  aw::vector<uint8_t> inReach;   // nReal, 0/1: downstream closure of the base
-  aw::vector<ItemId> component;  // the seed's weakly connected component
-  aw::vector<ItemId> reach;      // everything the base converts into
-};
-
 // Marks `u` and everything reachable from it through conversion edges in either
 // direction: the seed's weakly connected component. A plain recursion, run on
 // the large stack by the caller.
-void collectComponent(const VariantFoldRun &run, CandidateWalk &walk,
-                      ItemId u) noexcept {
+void VariantFoldRun::collectComponent(CandidateWalk &walk, ItemId u) noexcept {
   walk.seen[u] = 1;
   walk.component.push_back(u);
-  for (ItemId v : run.convOut[u])
+  for (ItemId v : convOut[u])
     if (!walk.seen[v])
-      collectComponent(run, walk, v);
-  for (ItemId v : run.convIn[u])
+      collectComponent(walk, v);
+  for (ItemId v : convIn[u])
     if (!walk.seen[v])
-      collectComponent(run, walk, v);
+      collectComponent(walk, v);
 }
 
 // Marks the downstream closure of the base under the conversion edges: every
 // item it can be converted into, the base itself excluded. A plain recursion,
 // run on the large stack by the caller.
-void collectReach(const VariantFoldRun &run, CandidateWalk &walk,
-                  ItemId u) noexcept {
-  for (ItemId v : run.convOut[u]) {
+void VariantFoldRun::collectReach(CandidateWalk &walk, ItemId u) noexcept {
+  for (ItemId v : convOut[u]) {
     if (walk.inReach[v])
       continue;
     walk.inReach[v] = 1;
     walk.reach.push_back(v);
-    collectReach(run, walk, v);
+    collectReach(walk, v);
   }
 }
 
 // One seed at a time: its conversion component, the component's base, and the
 // twins that base reaches. `comp` numbers the components in seed order.
-void collectCandidates(VariantFoldRun &run, CandidateWalk &walk,
-                       std::span<const uint8_t> hasStock) noexcept {
+void VariantFoldRun::collectCandidates(CandidateWalk &walk, std::span<const uint8_t> hasStock) noexcept {
   uint32_t seedIndex = 0;
 
-  for (ItemId seed = 0; seed < run.nReal; seed++) {
+  for (ItemId seed = 0; seed < nReal; seed++) {
     if (walk.seen[seed] ||
-        (run.convOut[seed].empty() && run.convIn[seed].empty()))
+        (convOut[seed].empty() && convIn[seed].empty()))
       continue;
     // Weakly connected component of the conversion graph.
     walk.component.clear();
-    collectComponent(run, walk, seed);
+    collectComponent(walk, seed);
     if (walk.component.size() < 2)
       continue;
     for (ItemId u : walk.component)
-      run.comp[u] = seedIndex;
+      comp[u] = seedIndex;
     seedIndex++;
 
     ItemId base = walk.component[0];
     for (ItemId u : walk.component) {
       const auto key =
-          std::make_pair(run.demand[u], (uint32_t) run.memberTags[u].size());
+          std::make_pair(demand[u], (uint32_t) memberTags[u].size());
       const auto best =
-          std::make_pair(run.demand[base], (uint32_t) run.memberTags[base].size());
+          std::make_pair(demand[base], (uint32_t) memberTags[base].size());
       if (key > best || (key == best && u < base))
         base = u;
     }
-    if (run.demand[base] == 0)
+    if (demand[base] == 0)
       continue;
 
     // Downstream closure from the base: everything the base can be converted
     // into is a decorative twin of it.
     walk.reach.clear();
     walk.inReach[base] = 1;
-    collectReach(run, walk, base);
+    collectReach(walk, base);
     for (ItemId u : walk.reach) {
       walk.inReach[u] = 0;
-      if (u == run.target)
+      if (u == target)
         continue;
       if (u < hasStock.size() && hasStock[u])
         continue;
@@ -312,20 +310,20 @@ void collectCandidates(VariantFoldRun &run, CandidateWalk &walk,
       // base, and at least one of those tags must really be consumed by a
       // recipe. Without the amt half the material-form cycles (a dust and
       // an ingot that share an unused tag) would be folded too.
-      if (!std::includes(run.memberTags[base].begin(), run.memberTags[base].end(),
-                         run.memberTags[u].begin(), run.memberTags[u].end()) ||
-          run.memberTags[u].size() >= run.memberTags[base].size())
+      if (!std::includes(memberTags[base].begin(), memberTags[base].end(),
+                         memberTags[u].begin(), memberTags[u].end()) ||
+          memberTags[u].size() >= memberTags[base].size())
         continue;
       bool real = false;
-      for (ItemId t : run.memberTags[u])
-        if (run.tagHasRealConsumer[t]) {
+      for (ItemId t : memberTags[u])
+        if (tagHasRealConsumer[t]) {
           real = true;
           break;
         }
       if (!real)
         continue;
-      run.sigma[u] = base;
-      run.candidates.push_back(u);
+      sigma[u] = base;
+      candidates.push_back(u);
     }
     walk.inReach[base] = 0;
   }
@@ -349,12 +347,10 @@ bool VariantFoldRun::buildCandidates(std::span<const uint8_t> hasStock) noexcept
         demand[in]++;
   }
 
-  CandidateWalk walk;
-  walk.seen.assign(nReal, 0);
-  walk.inReach.assign(nReal, 0);
-  // Entered on the large stack: the walks above are as deep as the conversion
-  // graph is long.
-  aw::ls::call(collectCandidates, *this, walk, hasStock);
+  CandidateWalk walk(nReal);
+  aw::ls::call([&](CandidateWalk &walk, std::span<const uint8_t> hasStock) {
+    collectCandidates(walk, hasStock);
+  }, walk, hasStock);
   return !candidates.empty();
 }
 
@@ -466,7 +462,7 @@ bool VariantFoldRun::tryGrow(uint r) noexcept {
       continue;
     aw::vector<std::pair<ItemId, ItemId>> proposals;
     usedScratch.assign(wIns.size(), 0);
-    const bool inOk = matchInputsGrow(*this, needScratch, wIns,
+    const bool inOk = matchInputsGrow(needScratch, wIns,
                                       g.inputAmountsOf(witness), 0, usedScratch,
                                       proposals);
     if (!inOk)
@@ -560,11 +556,10 @@ bool VariantFoldRun::projectedColumn(uint r) noexcept {
 
 // True when `node` is a tag that contains `member`.
 [[nodiscard]]
-static bool tagContains(const VariantFoldRun &run, ItemId node,
-                        ItemId member) noexcept {
-  if (node < run.nReal || member >= run.nReal)
+bool VariantFoldRun::tagContains(ItemId node, ItemId member) noexcept {
+  if (node < nReal || member >= nReal)
     return false;
-  const auto &tags = run.memberTags[member];
+  const auto &tags = memberTags[member];
   return std::binary_search(tags.begin(), tags.end(), node);
 }
 
@@ -574,20 +569,16 @@ static bool tagContains(const VariantFoldRun &run, ItemId node,
 //
 // In the lemma, r^* can be any set of recipes. But here we specialize it to
 // a single recipe + optional tag forwarding.
-static bool matchInputs(const VariantFoldRun &run,
-                        std::span<const ItemEntry> required,
-                        std::span<const ItemId> ins,
-                        std::span<const Amount> inAmts, size_t index,
-                        aw::vector<uint8_t> &used) noexcept {
+bool VariantFoldRun::matchInputs(MATCH_INPUTS_PARAM_LIST) noexcept {
   if (index == required.size())
     return true;
   const auto [x, a] = required[index];
   for (size_t j = 0; j < ins.size(); j++) {
     if (used[j] || inAmts[j] != a)
       continue;
-    if (ins[j] == x || tagContains(run, ins[j], x)) {
+    if (ins[j] == x || tagContains(ins[j], x)) {
       used[j] = 1;
-      if (matchInputs(run, required, ins, inAmts, index + 1, used))
+      if (matchInputs(required, ins, inAmts, index + 1, used))
         return true;
       used[j] = 0;
     }
@@ -595,12 +586,8 @@ static bool matchInputs(const VariantFoldRun &run,
   return false;
 }
 
-static bool matchInputsGrow(VariantFoldRun &run,
-                            std::span<const ItemEntry> required,
-                            std::span<const ItemId> ins,
-                            std::span<const Amount> inAmts, size_t index,
-                            aw::vector<uint8_t> &used,
-                            aw::vector<std::pair<ItemId, ItemId>> &proposals) noexcept {
+bool VariantFoldRun::matchInputsGrow(MATCH_INPUTS_PARAM_LIST,
+                                       aw::vector<std::pair<ItemId, ItemId>> &proposals) noexcept {
   if (index == required.size())
     return true;
   const auto [x, a] = required[index];
@@ -608,19 +595,19 @@ static bool matchInputsGrow(VariantFoldRun &run,
     if (used[j] || inAmts[j] != a)
       continue;
     const ItemId y = ins[j];
-    if (y == x || tagContains(run, y, x)) {
+    if (y == x || tagContains(y, x)) {
       used[j] = 1;
-      if (matchInputsGrow(run, required, ins, inAmts, index + 1, used, proposals))
+      if (matchInputsGrow(required, ins, inAmts, index + 1, used, proposals))
         return true;
       used[j] = 0;
-    } else if (x < run.nReal && y < run.nReal && run.sigma[x] == x &&
-               run.sigma[y] == y && run.comp[x] == run.comp[y] &&
-               run.comp[x] != UINT32_MAX && run.demand[y] >= run.demand[x] &&
-               std::includes(run.memberTags[y].begin(), run.memberTags[y].end(),
-                             run.memberTags[x].begin(), run.memberTags[x].end())) {
+    } else if (x < nReal && y < nReal && sigma[x] == x &&
+               sigma[y] == y && comp[x] == comp[y] &&
+               comp[x] != UINT32_MAX && demand[y] >= demand[x] &&
+               std::includes(memberTags[y].begin(), memberTags[y].end(),
+                             memberTags[x].begin(), memberTags[x].end())) {
       used[j] = 1;
       proposals.emplace_back(x, y);
-      if (matchInputsGrow(run, required, ins, inAmts, index + 1, used, proposals))
+      if (matchInputsGrow(required, ins, inAmts, index + 1, used, proposals))
         return true;
       proposals.pop_back();
       used[j] = 0;
@@ -659,7 +646,7 @@ bool VariantFoldRun::columnRealizable(uint r, Amount cost) noexcept {
     if (wIns.size() != needScratch.size())
       continue;
     usedScratch.assign(wIns.size(), 0);
-    if (matchInputs(*this, needScratch, wIns, g.inputAmountsOf(witness), 0,
+    if (matchInputs(needScratch, wIns, g.inputAmountsOf(witness), 0,
                     usedScratch))
       return true;
   }
