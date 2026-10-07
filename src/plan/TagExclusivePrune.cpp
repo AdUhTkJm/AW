@@ -226,8 +226,7 @@ struct TagExclusiveRun {
 // Per-query tag-exclusive producer elimination. See the file comment. `target`
 // is a subgraph item and `drop` is indexed by subgraph recipe, sized to
 // `sub.graph.nRecipe`. Returns true when something was marked.
-bool computeTagExclusivePruning(const Subgraph &sub, ItemId target,
-                                aw::vector<uint8_t> &drop) noexcept {
+bool computeTagExclusivePruning(QUERY_PRUNE_PARAM_LIST) noexcept {
   const BaseCraftingGraph &g = sub.graph;
   if (!options.tagExclusive.enabled)
     return false;

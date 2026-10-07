@@ -2,71 +2,23 @@
 #define AW_PRUNE_H
 
 #include "aw/plan/CraftingGraph.h"
+#define QUERY_PRUNE_PARAM_LIST const Subgraph &sub, ItemId target, std::span<const Amount> sourceInventory, aw::vector<uint8_t> &drop
 
 namespace aw {
 
 // Precomputes for every pruning availble. Does not prune on itself.
 void prune(CraftingGraph &graph) noexcept;
 
-// Satellite elimination. Note `inventory` is indexed in source node.
-//
-// This is called in `reachableSubgraph` per-query, so it doesn't lie in aw::detail.
 bool computeSatellitePruning(const CraftingGraph &graph, ItemId target,
                              std::span<const uint8_t> items,
                              std::span<const uint8_t> recipes,
                              std::span<const Amount> inventory,
                              aw::vector<uint8_t> &drop) noexcept;
 
-// Escape-free satellite elimination, on an already assembled subgraph. Drops
-// every subgraph recipe that produces or consumes an item of the largest set of
-// items that no recipe leaks out of, excluding the target and the stock. It has
-// to run after the query-time re-pruning, which can be the step that cuts the
-// island off from the needed items.
-//
-// `target` is a subgraph item, `sourceInventory` is indexed in source node, and
-// `drop` is indexed by subgraph recipe, sized to `sub.graph.nRecipe`.
-bool computeClosedIslandPruning(const Subgraph &sub, ItemId target,
-                                std::span<const Amount> sourceInventory,
-                                aw::vector<uint8_t> &drop) noexcept;
-
-// Interchangeable-variant (tag-orbit) elimination, on an already assembled
-// subgraph. Drops the conversions inside a class of items that every external
-// recipe reaches through the same tag: a plan that used a conversion already
-// directly produces at least as many class members as it spends on that tag,
-// and the tag accepts every member, so the conversions are never needed.
-//
-// `target` is a subgraph item and is excluded from every class. `drop` is
-// indexed by subgraph recipe, sized to `sub.graph.nRecipe`.
-bool computeVariantClassPruning(const Subgraph &sub, ItemId target,
-                                aw::vector<uint8_t> &drop) noexcept;
-
-// Variant-folding elimination, on an already assembled subgraph. A decorative
-// twin of a base is an item that a tag, or a chain of "same recipe, other
-// item" copies, makes interchangeable with the base everywhere it is demanded
-// by name. The pass folds the twins onto the base and drops every recipe that
-// mentions a folded item, but only after a signature check proves every such
-// recipe can be replayed by recipes that survive. See docs/algorithm.typ
-// (@multi-exit) and VariantFoldPrune.cpp.
-//
-// `target` is a subgraph item and is never folded. `sourceInventory` is indexed
-// in source node; a stocked decorative item is never folded. `drop` is indexed
-// by subgraph recipe, sized to `sub.graph.nRecipe`.
-bool computeVariantFoldPruning(const Subgraph &sub, ItemId target,
-                               std::span<const Amount> sourceInventory,
-                               aw::vector<uint8_t> &drop) noexcept;
-
-// Tag-exclusive producer elimination, on an already assembled subgraph. A real
-// item is tag-exclusive for a tag T when every consumer of it is a member
-// edge of T. A real recipe whose outputs are all exclusive for the same T is
-// dropped when it produces no more M(T)-capacity than it consumes, because a
-// plan that fired it already holds at least as much M(T)-capacity and T accepts
-// any member, so the freed inputs can be routed into T instead.
-//
-// `target` is a subgraph item and is excluded: a query that names an output of
-// the recipe has to keep it. `drop` is indexed by subgraph recipe, sized to
-// `sub.graph.nRecipe`.
-bool computeTagExclusivePruning(const Subgraph &sub, ItemId target,
-                                aw::vector<uint8_t> &drop) noexcept;
+bool computeClosedIslandPruning(QUERY_PRUNE_PARAM_LIST) noexcept;
+bool computeVariantClassPruning(QUERY_PRUNE_PARAM_LIST) noexcept;
+bool computeVariantFoldPruning(QUERY_PRUNE_PARAM_LIST) noexcept;
+bool computeTagExclusivePruning(QUERY_PRUNE_PARAM_LIST) noexcept;
 
 }
 

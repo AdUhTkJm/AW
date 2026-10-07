@@ -304,8 +304,7 @@ struct VariantClassRun {
 // docs/algorithm.typ. `target` is a subgraph item and `drop` is indexed by
 // subgraph recipe, sized to `sub.graph.nRecipe`. Returns true when something
 // was marked.
-bool computeVariantClassPruning(const Subgraph &sub, ItemId target,
-                                aw::vector<uint8_t> &drop) noexcept {
+bool computeVariantClassPruning(QUERY_PRUNE_PARAM_LIST) noexcept {
   const BaseCraftingGraph &g = sub.graph;
   if (!options.variantClass.enabled)
     return false;
