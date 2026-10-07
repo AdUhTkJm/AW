@@ -1,4 +1,4 @@
-// Unit tests for aw::PodVector. Kept separate from Test.cpp: that file covers
+// Unit tests for aw::PodVector. Kept separate from tests/plan/: those cover
 // the planner's behaviour, this one is a pure container conformance suite.
 //
 // Where semantics overlap with std::vector the test mirrors every operation

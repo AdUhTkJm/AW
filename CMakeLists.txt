@@ -207,10 +207,33 @@ endif()
 
 if(AW_BUILD_TESTS)
    enable_testing()
-   add_executable(aw_tests tests/Test.cpp)
+   # The crafting planner suite. Split by theme; the tests self-register with
+   # AW_TEST and tests/plan/Main.cpp runs them. tests/ is on the include path so
+   # the sources can say "plan/Harness.h" and share tests/AwrWriter.h.
+   add_executable(aw_tests
+      tests/plan/Main.cpp
+      tests/plan/Harness.cpp
+      tests/plan/Samples.cpp
+      tests/plan/Decode.cpp
+      tests/plan/Reachability.cpp
+      tests/plan/Solver.cpp
+      tests/plan/Fireability.cpp
+      tests/plan/Flash.cpp
+      tests/plan/Tags.cpp
+      tests/plan/Pruning.cpp
+      tests/plan/Satellite.cpp
+      tests/plan/Variants.cpp
+      tests/plan/Costed.cpp
+      tests/plan/Protocol.cpp
+      tests/plan/Options.cpp)
+   target_include_directories(aw_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
    target_link_libraries(aw_tests PRIVATE aw_crafting)
    target_compile_options(aw_tests PRIVATE ${AW_STRICT_FLAGS})
    add_test(NAME crafting_graph COMMAND aw_tests)
+   # The tests self-register, so their order is link order. A shuffled run keeps
+   # that from mattering: a test that leaks aw::options or relies on a graph an
+   # earlier test registered fails here.
+   add_test(NAME crafting_graph_shuffled COMMAND aw_tests --shuffle=1)
 
    # Container conformance suite for aw::PodVector. Header-only, so it needs no
    # link to aw_crafting, but it is built with the same strict flags.

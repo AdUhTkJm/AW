@@ -2,7 +2,7 @@
 #define AW_TEST_AWR_WRITER_H
 
 // Test helper: a semantic writer for the .awr blob format, so the samples in
-// Test.cpp read as graphs (header, items, recipes) instead of raw varint
+// tests/plan/ read as graphs (header, items, recipes) instead of raw varint
 // streams. Mirrors what the mod's Java writer emits.
 
 #include <cstddef>
@@ -20,7 +20,7 @@ inline void emitVarInt(aw::vector<std::byte> &out, std::uint64_t value) {
   out.push_back(static_cast<std::byte>(value));
 }
 
-// Compact writer for the samples in Test.cpp. Handles must be emitted in
+// Compact writer for the samples in tests/plan/. Handles must be emitted in
 // ascending order, exactly as the Java writer does. `ws` and `inputs` are in
 // ascending handle order; the writer stores deltas. A real recipe with no
 // workstation is dropped by registerCraftingGraph, so every real recipe here
