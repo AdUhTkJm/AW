@@ -185,6 +185,17 @@ struct Options {
 
   bool tagTidy = true;
   bool flash = false;
+  // Flash mode's early greedy probe. On by default. When set, a flash query
+  // asks the greedy pre-pass for a plan on the cheaply pruned subgraph before
+  // satellite elimination and the variant passes run, and skips them entirely
+  // when it gets one. See reachableSubgraph.
+  //
+  // The probe answers with a cheaper-to-find plan than the pruned subgraph
+  // would, because the passes it skips also remove routes the greedy pre-pass
+  // can use. Ablation over the four bench corpora puts the median difference at
+  // zero and the worst case at about 1.2x, so it is on; this switch exists so
+  // the tail can be traded back for the latency.
+  bool flashProbe = true;
 #ifdef AW_PROFILE_PRUNING
   bool outputPruningProfile = false;
   bool outputRepruningProfile = false;

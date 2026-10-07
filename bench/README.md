@@ -203,6 +203,27 @@ Because the gates are flipped per query, a stage is self-contained: `run.py --co
 aw-nonopt --stages tag` re-measures only the `tag` point and merges it back into the
 existing `aw-nonopt` JSONL, leaving the other seven rows untouched.
 
+#### `probe`: the pass set flash mode actually uses
+
+Flash mode does not run the cumulative curve. It asks the greedy pre-pass for a plan on a
+subgraph built from everything up to and including `pack`, plus `exclusive` and nothing
+else, and only falls back to the full query when that has no plan. The `probe` stage is
+that pass set: `satellite`, `variant` and `fold` off, `exclusive` on. It exists so the
+latency this buys can be measured against the cost in plan quality, and it is **not** part
+of the cumulative curve -- `fold` is on in every other stage, because the pass was added
+afterwards and the published ablation was collected without it.
+
+`exclusive` is deliberately the one pass the probe keeps. It is the cheapest of the three
+by an order of magnitude, and skipping it is what makes the greedy pre-pass pick routes
+that trade an exclusive item for tag capacity: on `recipes-nast` a single query's plan goes
+from cost 6 to cost 2056, and another from 852 112 to 201 513 636. With it kept, the worst
+observed quality ratio over all four corpora is 1.2x and the median is exact.
+
+`--flash-probe 0` measures the same queries with the probe off, which is the A/B that the
+`from_greedy` and `greedy_ms` query columns support: `from_greedy` distinguishes a greedy
+answer (probe hit or solver-free) from a solved one without inferring it from
+`conflicts`.
+
 ### 3.6 Budgets
 
 | knob | default | note |

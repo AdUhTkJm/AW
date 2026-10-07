@@ -244,8 +244,8 @@ PlanResponse runPlan(const PlanRequest &request) noexcept {
       inventory[CraftingGraph::itemNode(handle)] += request.stockAmounts[i];
   }
 
-  const Subgraph sub =
-      reachableSubgraph(request.target, request.workstations, inventory);
+  const Subgraph sub = reachableSubgraph(request.target, request.workstations,
+                                         inventory, request.amount);
   if (sub.graph.nItem == 0)
     return response;
 

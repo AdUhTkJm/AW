@@ -1,4 +1,5 @@
 #include "aw/plan/Options.h"
+#include "aw/plan/Plan.h"
 #include "aw/plan/ProfileStep.h"
 #include "Prune.h"
 
@@ -1647,30 +1648,75 @@ const CraftingGraph &getCraftingGraph() noexcept {
   return graph;
 }
 
-Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
-                           std::span<const Amount> inventory) noexcept {
-  if (output == 0 || output > graph.nItem)
-    return {};
+namespace {
+
+// The arguments of one reachable query, bundled so that the two entry points
+// below stay to a couple of parameters each.
+struct ReachArgs {
+  Handle output;
+  std::span<const Handle> workstations;
+  std::span<const Amount> inventory;
+  // The amount the flash probe's plan is for. Read only on the probe path.
+  Amount amount;
+};
+
+// The mutable state one subgraph pass reads and rewrites: the assembled
+// subgraph, the recipe list behind it, and the item mask both were built from.
+struct PassState {
+  Subgraph &result;
+  aw::vector<MutableRecipe> &built;
+  aw::vector<uint8_t> &itemSeen;
+  Handle output;
+  std::span<const Amount> inventory;
+};
+
+// Applies one subgraph pass: `computeFn` marks the recipes it wants gone in
+// `removeMask`, the recipe list is rewritten, and the subgraph is assembled
+// again. A pass that marks nothing leaves both alone.
+template <class ComputeFn>
+void runSubgraphPass(PassState state, bool enabled, const char *label,
+                     ComputeFn computeFn) {
+  if (!enabled)
+    return;
 
   AW_PROFILE_BEGIN();
-  ReachQuery query(output, workstations, inventory);
-  query.walk();
-  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "reachability walk");
-  query.prunePackCertificates();
-  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "pack certificates");
-  query.pruneSeedUnreachable();
-  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "seed unreachable");
-  query.pruneSatellites();
-  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "satellite elimination");
+  const ItemId subTarget = state.result.translate(CraftingGraph::itemNode(state.output));
+  if (subTarget != UINT32_MAX) {
+    aw::vector<uint8_t> removeMask(state.result.graph.nRecipe, 0);
+    if (computeFn(state.result, subTarget, state.inventory, removeMask)) {
+      size_t idx = 0;
+      auto newEnd = std::remove_if(state.built.begin(), state.built.end(), [&](const auto&) {
+        return (idx < removeMask.size()) && removeMask[idx++];
+      });
+      state.built.erase(newEnd, state.built.end());
 
-  aw::vector<MutableRecipe> built = collectSurvivingRecipes(query.recipeSeen);
+      dropUnusedItems(state.itemSeen, state.output, state.built);
+      state.result = assembleSubgraph(state.itemSeen, state.built);
+    }
+  }
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/pass]", label);
+}
+
+// Everything a reachable query does after the reach-level prunes: the surviving
+// recipe list, the query-time tag inliner, the subgraph re-prune, and the first
+// assembly. The two are returned together because the pass list rewrites the
+// list and reassembles the subgraph from it.
+struct Assembled {
+  Subgraph result;
+  aw::vector<MutableRecipe> built;
+};
+
+Assembled assembleQuery(ReachQuery &query, const ReachArgs &args) noexcept {
+  AW_PROFILE_BEGIN();
+  Assembled out;
+  out.built = collectSurvivingRecipes(query.recipeSeen);
   AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "collect surviving recipes");
 
   // A recipe reached through one of its byproducts still outputs its anchor,
   // and every output row has to exist in the subgraph. The walk only visits
   // items it needs, so mark the remaining outputs of the surviving recipes
   // here, before any assembly or inlining reads `itemSeen`.
-  for (const MutableRecipe &rec : built) {
+  for (const MutableRecipe &rec : out.built) {
     query.itemSeen[rec.out] = 1;
     for (ItemId o : rec.outs)
       query.itemSeen[o] = 1;
@@ -1685,9 +1731,9 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   // the registration-time flattening has.
   if (options.tagInlining == TagInlineMode::QUERY_TIME ||
       options.tagInlining == TagInlineMode::BOTH) {
-    inlineSingleUseTagsCore(built, graph.nReal, graph.nItem,
+    inlineSingleUseTagsCore(out.built, graph.nReal, graph.nItem,
                             options.inlineSingleMemberTags, [](uint) { return true; });
-    dropUnusedItems(query.itemSeen, output, built);
+    dropUnusedItems(query.itemSeen, args.output, out.built);
   }
   AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "inline single-use tags");
 
@@ -1697,54 +1743,141 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   // runs after the inliner so the composite relation sees real inputs where a
   // tag used to be.
   if (!options.flash ? options.reprune.enabled : options.reprune.enabledOnFlash) {
-    const Subgraph probe = assembleSubgraph(query.itemSeen, built);
-    const aw::vector<uint8_t> drop = aw::detail::repruneSubgraph(probe, inventory);
+    const Subgraph assembled = assembleSubgraph(query.itemSeen, out.built);
+    const aw::vector<uint8_t> drop =
+        aw::detail::repruneSubgraph(assembled, args.inventory);
     size_t kept = 0;
     bool any = false;
-    for (size_t i = 0; i < built.size(); i++) {
+    for (size_t i = 0; i < out.built.size(); i++) {
       if (i < drop.size() && drop[i]) {
         any = true;
         continue;
       }
       if (kept != i)
-        built[kept] = std::move(built[i]);
+        out.built[kept] = std::move(out.built[i]);
       kept++;
     }
-    built.resize(kept);
+    out.built.resize(kept);
     if (any)
-      dropUnusedItems(query.itemSeen, output, built);
+      dropUnusedItems(query.itemSeen, args.output, out.built);
   }
   AW_PROFILE_END(options.outputRepruningProfile, "[time/pass]", "re-pruning");
 
-  Subgraph result = assembleSubgraph(query.itemSeen, built);
+  out.result = assembleSubgraph(query.itemSeen, out.built);
   AW_PROFILE_END(options.outputRepruningProfile, "[time/pass]", "assemble subgraph");
+  return out;
+}
 
-  const auto runPass = [&](bool enabled, const char *label, auto computeFn) {
-    if (!enabled)
-      return;
+// The flash probe's answer: the greedy pre-pass on the cheaply pruned subgraph.
+// Returns false when it has none, which is what tells the caller to pay for the
+// full query.
+//
+// A balance-feasible plan that cannot be fired is not an answer, and the full
+// query is the only thing here that can look for one, so a rejected plan is a
+// miss rather than a result.
+bool tryProbePlan(const ReachArgs &args, Subgraph &sub) noexcept {
+  const ItemId target = sub.translate(CraftingGraph::itemNode(args.output));
+  if (target == UINT32_MAX)
+    return false;
+  aw::vector<int64_t> exec = greedyDagPlan(sub, target, args.amount, args.inventory);
+  if (exec.empty())
+    return false;
+  if (!planIsFireable(sub, args.inventory,
+                      std::span<const int64_t>(exec.data(), exec.size())))
+    return false;
+  sub.flashExec = std::move(exec);
+  return true;
+}
 
-    AW_PROFILE_BEGIN();
-    const ItemId subTarget = result.translate(CraftingGraph::itemNode(output));
-    if (subTarget != UINT32_MAX) {
-      aw::vector<uint8_t> removeMask(result.graph.nRecipe, 0);
-      if (computeFn(result, subTarget, inventory, removeMask)) {
-        size_t idx = 0;
-        auto newEnd = std::remove_if(built.begin(), built.end(), [&](const auto&) {
-          return (idx < removeMask.size()) && removeMask[idx++];
-        });
-        built.erase(newEnd, built.end());
+// One reachable query.
+//
+// With `probeFirst` set, this stops after the cheap half -- everything except
+// satellite elimination and the variant passes -- as soon as the greedy
+// pre-pass has an answer, which it reports by filling `result.flashExec`. When
+// it has none, it carries on into the full query from the state the probe built
+// rather than restarting it, so a miss costs the probe's own cheap steps and
+// nothing else.
+void reachableQuery(const ReachArgs &args, bool probeFirst, Subgraph &result) noexcept {
+  AW_PROFILE_BEGIN();
+  ReachQuery query(args.output, args.workstations, args.inventory);
+  query.walk();
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "reachability walk");
+  query.prunePackCertificates();
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "pack certificates");
+  query.pruneSeedUnreachable();
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "seed unreachable");
 
-        dropUnusedItems(query.itemSeen, output, built);
-        result = assembleSubgraph(query.itemSeen, built);
-      }
+  // Satellite elimination is the most expensive step of a query, and skipping
+  // it is most of what the probe is for. It reads the walk's item mask, which
+  // the probe's tag inliner rewrites, so a probe keeps a copy to continue from.
+  aw::vector<uint8_t> walkedItems;
+  if (probeFirst) {
+    walkedItems = query.itemSeen;
+  } else {
+    query.pruneSatellites();
+    AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "satellite elimination");
+  }
+
+  if (probeFirst) {
+    Assembled cheap = assembleQuery(query, args);
+    {
+      const PassState state{cheap.result, cheap.built, query.itemSeen, args.output,
+                            args.inventory};
+      // Tag-exclusive elimination is the one pass the probe keeps. It is also
+      // the cheapest of the four -- under three milliseconds on ATM, against
+      // ninety for satellite elimination and twenty and fourteen for the two
+      // variant passes -- but it is the one that keeps the greedy pre-pass off
+      // routes that trade an exclusive item for tag capacity, which is what
+      // makes it worth its cost here. See Options::flashProbe.
+      runSubgraphPass(state, options.tagExclusive.enabled, "tag exclusive",
+                      computeTagExclusivePruning);
     }
-    AW_PROFILE_END(options.outputRepruningProfile, "[time/pass]", label);
-  };
+    if (tryProbePlan(args, cheap.result)) {
+      result = std::move(cheap.result);
+      return;
+    }
 
-  runPass(options.variantClass.enabled, "variant class", computeVariantClassPruning);
-  runPass(options.tagExclusive.enabled, "tag exclusive", computeTagExclusivePruning);
-  runPass(options.variantFold.enabled, "variant fold", computeVariantFoldPruning);
-  runPass(options.satellite.enabled, "closed island", computeClosedIslandPruning);
+    // No plan on the cheap subgraph. Put back the mask the inliner rewrote and
+    // take the full path from here.
+    query.itemSeen = std::move(walkedItems);
+    query.pruneSatellites();
+    AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "satellite elimination");
+  }
+
+  Assembled full = assembleQuery(query, args);
+  const PassState state{full.result, full.built, query.itemSeen, args.output, args.inventory};
+  runSubgraphPass(state, options.variantClass.enabled, "variant class",
+                  computeVariantClassPruning);
+  runSubgraphPass(state, options.tagExclusive.enabled, "tag exclusive",
+                  computeTagExclusivePruning);
+  runSubgraphPass(state, options.variantFold.enabled, "variant fold",
+                  computeVariantFoldPruning);
+  runSubgraphPass(state, options.satellite.enabled, "closed island",
+                  computeClosedIslandPruning);
+  result = std::move(full.result);
+}
+
+}  // namespace
+
+Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
+                           std::span<const Amount> inventory, Amount amount) noexcept {
+  if (output == 0 || output > graph.nItem)
+    return {};
+
+  const ReachArgs args{output, workstations, inventory, amount};
+
+  // Flash mode: the greedy pre-pass is the whole answer whenever it hits, and a
+  // plan in hand leaves nothing for the pruning to prune *for*. Ask for one on
+  // the cheap subgraph first, and only pay for the expensive passes when there
+  // is no plan to be had. See docs/algorithm.typ (快速模式).
+  //
+  // The switch lives in two places and `planCrafting` ORs them, because the mod
+  // sets the solver's copy. Reading only the planner's here would leave the mod
+  // on the slow path.
+  const bool probe = (options.flash || solverOptions.flash) && options.flashProbe;
+
+  Subgraph result;
+  reachableQuery(args, probe, result);
   return result;
 }
 

@@ -310,6 +310,18 @@ struct Subgraph {
   // graph recipe id -> source recipe id, ascending.
   aw::vector<RecipeId> recipeOrigin;
 
+  // The flash probe's answer, when `reachableSubgraph` found one: a greedy
+  // plan for exactly this subgraph, one count per recipe, in `PlanResult::exec`
+  // form. `planCrafting` hands it back instead of deriving a plan of its own.
+  //
+  // This is what lets flash mode skip the expensive pruning passes. The probe
+  // asks the greedy pre-pass for a plan on the cheaply pruned subgraph, and if
+  // it gets one there is nothing left to prune *for*, so the passes and the
+  // subgraph they would have shrunk are dropped together and the plan comes
+  // back with the subgraph it belongs to. Empty on every other path: a
+  // non-flash query, or a flash query whose probe missed.
+  aw::vector<int64_t> flashExec;
+
   // Translates source-graph item id to id in this subgraph.
   // UINT32_MAX on failure.
   ItemId translate(ItemId source) const noexcept;
@@ -327,8 +339,18 @@ struct Subgraph {
 // additionally need one of their recorded dominator workstations to be
 // available. A directly dominated recipe is dropped without a stock check:
 // nothing is inlined, so the dominator replaces it whatever the inventory.
+//
+// With flash mode on -- `options.flash` or `solverOptions.flash`, whichever the
+// caller set, since the mod sets the latter -- this first asks the greedy
+// pre-pass for a plan on the cheaply pruned subgraph: everything except
+// satellite elimination and the variant passes, which together are more than
+// nine tenths of a reach query on a large corpus. A hit is returned as
+// `flashExec` on the subgraph it was found on; a miss falls through to the full
+// query from the state the probe built. `amount` is only read on the first path,
+// because that is the amount the plan is for.
 Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
-                           std::span<const Amount> inventory = {}) noexcept;
+                           std::span<const Amount> inventory = {},
+                           Amount amount = 1) noexcept;
 
 void registerCraftingGraph(std::span<const std::byte> bytes) noexcept;
 const char *getCraftingError() noexcept;

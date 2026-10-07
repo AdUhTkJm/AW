@@ -1016,6 +1016,9 @@ int main(int argc, char** argv) {
       dumpWorkstation = true;
     } else if (arg == "--flash") {
       aw::options.flash = true;
+    } else if (arg == "--no-flash-probe") {
+      // Turn off flash mode's early greedy probe, for measuring what it buys.
+      aw::options.flashProbe = false;
     } else if (arg == "--no-cycle-retries") {
       // Turn off the post-rejection re-solves, for measuring their cost.
       solverOptions.maxCycleRetries = 0;
@@ -1168,7 +1171,8 @@ int main(int argc, char** argv) {
                    "                   [--no-variant-prune] [--variant-seconds <s>]\n"
                    "                   [--no-tag-exclusive-prune] [--tag-exclusive-seconds <s>]\n"
                    "                   [--no-variant-fold-prune] [--variant-fold-seconds <s>]\n"
-                   "                   [--no-seed-prune] [--no-tag-tidy] [--optimal] [--flash] [--no-cycle-retries]\n"
+                   "                   [--no-seed-prune] [--no-tag-tidy] [--optimal] [--flash] [--no-flash-probe]\n"
+                   "                   [--no-cycle-retries]\n"
                    "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                    "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                    "                   [--inv-file <stock.tsv>]\n"
@@ -1192,7 +1196,8 @@ int main(int argc, char** argv) {
                  "                   [--no-satellite-prune] [--satellite-seconds <s>]\n"
                  "                   [--no-variant-prune] [--variant-seconds <s>]\n"
                  "                   [--no-tag-exclusive-prune] [--tag-exclusive-seconds <s>]\n"
-                 "                   [--no-seed-prune] [--no-tag-tidy] [--optimal] [--flash] [--no-cycle-retries]\n"
+                 "                   [--no-seed-prune] [--no-tag-tidy] [--optimal] [--flash] [--no-flash-probe]\n"
+                 "                   [--no-cycle-retries]\n"
                  "                   [--pack-seconds <s>] [--inline-tags off|pre|post|both]\n"
                  "                   [--plan <name|handle>] [--amount <n>] [--inv <h=a,...>]\n"
                  "                   [--inv-file <stock.tsv>]\n"
@@ -1477,7 +1482,8 @@ int main(int argc, char** argv) {
     }
 
     const auto reachStart = std::chrono::steady_clock::now();
-    const aw::Subgraph sub = aw::reachableSubgraph(target, stations, inventory);
+    const aw::Subgraph sub =
+        aw::reachableSubgraph(target, stations, inventory, planAmount);
     std::fprintf(stderr, "[time] reachableSubgraph: %.3f s\n", aw::since(reachStart));
     if (sub.graph.nItem == 0) {
       std::cerr << "no subgraph reachable from " << planArg << '\n';

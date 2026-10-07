@@ -4296,6 +4296,83 @@ void testGreedyDag() {
   }
 }
 
+void testFlashProbe() {
+  std::cout << "[Test] flash probe\n";
+
+  // The probe is `reachableSubgraph`'s flash shortcut: the greedy pre-pass runs
+  // on a subgraph built without satellite elimination or the variant passes, and
+  // a hit comes back as `flashExec` on the subgraph it was found on.
+  aw::registerCraftingGraph(buildZeroInputSample());
+  expect(aw::getCraftingError() == nullptr, "flash probe sample parses");
+  {
+    const aw::Handle all[] = {1, 2};
+    const aw::Amount amount = 7;
+
+    const aw::Subgraph off = aw::reachableSubgraph(1, all, {}, amount);
+    expect(off.flashExec.empty(), "a non-flash query carries no probe plan");
+
+    aw::options.flash = true;
+    const aw::Subgraph on = aw::reachableSubgraph(1, all, {}, amount);
+    const aw::ItemId target = on.translate(0);
+    expect(!on.flashExec.empty(), "the probe reports the plan it found");
+    expect(target != UINT32_MAX && on.flashExec.size() == on.graph.nRecipe,
+           "the probe plan has one count per recipe of the subgraph it came with");
+    if (!on.flashExec.empty())
+      expect(greedyBalances(on, target, amount, {}, on.flashExec),
+             "the probe plan balances against the subgraph it came with");
+
+    // `planCrafting` hands the probe's own vector back, tagged as greedy, and
+    // gets the same answer as when it runs the pre-pass itself.
+    aw::solver::Options options;
+    const aw::PlanResult plan = aw::planCrafting(on, target, amount, {}, options);
+    expect(plan.status == aw::PlanStatus::OK && plan.fromGreedy,
+           "planCrafting adopts the probe's plan");
+    expect(plan.exec == on.flashExec, "planCrafting returns the probe's own vector");
+    expect(plan.greedyMs == 0.0, "the probe's plan costs planCrafting no greedy time");
+
+    // The mod sets `flash` on the solver options rather than the planner ones,
+    // so the probe has to read both or it never runs in game.
+    aw::options.flash = false;
+    aw::solverOptions.flash = true;
+    const aw::Subgraph viaSolver = aw::reachableSubgraph(1, all, {}, amount);
+    expect(!viaSolver.flashExec.empty(), "the probe reads the solver's flash switch too");
+    aw::solverOptions.flash = false;
+
+    aw::options.flash = true;
+    const bool savedProbe = aw::options.flashProbe;
+    aw::options.flashProbe = false;
+    const aw::Subgraph unprobed = aw::reachableSubgraph(1, all, {}, amount);
+    expect(unprobed.flashExec.empty(), "flashProbe off disables the probe");
+    aw::options.flashProbe = savedProbe;
+
+    // Turning it off has to leave the answer alone: the plan comes from the
+    // same pre-pass, just later and on the pruned subgraph.
+    const aw::PlanResult slow = aw::planCrafting(
+        unprobed, unprobed.translate(0), amount, {}, options);
+    expect(slow.status == aw::PlanStatus::OK && slow.fromGreedy && slow.exec == plan.exec,
+           "the probe returns the plan the unprobed path finds anyway");
+    aw::options.flash = false;
+  }
+
+  // A miss has to leave the full query untouched: same subgraph, no plan. This
+  // is the invariant that makes the probe free when it fails.
+  aw::registerCraftingGraph(buildPlanSample());
+  expect(aw::getCraftingError() == nullptr, "flash probe cycle sample parses");
+  {
+    const aw::Handle all[] = {1, 2};
+    const aw::Subgraph plain = aw::reachableSubgraph(1, all, {}, 4);
+    aw::options.flash = true;
+    const aw::Subgraph probed = aw::reachableSubgraph(1, all, {}, 4);
+    aw::options.flash = false;
+    expect(probed.flashExec.empty(), "a probe miss reports no plan");
+    expect(probed.graph.nItem == plain.graph.nItem &&
+               probed.graph.nRecipe == plain.graph.nRecipe &&
+               probed.itemOrigin == plain.itemOrigin &&
+               probed.recipeOrigin == plain.recipeOrigin,
+           "a probe miss returns the full query's subgraph");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Plan protocol
 // ---------------------------------------------------------------------------
@@ -4593,6 +4670,11 @@ void testOptionsJson() {
   expect(aw::options.tagInlining == aw::TagInlineMode::QUERY_TIME, "the tag-inlining enum is updated");
   expect(!aw::options.pack.enabled, "a nested planner object is updated");
   expect(aw::options.recipePruning, "an absent key keeps its current value");
+
+  expect(aw::applyPlannerOptionsJson(R"({"flashProbe": false})", error),
+         "the planner patch accepts flashProbe");
+  expect(!aw::options.flashProbe, "the flash probe switch is updated");
+  aw::options.flashProbe = true;
 
   error.clear();
   expect(!aw::applyPlannerOptionsJson(R"({"nope": 1})", error) && !error.empty(),
@@ -4916,6 +4998,7 @@ int main() {
   testStartupCuts();
   testPlanInfeasible();
   testGreedyDag();
+  testFlashProbe();
   testDuplicateRecipes();
   testTagPruning();
   testWideTagPruning();

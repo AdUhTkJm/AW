@@ -185,8 +185,8 @@ bool splitCommas(const std::string &text, aw::vector<std::string> &out) {
 
 // ---------------------------------------------------------------------- stages
 
-// One point on the cumulative ablation curve. The nine booleans are the
-// query-time gates read by `reachableSubgraph`.
+// One point on the cumulative ablation curve. The booleans are the query-time
+// gates read by `reachableSubgraph`.
 struct Stage {
   const char *name;
   bool seed;
@@ -198,21 +198,31 @@ struct Stage {
   bool sat;
   bool variant;
   bool excl;
+  bool fold;
 };
 
 // The agreed cumulative order:
 //   nothing -> seed -> direct -> recipe -> substitution -> tag -> pack -> variant -> exclusive -> satellite
+//
+// `fold` is not part of that curve: the variant-folding pass was added later and
+// every stage of the published ablation ran with it on, so it stays true
+// everywhere except in `probe`, which is the pass set an early flash probe
+// would use.
 const Stage kStages[] = {
-    {"none", false, false, false, false, false, false, false, false, false},
-    {"seed", true, false, false, false, false, false, false, false, false},
-    {"direct", true, true, false, false, false, false, false, false, false},
-    {"recipe", true, true, true, false, false, false, false, false, false},
-    {"substitution", true, true, true, true, false, false, false, false, false},
-    {"tag", true, true, true, true, true, false, false, false, false},
-    {"pack", true, true, true, true, true, true, false, false, false},
-    {"variant", true, true, true, true, true, true, false, true, false},
-    {"exclusive", true, true, true, true, true, true, false, true, true},
-    {"satellite", true, true, true, true, true, true, true, true, true},
+    {"none", false, false, false, false, false, false, false, false, false, true},
+    {"seed", true, false, false, false, false, false, false, false, false, true},
+    {"direct", true, true, false, false, false, false, false, false, false, true},
+    {"recipe", true, true, true, false, false, false, false, false, false, true},
+    {"substitution", true, true, true, true, false, false, false, false, false, true},
+    {"tag", true, true, true, true, true, false, false, false, false, true},
+    {"pack", true, true, true, true, true, true, false, false, false, true},
+    {"variant", true, true, true, true, true, true, false, true, false, true},
+    {"exclusive", true, true, true, true, true, true, false, true, true, true},
+    {"satellite", true, true, true, true, true, true, true, true, true, true},
+    // The light probe: everything except the three passes that cost ~130 of the
+    // ~145 ms an ATM reach query spends. Tag-exclusive stays because dropping
+    // it is what makes the greedy wander into a 342x-worse route.
+    {"probe", true, true, true, true, true, true, false, false, true, false},
 };
 
 const Stage *findStage(const std::string &name) {
@@ -231,6 +241,7 @@ void applyStage(const Stage &stage) {
   aw::options.satellite.enabled = stage.sat;
   aw::options.variantClass.enabled = stage.variant;
   aw::options.tagExclusive.enabled = stage.excl;
+  aw::options.variantFold.enabled = stage.fold;
 }
 
 // Everything the registration-time passes read. Must run before
@@ -344,7 +355,8 @@ std::string label(const std::map<aw::Handle, std::string> &names, aw::ItemId ite
 void usage() {
   std::fprintf(stderr,
                "usage: aw_bench --dataset <name> --awr <path> --plan <prefix> --config <name> --out <jsonl>\n"
-               "                [--nonoptimal 0|1] [--flash 0|1] [--startup-cuts 0|1] [--stage <profile>[:<label>]]...\n"
+               "                [--nonoptimal 0|1] [--flash 0|1] [--flash-probe 0|1]\n"
+               "                [--startup-cuts 0|1] [--stage <profile>[:<label>]]...\n"
                "                [--inline-tags off|pre|post|both]\n"
                "                [--reprune 0|1] [--reprune-exact 0|1] [--reprune-pack 0|1]\n"
                "                [--reprune-pack-seconds <s>]\n"
@@ -393,6 +405,9 @@ int main(int argc, char **argv) {
   aw::vector<std::pair<std::string, std::string>> stageArgs;  // profile -> label
   bool nonoptimal = true;
   bool flash = false;
+  // Flash mode's early greedy probe. `--flash-probe 0` measures the same
+  // queries with the probe off, which is the whole point of the switch.
+  bool flashProbe = true;
   // Eager 1- and 2-cycle startup cuts. On by default; `--startup-cuts 0`
   // measures the rejected-solve retry path instead.
   bool startupCuts = true;
@@ -445,6 +460,10 @@ int main(int argc, char **argv) {
       std::string value;
       next(value);
       flash = value != "0";
+    } else if (arg == "--flash-probe") {
+      std::string value;
+      next(value);
+      flashProbe = value != "0";
     } else if (arg == "--startup-cuts") {
       std::string value;
       next(value);
@@ -683,6 +702,7 @@ int main(int argc, char **argv) {
         .str("config", config)
         .boolean("nonoptimal", nonoptimal)
         .boolean("flash", flash)
+        .boolean("flash_probe", flashProbe)
         .num("warmup", warmup)
         .num("repeats", repeats)
         .real("time_limit_s", timeLimit)
@@ -750,6 +770,7 @@ int main(int argc, char **argv) {
         .str("config", config)
         .boolean("nonoptimal", nonoptimal)
         .boolean("flash", flash)
+        .boolean("flash_probe", flashProbe)
         .real("register_ms", registerMs)
         .real("parse_ms", parseMs)
         .num("items", graph.nItem)
@@ -788,6 +809,7 @@ int main(int argc, char **argv) {
   solverOptions.relativeGap = gap;
   solverOptions.numWorkers = (int) workers;
   aw::options.flash = flash;
+  aw::options.flashProbe = flashProbe;
   if (!startupCuts)
     solverOptions.maxStartupGroups = 0;
 
@@ -818,7 +840,8 @@ int main(int argc, char **argv) {
             const bool measured = repeat >= warmup;
 
             const auto reachStart = Clock::now();
-            const aw::Subgraph sub = aw::reachableSubgraph(target.handle, stations, inventory);
+            const aw::Subgraph sub =
+                aw::reachableSubgraph(target.handle, stations, inventory, amount);
             const double reachMs = sinceMs(reachStart);
 
             double solveMs = 0.0;
@@ -958,6 +981,8 @@ int main(int argc, char **argv) {
                 .real("deterministic_time", plan.deterministicTime)
                 .real("first_feasible_ms", plan.firstFeasibleMs)
                 .real("proven_ms", plan.provenMs)
+                .boolean("from_greedy", plan.fromGreedy)
+                .real("greedy_ms", plan.greedyMs)
                 .num("solver_retries", plan.solverRetries);
             if (traceAttempts) {
               // [cap, budget_s, status, objective, elapsed_ms] per CP-SAT solve.

@@ -54,7 +54,14 @@ bool readU64(const json &j, const char *key, uint64_t &out, std::string &error) 
   return false;
 }
 
+// The three narrow readers below go through a wider local, so they have to test
+// for the key themselves: `readU64`/`readI64` leave `out` alone when the key is
+// absent, but assigning the local unconditionally would turn every omitted
+// option into a zero. A partial patch has to keep the values it does not
+// mention -- that is the whole point of `Options next = options`.
 bool readU32(const json &j, const char *key, uint32_t &out, std::string &error) {
+  if (j.find(key) == j.end())
+    return true;
   uint64_t wide = 0;
   if (!readU64(j, key, wide, error))
     return false;
@@ -67,6 +74,8 @@ bool readU32(const json &j, const char *key, uint32_t &out, std::string &error) 
 }
 
 bool readSize(const json &j, const char *key, size_t &out, std::string &error) {
+  if (j.find(key) == j.end())
+    return true;
   uint64_t wide = 0;
   if (!readU64(j, key, wide, error))
     return false;
@@ -96,6 +105,8 @@ bool readI64(const json &j, const char *key, int64_t &out, std::string &error) {
 }
 
 bool readInt(const json &j, const char *key, int &out, std::string &error) {
+  if (j.find(key) == j.end())
+    return true;
   int64_t wide = 0;
   if (!readI64(j, key, wide, error))
     return false;
@@ -252,7 +263,8 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
         !readBool(j, "substitutionPruning", next.substitutionPruning, error) ||
         !readBool(j, "seedPruning", next.seedPruning, error) ||
         !readBool(j, "tagTidy", next.tagTidy, error) ||
-        !readBool(j, "flash", next.flash, error))
+        !readBool(j, "flash", next.flash, error) ||
+        !readBool(j, "flashProbe", next.flashProbe, error))
       return false;
 
     {
@@ -328,7 +340,7 @@ bool applyPlannerOptionsJson(std::string_view text, std::string &error) noexcept
     if (!checkKnown(j,
                     {"nonoptimal", "tagPruning", "recipePruning", "directPruning",
                      "substitutionPruning", "deadNodePruning", "seedPruning",
-                     "tagTidy", "outputPruningProfile",
+                     "tagTidy", "outputPruningProfile", "flashProbe",
                      "tagInlining", "pack", "satellite", "variantClass", "tagExclusive",
                      "variantFold", "maxTagMembers",
                      "maxTagPairs",
@@ -438,6 +450,7 @@ std::string plannerOptionsJson() noexcept {
         {"maxFoldItems", options.variantFold.maxFoldItems},
         {"maxSeconds", options.variantFold.maxSeconds},
     };
+    j["flashProbe"] = options.flashProbe;
     j["maxTagMembers"] = options.maxTagMembers;
     j["maxTagPairs"] = options.maxTagPairs;
     j["maxTagCoverWork"] = options.maxTagCoverWork;

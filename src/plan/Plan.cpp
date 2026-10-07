@@ -139,6 +139,30 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
   if (target >= g.nItem)
     return result;
 
+  // A flash probe already ran the greedy pre-pass, on the subgraph it handed
+  // back together with the plan, so there is nothing to derive here: the vector
+  // only has to pass the same realizability check every other plan gets. Its
+  // `amount` is the one the probe was told about, which is this one, and a plan
+  // from a different subgraph cannot match `nRecipe`. See
+  // Subgraph::flashExec.
+  if ((options.flash || aw::options.flash) && sub.flashExec.size() == g.nRecipe &&
+      !sub.flashExec.empty()) {
+    if (planIsFireable(sub, invSrc,
+                       std::span<const int64_t>(sub.flashExec.data(),
+                                                sub.flashExec.size()))) {
+      result.status = PlanStatus::OK;
+      result.provenOptimal = false;
+      result.exec = sub.flashExec;
+      result.fromGreedy = true;
+      result.firstFeasibleMs = sincePlanStartMs();
+      return result;
+    }
+    // A plan that cannot be fired is not an answer. The probe's subgraph is the
+    // cheap one, so a rejected plan here is a bug in the probe or in the
+    // realizability check, not something to recover from: fall through and let
+    // the solver look for a plan on this same subgraph.
+  }
+
   const uint32_t n = g.nRecipe;
   const uint32_t m = g.nItem;
 
@@ -234,7 +258,10 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
   // A hit is the whole answer in flash mode; otherwise it seeds the solver as
   // both the objective cap (a valid upper bound on the optimum) and a solution
   // hint.
+  const auto greedyStart = std::chrono::steady_clock::now();
   aw::vector<int64_t> greedy = greedyDagPlan(sub, target, amount, invSrc);
+  result.greedyMs = std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - greedyStart).count();
   solver::Options solveOptions = options;
   // The process-wide switch is the one the tools and the mod flip, so it is the
   // source of truth; the per-solve copy is what the retry loop below can clear
@@ -278,6 +305,7 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
       result.status = PlanStatus::OK;
       result.provenOptimal = false;
       result.exec = std::move(greedy);
+      result.fromGreedy = true;
       result.firstFeasibleMs = sincePlanStartMs();
       return result;
     }
@@ -309,6 +337,7 @@ PlanResult planCrafting(const Subgraph &sub, ItemId target, Amount amount,
     result.gap = 0.0;
     result.bestBound = 0.0;
     result.exec = greedy;
+    result.fromGreedy = true;
     if (result.firstFeasibleMs < 0.0)
       result.firstFeasibleMs = sincePlanStartMs();
     return true;

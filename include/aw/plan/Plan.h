@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "aw/plan/CraftingGraph.h"
+#include "aw/plan/Greedy.h"
 #include "aw/plan/Solver.h"
 #include "aw/plan/Status.h"
 
@@ -57,6 +58,17 @@ struct PlanResult {
   int64_t solverRetries = 0;
   // The concatenated per-attempt trajectory, for the finding-time table.
   aw::vector<solver::CapAttempt> attemptTrace;
+
+  // True when `exec` is the greedy DAG pre-pass's own vector rather than a
+  // CP-SAT solution: either the flash hit or the `adoptGreedyFallback` path.
+  // Diagnostics only, so a benchmark can tell a greedy answer from a solved
+  // one without guessing from the conflict counters.
+  bool fromGreedy = false;
+  // Wall-clock milliseconds the greedy DAG pre-pass spent inside
+  // `planCrafting`. Includes the balance re-check but not the subgraph build,
+  // and stays 0 for a flash probe's plan, whose pre-pass ran earlier, in
+  // `reachableSubgraph`.
+  double greedyMs = 0.0;
 };
 
 // Plans `amount` new units of the item at subgraph node `target`.
@@ -123,16 +135,8 @@ aw::vector<int64_t> tidyTagConversions(const Subgraph& sub,
                                        std::span<const int64_t> b,
                                        std::span<const int64_t> exec) noexcept;
 
-// Greedy DAG pre-pass used by `planCrafting`, and exposed for testing.
-//
-// Builds an acyclic view of the reachable recipe graph by cutting back-edges
-// from a DFS at the target, then resolves each item once in reverse post-order.
-// Returns an empty vector when the retained routes cannot satisfy the request;
-// otherwise the firing vector is verified against the exact balance
-// `planCrafting` hands the solver, so it is always feasible. It never reports
-// a false positive.
-aw::vector<int64_t> greedyDagPlan(const Subgraph& sub, ItemId target, Amount amount,
-                                  std::span<const Amount> invSrc) noexcept;
+// `greedyDagPlan` is declared in Greedy.h, which is included above so that the
+// callers that only need the pre-pass do not have to know about it.
 
 }  // namespace aw
 
