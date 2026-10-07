@@ -106,16 +106,33 @@ struct VariantFoldRun {
   aw::vector<uint8_t> usedScratch;
   aw::vector<uint32_t> failing;
 
-  // CSR form of witness index. witness[item] = { recipes },
-  // such that the first output (anchor) of each recipe in the set is `item`.
-  aw::vector<uint32_t> witnessOffsets;  // nItem + 1
-  aw::vector<uint32_t> witnessRecipes;  // number of D-free recipes
-  aw::vector<uint32_t> witnessCursor;   // nItem, next slot per bucket
-  aw::vector<uint32_t> alive;           // D-free recipes, ascending
-  aw::vector<uint32_t> touching;        // D-touching recipes, ascending
+  // Per recipe, the witness that last replayed its projected column, or
+  // UINT32_MAX. A repair round usually leaves most columns and their witnesses
+  // untouched, so re-validating the remembered witness is cheaper than walking
+  // the bucket again. It is only a hint: `witnessRealizes` re-checks everything,
+  // so a stale entry costs a failed validation, never a wrong answer.
+  aw::vector<uint32_t> lastWitness;     // nRecipe
 
-  // Shape index for `tryGrow`, keyed by the output and input amounts alone.
-  // Built once per run, so the hash map's per-key vectors are affordable.
+  // CSR form of witness index. witness[item] = { recipes }, such that the first
+  // output (anchor) of each recipe in the set is `item`. It depends on the graph
+  // but not on the fold, so it is built once; a D-touching witness is skipped by
+  // the lookup through `foldCount` instead of being left out of the index.
+  aw::vector<uint32_t> witnessOffsets;  // nItem + 1
+  aw::vector<uint32_t> witnessRecipes;  // nRecipe
+
+  // Per recipe, how many of its real items are folded right now. Mirrors
+  // `sigma`, so "does r touch the fold" is a single load and the set never has
+  // to be rescanned. `setFolded` keeps it current at the two places that write
+  // `sigma`.
+  aw::vector<uint32_t> foldCount;       // nRecipe
+  // item -> recipes that consume it, the input-side counterpart of i2r. Only
+  // used by `setFolded` to find the recipes one fold or unfold touches.
+  aw::vector<uint32_t> consumerOffsets; // nItem + 1
+  aw::vector<uint32_t> consumerRecipes; // nnz
+
+  // Shape index for `tryGrow`, keyed by `recipeShapeSignature`: the output
+  // amounts plus the output item classes, then the input amounts. Built once per
+  // run, so the hash map's per-key vectors are affordable.
   std::unordered_map<uint64_t, aw::vector<uint32_t>> byShape;
   // Set while a growth round proposes a fold; the caller restarts then.
   bool grew = false;
@@ -130,11 +147,8 @@ struct VariantFoldRun {
         convOut(nReal, aw::vector<ItemId> {}), convIn(nReal, aw::vector<ItemId> {}),
         neutralR(nRecipe, 0), sigma(nReal, 0),
         stocked(nReal, 0), rejected(nReal, 0), demand(nReal, 0), comp(nReal, UINT32_MAX),
-        accum(nItem, 0), accumSet(nItem, 0)      
-  {
-    alive.reserve(nRecipe);
-    touching.reserve(nRecipe);
-  }
+        accum(nItem, 0), accumSet(nItem, 0),
+        lastWitness(nRecipe, UINT32_MAX), witnessOffsets(nItem + 1, 0) {}
 
   static uint firstTagEdge(const BaseCraftingGraph &graph) noexcept {
     uint r = 0;
@@ -159,17 +173,6 @@ struct VariantFoldRun {
   }
 
   [[nodiscard]]
-  bool touchesFold(uint r) const noexcept {
-    for (ItemId o : g.outputsOf(r))
-      if (o < nReal && sigma[o] != o)
-        return true;
-    for (ItemId in : g.inputsOf(r))
-      if (in < nReal && sigma[in] != in)
-        return true;
-    return false;
-  }
-
-  [[nodiscard]]
   std::span<const uint32_t> witnessesOf(ItemId anchor) noexcept {
     return {witnessRecipes.data() + witnessOffsets[anchor],
             witnessRecipes.data() + witnessOffsets[anchor + 1]};
@@ -177,6 +180,13 @@ struct VariantFoldRun {
 
   void buildTagIndex() noexcept;
   void buildConversions() noexcept;
+  // Builds the input-side consumer index used by `setFolded`.
+  void buildConsumers() noexcept;
+  // Seeds `foldCount` from the candidates that `buildCandidates` just folded.
+  void buildFoldCount() noexcept;
+  // Adds or removes one folded item, mirroring the `sigma` write it follows.
+  // Every item is folded at most once, so the counts stay exact.
+  void setFolded(ItemId u, bool folded) noexcept;
   // Seeds the fold from the conversion components: picks each component's base
   // and folds the twins that base reaches onto it. Runs on the large stack.
   bool buildCandidates(std::span<const uint8_t> hasStock) noexcept;
@@ -201,6 +211,9 @@ struct VariantFoldRun {
   void foldShapeRows(uint64_t &h) noexcept;
   // Fills posScratch / needScratch from pi(A r). False when the column is 0.
   bool projectedColumn(uint r) noexcept;
+  // True when recipe `witness` replays the current projected column. Mirrors
+  // the lemma's condition for a single witness.
+  bool witnessRealizes(uint witness, Amount cost) noexcept;
   // True when a D-free recipe replays the projected column of r.
   bool columnRealizable(uint r, Amount cost) noexcept;
   // Grows the fold so that r's projection can be replayed, if possible.
@@ -372,26 +385,54 @@ bool VariantFoldRun::buildCandidates(std::span<const uint8_t> hasStock) noexcept
   return !candidates.empty();
 }
 
-// Bucket-sort all D-free recipes according to the smallest output handle.
+// Bucket-sorts every recipe according to its smallest output handle. Built only
+// once: the buckets do not depend on the fold, and `columnRealizable` skips the
+// D-touching members of a bucket through `foldCount`.
 void VariantFoldRun::buildWitnessIndex() noexcept {
-  alive.clear();
-  touching.clear();
-  witnessOffsets.assign(nItem + 1, 0);
-  for (uint r = 0; r < nRecipe; r++) {
-    if (touchesFold(r)) {
-      touching.push_back_unchecked(r);
-      continue;
-    }
-    alive.push_back_unchecked(r);
+  for (uint r = 0; r < nRecipe; r++)
     witnessOffsets[g.outputsOf(r)[0] + 1]++;
-  }
-
   for (uint i = 0; i < nItem; i++)
     witnessOffsets[i + 1] += witnessOffsets[i];
-  witnessCursor.assign(witnessOffsets.begin(), witnessOffsets.end() - 1);
-  witnessRecipes.resize(alive.size());
-  for (uint r : alive)
+
+  aw::vector<uint32_t> witnessCursor(witnessOffsets.begin(), witnessOffsets.end() - 1);
+  witnessRecipes.resize(nRecipe);
+  for (uint r = 0; r < nRecipe; r++)
     witnessRecipes[witnessCursor[g.outputsOf(r)[0]]++] = r;
+}
+
+void VariantFoldRun::buildConsumers() noexcept {
+  consumerOffsets.assign(nItem + 1, 0);
+  for (uint r = 0; r < nRecipe; r++)
+    for (ItemId in : g.inputsOf(r))
+      consumerOffsets[in + 1]++;
+
+  for (uint i = 0; i < nItem; i++)
+    consumerOffsets[i + 1] += consumerOffsets[i];
+  aw::vector<uint32_t> cursor(consumerOffsets.begin(), consumerOffsets.end() - 1);
+  consumerRecipes.resize(consumerOffsets[nItem]);
+  for (uint r = 0; r < nRecipe; r++)
+    for (ItemId in : g.inputsOf(r))
+      consumerRecipes[cursor[in]++] = r;
+}
+
+void VariantFoldRun::buildFoldCount() noexcept {
+  foldCount.resize(nRecipe);
+  for (uint r = 0; r < nRecipe; r++) {
+    uint32_t count = 0;
+    for (ItemId o : g.outputsOf(r))
+      count += o < nReal && sigma[o] != o;
+    for (ItemId in : g.inputsOf(r))
+      count += in < nReal && sigma[in] != in;
+    foldCount[r] = count;
+  }
+}
+
+void VariantFoldRun::setFolded(ItemId u, bool folded) noexcept {
+  const int32_t delta = folded ? 1 : -1;
+  for (RecipeId r : g.producersOf(u))
+    foldCount[r] += delta;
+  for (uint32_t k = consumerOffsets[u]; k < consumerOffsets[u + 1]; k++)
+    foldCount[consumerRecipes[k]] += delta;
 }
 
 void VariantFoldRun::mixShapeRows(uint64_t &h, bool isOutput,
@@ -471,6 +512,7 @@ bool VariantFoldRun::proposeFold(ItemId from, ItemId to) noexcept {
   sigma[from] = to;
   candidates.push_back(from);
   grew = true;
+  setFolded(from, true);
   return true;
 }
 
@@ -562,9 +604,33 @@ bool VariantFoldRun::tryGrow(uint r) noexcept {
 bool VariantFoldRun::projectedColumn(uint r) noexcept {
   posScratch.clear();
   needScratch.clear();
-  touched.clear();
   const auto outs = g.outputsOf(r);
+  const auto ins = g.inputsOf(r);
+
+  // Most recipes are one output against one input: the net column is then one
+  // row at most and the nItem-sized accumulator arrays are pure overhead.
+  [[likely]]
+  if (outs.size() == 1 && ins.size() == 1) {
+    const ItemId x = rep(outs[0]);
+    const ItemId y = rep(ins[0]);
+    const Amount a = g.firstOutputAmountOf(r);
+    const Amount b = g.firstInputAmountOf(r);
+    if (x == y) {
+      if (a == b)
+        return false;
+      if (a > b)
+        posScratch.emplace_back(x, a - b);
+      else
+        needScratch.emplace_back(x, b - a);
+    } else {
+      posScratch.emplace_back(x, a);
+      needScratch.emplace_back(y, b);
+    }
+    return true;
+  }
+
   const auto outAmts = g.outputAmountsOf(r);
+  touched.clear();
   for (size_t k = 0; k < outs.size(); k++) {
     const ItemId x = rep(outs[k]);
     if (!accumSet[x]) {
@@ -573,7 +639,6 @@ bool VariantFoldRun::projectedColumn(uint r) noexcept {
     }
     accum[x] += outAmts[k];
   }
-  const auto ins = g.inputsOf(r);
   const auto inAmts = g.inputAmountsOf(r);
   for (size_t k = 0; k < ins.size(); k++) {
     const ItemId x = rep(ins[k]);
@@ -670,41 +735,54 @@ bool VariantFoldRun::columnRealizable(uint r, Amount cost) noexcept {
   if (posScratch.empty())
     return false;
 
-  // Filters out recipes that can possibly match.
-  for (uint witness : witnessesOf(posScratch[0].item)) {
-    if (g.cost[witness] > cost)
-      continue;
-    const auto wOuts = g.outputsOf(witness);
-    if (wOuts.size() != posScratch.size())
-      continue;
+  // Retry the witness of the previous round first: the column and the D-touching
+  // set usually did not change under it.
+  [[likely]]
+  if (lastWitness[r] != UINT32_MAX && witnessRealizes(lastWitness[r], cost))
+    return true;
 
-    // Item ID and output amount must match exactly.
-    bool same = true;
-    for (size_t k = 0; k < wOuts.size(); k++) {
-      if (wOuts[k] != posScratch[k].item ||
-          g.outputAmountsOf(witness)[k] != posScratch[k].amt) {
-        same = false;
-        break;
-      }
-    }
-    if (!same)
-      continue;
-    const auto wIns = g.inputsOf(witness);
-    if (wIns.size() != needScratch.size())
-      continue;
-    usedScratch.assign(wIns.size(), 0);
-    if (matchInputs(needScratch, wIns, g.inputAmountsOf(witness), 0,
-                    usedScratch))
+  // The witness index is the whole graph, so a D-touching recipe is skipped in
+  // `witnessRealizes`.
+  for (uint witness : witnessesOf(posScratch[0].item)) {
+    if (witnessRealizes(witness, cost)) {
+      lastWitness[r] = witness;
       return true;
+    }
   }
+  lastWitness[r] = UINT32_MAX;
   return false;
+}
+
+bool VariantFoldRun::witnessRealizes(uint witness, Amount cost) noexcept {
+  if (foldCount[witness] != 0)
+    return false;
+  if (g.cost[witness] > cost)
+    return false;
+  const auto wOuts = g.outputsOf(witness);
+  if (wOuts.size() != posScratch.size())
+    return false;
+
+  // Item ID and output amount must match exactly.
+  for (size_t k = 0; k < wOuts.size(); k++) {
+    if (wOuts[k] != posScratch[k].item ||
+        g.outputAmountsOf(witness)[k] != posScratch[k].amt)
+      return false;
+  }
+  const auto wIns = g.inputsOf(witness);
+  if (wIns.size() != needScratch.size())
+    return false;
+  usedScratch.assign(wIns.size(), 0);
+  return matchInputs(needScratch, wIns, g.inputAmountsOf(witness), 0,
+                     usedScratch);
 }
 
 void VariantFoldRun::collectFailures() noexcept {
   failing.clear();
-  // `touching` was filled by the buildWitnessIndex call that precedes every
-  // call to this one, so the fold does not have to be scanned again.
-  for (uint r : touching) {
+  // Ascending recipe order, which is the order `tryGrow` tries them in. The
+  // scan replaces the old `touching` list: `foldCount` is a single load.
+  for (uint r = 0; r < nRecipe; r++) {
+    if (foldCount[r] == 0)
+      continue;
     if (!projectedColumn(r))
       continue;
     if (!columnRealizable(r, g.cost[r]))
@@ -713,8 +791,8 @@ void VariantFoldRun::collectFailures() noexcept {
 }
 
 bool VariantFoldRun::verifyAndRepair() noexcept {
+  buildWitnessIndex();
   for (;;) {
-    buildWitnessIndex();
     collectFailures();
     if (failing.empty())
       return true;
@@ -754,6 +832,7 @@ bool VariantFoldRun::verifyAndRepair() noexcept {
         victim = item;
       }
     sigma[victim] = victim;
+    setFolded(victim, false);
     rejected[victim] = 1;
     candidates.erase(std::remove(candidates.begin(), candidates.end(), victim),
                      candidates.end());
@@ -775,6 +854,7 @@ bool computeVariantFoldPruning(QUERY_PRUNE_PARAM_LIST) noexcept {
   VariantFoldRun run(sub, target, started);
   run.buildTagIndex();
   run.buildConversions();
+  run.buildConsumers();
 
   // The inventory is indexed in source nodes; the fold works on subgraph ids.
   aw::vector<uint8_t> hasStock(g.nItem, 0);
@@ -785,6 +865,7 @@ bool computeVariantFoldPruning(QUERY_PRUNE_PARAM_LIST) noexcept {
   }
   if (!run.buildCandidates(hasStock))
     return false;
+  run.buildFoldCount();
   if ((uint32_t) run.candidates.size() > options.variantFold.maxFoldItems)
     return false;
   run.buildShapeIndex();
@@ -797,7 +878,7 @@ bool computeVariantFoldPruning(QUERY_PRUNE_PARAM_LIST) noexcept {
   // guarantees the pruned subgraph keeps the optimum.
   bool any = false;
   for (uint r = 0; r < g.nRecipe; r++) {
-    if (run.touchesFold(r)) {
+    if (run.foldCount[r] != 0) {
       drop[r] = 1;
       any = true;
     }

@@ -41,6 +41,11 @@ struct BaseSparseSets {
   std::span<const ItemId> targetsOf(uint row) const noexcept {
     return {targets.data() + offsets[row], targets.data() + offsets[row + 1]};
   }
+
+  [[nodiscard]]
+  ItemId firstTargetOf(uint row) const noexcept {
+    return targets[offsets[row]];
+  }
 };
 
 // Add weights to SparseSets.
@@ -55,6 +60,10 @@ struct SparseGraph : BaseSparseSets {
   [[nodiscard]]
   std::span<const Amount> weightsOf(uint row) const noexcept {
     return {weights.data() + offsets[row], weights.data() + offsets[row + 1]};
+  }
+
+  Amount firstWeightOf(uint row) const noexcept {
+    return weights[offsets[row]];
   }
 };
 
@@ -124,8 +133,18 @@ struct BaseCraftingGraph {
   }
 
   [[nodiscard]]
+  ItemId firstOutputOf(RecipeId recipe) const noexcept {
+    return r2o.firstTargetOf(recipe);
+  }
+
+  [[nodiscard]]
   std::span<const Amount> outputAmountsOf(RecipeId recipe) const noexcept {
     return r2o.weightsOf(recipe);
+  }
+
+  [[nodiscard]]
+  Amount firstOutputAmountOf(RecipeId recipe) const noexcept {
+    return r2o.firstWeightOf(recipe);
   }
 
   [[nodiscard]]
@@ -159,13 +178,22 @@ struct BaseCraftingGraph {
   }
 
   [[nodiscard]]
+  ItemId firstInputOf(RecipeId recipe) const noexcept {
+    return r2i.firstTargetOf(recipe);
+  }
+
+  [[nodiscard]]
   std::span<const Amount> producedAmountsOf(ItemId item) const noexcept {
     return i2r.weightsOf(item);
   }
 
   [[nodiscard]]
-  std::span<const Amount> inputAmountsOf(ItemId recipe) const noexcept {
+  std::span<const Amount> inputAmountsOf(RecipeId recipe) const noexcept {
     return r2i.weightsOf(recipe);
+  }
+
+  Amount firstInputAmountOf(RecipeId recipe) const noexcept {
+    return r2i.firstWeightOf(recipe);
   }
 };
 
