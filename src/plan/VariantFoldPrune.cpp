@@ -33,6 +33,7 @@
 
 #include "aw/plan/Options.h"
 #include "aw/plan/Profiler.h" // IWYU pragma: keep
+#include "aw/utils/LargeStackCall.h"
 
 namespace aw {
 
@@ -99,7 +100,13 @@ struct VariantFoldRun {
                  std::chrono::steady_clock::time_point started) noexcept
       : g(sub.graph), target(target), nReal(sub.graph.nReal),
         nItem(sub.graph.nItem), nRecipe(sub.graph.nRecipe),
-        nRealRecipe(firstTagEdge(sub.graph)), started(started) {}
+        nRealRecipe(firstTagEdge(sub.graph)), started(started),
+        memberTags(nReal, aw::vector<ItemId> {}),
+        tagHasRealConsumer(nItem, 0),
+        convOut(nReal, aw::vector<ItemId> {}), convIn(nReal, aw::vector<ItemId> {}),
+        neutralR(nRecipe, 0), sigma(nReal, 0),
+        stocked(nReal, 0), rejected(nReal, 0), demand(nReal, 0), comp(nReal, UINT32_MAX),
+        accum(nItem, 0), accumSet(nItem, 0) {}
 
   static uint firstTagEdge(const BaseCraftingGraph &graph) noexcept {
     uint r = 0;
@@ -136,6 +143,8 @@ struct VariantFoldRun {
 
   void buildTagIndex() noexcept;
   void buildConversions() noexcept;
+  // Seeds the fold from the conversion components: picks each component's base
+  // and folds the twins that base reaches onto it. Runs on the large stack.
   bool buildCandidates(std::span<const uint8_t> hasStock) noexcept;
   void buildWitnessIndex() noexcept;
   void buildShapeIndex() noexcept;
@@ -168,12 +177,6 @@ static bool matchInputsGrow(VariantFoldRun &run,
                             aw::vector<std::pair<ItemId, ItemId>> &proposals) noexcept;
 
 void VariantFoldRun::buildTagIndex() noexcept {
-  memberTags.assign(nReal, {});
-  tagHasRealConsumer.assign(nItem, 0);
-
-  // The dataset only ever emits `T <- m` member edges: one real member in,
-  // amount 1, free. Every item handle at or above `nReal` is therefore a tag,
-  // and its members are just the inputs of its producers, deduplicated.
   for (ItemId t = nReal; t < nItem; t++) {
     aw::vector<ItemId> members;
     for (RecipeId r : g.producersOf(t))
@@ -190,9 +193,6 @@ void VariantFoldRun::buildTagIndex() noexcept {
 }
 
 void VariantFoldRun::buildConversions() noexcept {
-  convOut.assign(nReal, {});
-  convIn.assign(nReal, {});
-  neutralR.assign(nRecipe, 0);
   for (uint r = 0; r < nRealRecipe; r++) {
     const auto outs = g.outputsOf(r);
     const auto ins = g.inputsOf(r);
@@ -205,12 +205,112 @@ void VariantFoldRun::buildConversions() noexcept {
   }
 }
 
+// The candidate walk's scratch. `seen` and `inReach` are reused across seeds,
+// while `component` and `reach` are refilled for each one. Held in one struct
+// so that the recursions below take a reference rather than a handful of
+// parallel arrays.
+struct CandidateWalk {
+  aw::vector<uint8_t> seen;      // nReal, 0/1: component flood fill
+  aw::vector<uint8_t> inReach;   // nReal, 0/1: downstream closure of the base
+  aw::vector<ItemId> component;  // the seed's weakly connected component
+  aw::vector<ItemId> reach;      // everything the base converts into
+};
+
+// Marks `u` and everything reachable from it through conversion edges in either
+// direction: the seed's weakly connected component. A plain recursion, run on
+// the large stack by the caller.
+void collectComponent(const VariantFoldRun &run, CandidateWalk &walk,
+                      ItemId u) noexcept {
+  walk.seen[u] = 1;
+  walk.component.push_back(u);
+  for (ItemId v : run.convOut[u])
+    if (!walk.seen[v])
+      collectComponent(run, walk, v);
+  for (ItemId v : run.convIn[u])
+    if (!walk.seen[v])
+      collectComponent(run, walk, v);
+}
+
+// Marks the downstream closure of the base under the conversion edges: every
+// item it can be converted into, the base itself excluded. A plain recursion,
+// run on the large stack by the caller.
+void collectReach(const VariantFoldRun &run, CandidateWalk &walk,
+                  ItemId u) noexcept {
+  for (ItemId v : run.convOut[u]) {
+    if (walk.inReach[v])
+      continue;
+    walk.inReach[v] = 1;
+    walk.reach.push_back(v);
+    collectReach(run, walk, v);
+  }
+}
+
+// One seed at a time: its conversion component, the component's base, and the
+// twins that base reaches. `comp` numbers the components in seed order.
+void collectCandidates(VariantFoldRun &run, CandidateWalk &walk,
+                       std::span<const uint8_t> hasStock) noexcept {
+  uint32_t seedIndex = 0;
+
+  for (ItemId seed = 0; seed < run.nReal; seed++) {
+    if (walk.seen[seed] ||
+        (run.convOut[seed].empty() && run.convIn[seed].empty()))
+      continue;
+    // Weakly connected component of the conversion graph.
+    walk.component.clear();
+    collectComponent(run, walk, seed);
+    if (walk.component.size() < 2)
+      continue;
+    for (ItemId u : walk.component)
+      run.comp[u] = seedIndex;
+    seedIndex++;
+
+    ItemId base = walk.component[0];
+    for (ItemId u : walk.component) {
+      const auto key =
+          std::make_pair(run.demand[u], (uint32_t) run.memberTags[u].size());
+      const auto best =
+          std::make_pair(run.demand[base], (uint32_t) run.memberTags[base].size());
+      if (key > best || (key == best && u < base))
+        base = u;
+    }
+    if (run.demand[base] == 0)
+      continue;
+
+    // Downstream closure from the base: everything the base can be converted
+    // into is a decorative twin of it.
+    walk.reach.clear();
+    walk.inReach[base] = 1;
+    collectReach(run, walk, base);
+    for (ItemId u : walk.reach) {
+      walk.inReach[u] = 0;
+      if (u == run.target)
+        continue;
+      if (u < hasStock.size() && hasStock[u])
+        continue;
+      // Orientation: the source must live in strictly fewer tags than the
+      // base, and at least one of those tags must really be consumed by a
+      // recipe. Without the second half the material-form cycles (a dust and
+      // an ingot that share an unused tag) would be folded too.
+      if (!std::includes(run.memberTags[base].begin(), run.memberTags[base].end(),
+                         run.memberTags[u].begin(), run.memberTags[u].end()) ||
+          run.memberTags[u].size() >= run.memberTags[base].size())
+        continue;
+      bool real = false;
+      for (ItemId t : run.memberTags[u])
+        if (run.tagHasRealConsumer[t]) {
+          real = true;
+          break;
+        }
+      if (!real)
+        continue;
+      run.sigma[u] = base;
+      run.candidates.push_back(u);
+    }
+    walk.inReach[base] = 0;
+  }
+}
+
 bool VariantFoldRun::buildCandidates(std::span<const uint8_t> hasStock) noexcept {
-  sigma.assign(nReal, 0);
-  demand.assign(nReal, 0);
-  comp.assign(nReal, UINT32_MAX);
-  stocked.assign(nReal, 0);
-  rejected.assign(nReal, 0);
   for (ItemId i = 0; i < nReal; i++) {
     sigma[i] = i;
     if (i < hasStock.size())
@@ -228,93 +328,12 @@ bool VariantFoldRun::buildCandidates(std::span<const uint8_t> hasStock) noexcept
         demand[in]++;
   }
 
-  aw::vector<uint8_t> seen(nReal, 0);
-  aw::vector<ItemId> stack;
-  aw::vector<ItemId> component;
-  aw::vector<ItemId> reach;
-  uint32_t seedIndex = 0;
-
-  for (ItemId seed = 0; seed < nReal; seed++) {
-    if (seen[seed] || (convOut[seed].empty() && convIn[seed].empty()))
-      continue;
-    // Weakly connected component of the conversion graph.
-    component.clear();
-    stack.assign(1, seed);
-    seen[seed] = 1;
-    while (!stack.empty()) {
-      const ItemId u = stack.back();
-      stack.pop_back();
-      component.push_back(u);
-      for (ItemId v : convOut[u])
-        if (!seen[v]) {
-          seen[v] = 1;
-          stack.push_back(v);
-        }
-      for (ItemId v : convIn[u])
-        if (!seen[v]) {
-          seen[v] = 1;
-          stack.push_back(v);
-        }
-    }
-    if (component.size() < 2)
-      continue;
-    for (ItemId u : component)
-      comp[u] = seedIndex;
-    seedIndex++;
-
-    ItemId base = component[0];
-    for (ItemId u : component) {
-      const auto key = std::make_pair(demand[u], (uint32_t) memberTags[u].size());
-      const auto best =
-          std::make_pair(demand[base], (uint32_t) memberTags[base].size());
-      if (key > best || (key == best && u < base))
-        base = u;
-    }
-    if (demand[base] == 0)
-      continue;
-
-    // Downstream closure from the base: everything the base can be converted
-    // into is a decorative twin of it.
-    reach.clear();
-    stack.assign(1, base);
-    aw::vector<uint8_t> inReach(nReal, 0);
-    inReach[base] = 1;
-    while (!stack.empty()) {
-      const ItemId u = stack.back();
-      stack.pop_back();
-      for (ItemId v : convOut[u]) {
-        if (!inReach[v]) {
-          inReach[v] = 1;
-          reach.push_back(v);
-          stack.push_back(v);
-        }
-      }
-    }
-    for (ItemId u : reach) {
-      if (u == target)
-        continue;
-      if (u < hasStock.size() && hasStock[u])
-        continue;
-      // Orientation: the source must live in strictly fewer tags than the
-      // base, and at least one of those tags must really be consumed by a
-      // recipe. Without the second half the material-form cycles (a dust and
-      // an ingot that share an unused tag) would be folded too.
-      if (!std::includes(memberTags[base].begin(), memberTags[base].end(),
-                         memberTags[u].begin(), memberTags[u].end()) ||
-          memberTags[u].size() >= memberTags[base].size())
-        continue;
-      bool real = false;
-      for (ItemId t : memberTags[u])
-        if (tagHasRealConsumer[t]) {
-          real = true;
-          break;
-        }
-      if (!real)
-        continue;
-      sigma[u] = base;
-      candidates.push_back(u);
-    }
-  }
+  CandidateWalk walk;
+  walk.seen.assign(nReal, 0);
+  walk.inReach.assign(nReal, 0);
+  // Entered on the large stack: the walks above are as deep as the conversion
+  // graph is long.
+  aw::ls::call(collectCandidates, *this, walk, hasStock);
   return !candidates.empty();
 }
 
@@ -684,8 +703,6 @@ bool computeVariantFoldPruning(QUERY_PRUNE_PARAM_LIST) noexcept {
 
   const auto started = std::chrono::steady_clock::now();
   VariantFoldRun run(sub, target, started);
-  run.accum.assign(g.nItem, 0);
-  run.accumSet.assign(g.nItem, 0);
   run.buildTagIndex();
   run.buildConversions();
 
