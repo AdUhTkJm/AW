@@ -705,11 +705,6 @@ bool computeVariantFoldPruning(QUERY_PRUNE_PARAM_LIST) noexcept {
 
   if (!run.verifyAndRepair())
     return false;
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputRepruningProfile)
-    std::fprintf(stderr, "[time/reprune] variant fold: %.6f s (%zu folded)\n",
-                 aw::since(started), (size_t) run.candidates.size());
-#endif
 
   // Mark every recipe that mentions a folded item. The projection lemma
   // guarantees the pruned subgraph keeps the optimum.

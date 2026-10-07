@@ -49,11 +49,9 @@
 #include <utility>
 
 #include "aw/plan/Options.h"
+#include "aw/plan/ProfileStep.h"
 #include "aw/utils/Helpers.h"
 #include "aw/utils/Scc.h"
-#ifdef AW_PROFILE_PRUNING
-#  include "aw/plan/Profiler.h"
-#endif
 
 using namespace aw::detail;
 using uint = uint32_t;
@@ -429,52 +427,29 @@ void computeDeadnodePruning(CraftingGraph &graph) noexcept {
 }  // namespace
 
 void prune(CraftingGraph &graph) noexcept {
-#ifdef AW_PROFILE_PRUNING
-  auto start = std::chrono::steady_clock::now();
-#endif
+  AW_PROFILE_BEGIN();
   computeTagPruning(graph);
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputPruningProfile)
-    std::fprintf(stderr, "[time] tag pruning: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputPruningProfile, "[time]", "tag pruning");
 
   // Both recipe passes compare the raw column vectors, so they share one
   // construction.
   RecipeVectors vec(graph);
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputPruningProfile)
-    std::fprintf(stderr, "[time] construct recipe vectors: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputPruningProfile, "[time]", "construct recipe vectors");
 
   computeRecipePruning(graph, vec);
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputPruningProfile)
-    std::fprintf(stderr, "[time] recipe pruning: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputPruningProfile, "[time]", "recipe pruning");
 
   computeDirectDominancePruning(graph, vec);
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputPruningProfile)
-    std::fprintf(stderr, "[time] direct dominance pruning: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputPruningProfile, "[time]", "direct dominance pruning");
 
   computeSubstitutionPruning(graph, vec);
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputPruningProfile)
-    std::fprintf(stderr, "[time] substitution pruning: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputPruningProfile, "[time]", "substitution pruning");
 
   computeDeadnodePruning(graph);
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputPruningProfile)
-    std::fprintf(stderr, "[time] dead node pruning: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputPruningProfile, "[time]", "dead node pruning");
 
   computePackPruning(graph);
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputPruningProfile)
-    std::fprintf(stderr, "[time] pack pruning: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputPruningProfile, "[time]", "pack pruning");
 }
 
 namespace detail {
@@ -485,9 +460,7 @@ namespace detail {
 // pruning vectors are written, so the copy is the whole cost.
 aw::vector<uint8_t> repruneSubgraph(const Subgraph &sub,
                                     std::span<const Amount> sourceInventory) noexcept {
-#ifdef AW_PROFILE_PRUNING
-  auto start = std::chrono::steady_clock::now();
-#endif
+  AW_PROFILE_BEGIN();
   const uint nRecipe = sub.graph.nRecipe;
   aw::vector<uint8_t> drop(nRecipe, 0);
 
@@ -505,41 +478,22 @@ aw::vector<uint8_t> repruneSubgraph(const Subgraph &sub,
 
   const bool savedNonoptimal = options.nonoptimal;
   options.nonoptimal = !options.reprune.exact;
-
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputRepruningProfile)
-    std::fprintf(stderr, "[time/reprune] copy graph: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reprune]", "copy graph");
 
   RecipeVectors vec(g);
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputRepruningProfile)
-    std::fprintf(stderr, "[time/reprune] construct recipe vectors: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reprune]", "construct recipe vectors");
 
   computeRecipePruning(g, vec);
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputRepruningProfile)
-    std::fprintf(stderr, "[time/reprune] recipe pruning: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reprune]", "recipe pruning");
 
   computeDirectDominancePruning(g, vec);
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputRepruningProfile)
-    std::fprintf(stderr, "[time/reprune] direct pruning: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reprune]", "direct pruning");
 
   computeDeadnodePruning(g);
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputRepruningProfile)
-    std::fprintf(stderr, "[time/reprune] dead node pruning: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reprune]", "dead node pruning");
 
   computePackPruning(g);
-#ifdef AW_PROFILE_PRUNING
-  if (options.outputRepruningProfile)
-    std::fprintf(stderr, "[time/reprune] pack pruning: %.6f s\n", aw::since(start));
-#endif
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reprune]", "pack pruning");
 
   options.nonoptimal = savedNonoptimal;
 

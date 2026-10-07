@@ -1,4 +1,5 @@
 #include "aw/plan/Options.h"
+#include "aw/plan/ProfileStep.h"
 #include "Prune.h"
 
 #include <algorithm>
@@ -1651,13 +1652,19 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
   if (output == 0 || output > graph.nItem)
     return {};
 
+  AW_PROFILE_BEGIN();
   ReachQuery query(output, workstations, inventory);
   query.walk();
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "reachability walk");
   query.prunePackCertificates();
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "pack certificates");
   query.pruneSeedUnreachable();
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "seed unreachable");
   query.pruneSatellites();
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "satellite elimination");
 
   aw::vector<MutableRecipe> built = collectSurvivingRecipes(query.recipeSeen);
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "collect surviving recipes");
 
   // A recipe reached through one of its byproducts still outputs its anchor,
   // and every output row has to exist in the subgraph. The walk only visits
@@ -1668,6 +1675,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
     for (ItemId o : rec.outs)
       query.itemSeen[o] = 1;
   }
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "mark recipe outputs");
 
   // Query-time single-use inlining. At this point `recipeSeen` already
   // reflects tag pruning and the inventory guard, so a tag's surviving member
@@ -1681,6 +1689,7 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
                             options.inlineSingleMemberTags, [](uint) { return true; });
     dropUnusedItems(query.itemSeen, output, built);
   }
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/reach]", "inline single-use tags");
 
   // Query-time re-pruning. The passes are written against a whole crafting
   // graph, so the live subgraph is assembled once as a probe, the newly
@@ -1705,33 +1714,37 @@ Subgraph reachableSubgraph(Handle output, std::span<const Handle> workstations,
     if (any)
       dropUnusedItems(query.itemSeen, output, built);
   }
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/pass]", "re-pruning");
 
   Subgraph result = assembleSubgraph(query.itemSeen, built);
-  const auto runPass = [&](bool enabled, auto computeFn) {
+  AW_PROFILE_END(options.outputRepruningProfile, "[time/pass]", "assemble subgraph");
+
+  const auto runPass = [&](bool enabled, const char *label, auto computeFn) {
     if (!enabled)
       return;
 
+    AW_PROFILE_BEGIN();
     const ItemId subTarget = result.translate(CraftingGraph::itemNode(output));
-    if (subTarget == UINT32_MAX)
-      return;
+    if (subTarget != UINT32_MAX) {
+      aw::vector<uint8_t> removeMask(result.graph.nRecipe, 0);
+      if (computeFn(result, subTarget, inventory, removeMask)) {
+        size_t idx = 0;
+        auto newEnd = std::remove_if(built.begin(), built.end(), [&](const auto&) {
+          return (idx < removeMask.size()) && removeMask[idx++];
+        });
+        built.erase(newEnd, built.end());
 
-    aw::vector<uint8_t> removeMask(result.graph.nRecipe, 0);
-    if (computeFn(result, subTarget, inventory, removeMask)) {
-      size_t idx = 0;
-      auto newEnd = std::remove_if(built.begin(), built.end(), [&](const auto&) {
-        return (idx < removeMask.size()) && removeMask[idx++];
-      });
-      built.erase(newEnd, built.end());
-
-      dropUnusedItems(query.itemSeen, output, built);
-      result = assembleSubgraph(query.itemSeen, built);
+        dropUnusedItems(query.itemSeen, output, built);
+        result = assembleSubgraph(query.itemSeen, built);
+      }
     }
+    AW_PROFILE_END(options.outputRepruningProfile, "[time/pass]", label);
   };
 
-  runPass(options.variantClass.enabled, computeVariantClassPruning);
-  runPass(options.tagExclusive.enabled, computeTagExclusivePruning);
-  runPass(options.variantFold.enabled, computeVariantFoldPruning);
-  runPass(options.satellite.enabled, computeClosedIslandPruning);
+  runPass(options.variantClass.enabled, "variant class", computeVariantClassPruning);
+  runPass(options.tagExclusive.enabled, "tag exclusive", computeTagExclusivePruning);
+  runPass(options.variantFold.enabled, "variant fold", computeVariantFoldPruning);
+  runPass(options.satellite.enabled, "closed island", computeClosedIslandPruning);
   return result;
 }
 
