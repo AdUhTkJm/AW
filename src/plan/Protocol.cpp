@@ -301,6 +301,13 @@ PlanResponse runPlan(const PlanRequest &request) noexcept {
       use.inputHandles.push_back_unchecked(CraftingGraph::itemHandle(sub.itemOrigin[inputs[k]]));
       use.inputAmounts.push_back_unchecked(amounts[k]);
     }
+
+    // The recipe's machines, translated straight from source item ids: the
+    // subgraph keeps them in that space on purpose, so no remap is needed.
+    const auto stations = sub.workstationsOf(r);
+    use.workstationHandles.reserve(stations.size());
+    for (ItemId station : stations)
+      use.workstationHandles.push_back_unchecked(CraftingGraph::itemHandle(station));
     response.uses.push_back(std::move(use));
   }
   return response;
@@ -339,6 +346,15 @@ aw::vector<std::byte> encodePlanResponse(const PlanResponse &response) noexcept 
       writeVarUInt(out, use.inputHandles[k] - previous);
       previous = use.inputHandles[k];
       writeVarUInt(out, (uint64_t) use.inputAmounts[k]);
+    }
+
+    // Workstations, ascending deltas with no amount, so this is the same
+    // shape as the request's own workstation list.
+    writeVarUInt(out, (uint64_t) use.workstationHandles.size());
+    uint32_t previousStation = 0;
+    for (size_t k = 0; k < use.workstationHandles.size(); k++) {
+      writeVarUInt(out, use.workstationHandles[k] - previousStation);
+      previousStation = use.workstationHandles[k];
     }
   }
   return out;

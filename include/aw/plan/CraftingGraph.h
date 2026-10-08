@@ -310,6 +310,26 @@ struct Subgraph {
   // graph recipe id -> source recipe id, ascending.
   aw::vector<RecipeId> recipeOrigin;
 
+  // Recipe -> its workstations, CSR over subgraph recipes. The targets are
+  // *source* item ids, exactly like `itemOrigin`'s entries, so a caller can
+  // name them as resource handles without translating anything.
+  //
+  // `BaseCraftingGraph::workstations` is deliberately not reused for this: a
+  // Subgraph clears it (see `repruneSubgraph`), and its targets would be
+  // subgraph-local item ids anyway, which is the wrong space for a plan
+  // response. This exists because the plan itself does not name a recipe, so
+  // a caller that wants to execute a step needs the machines the step is
+  // allowed to run on, and that is the whole of what the recipe contributes
+  // to execution.
+  aw::vector<uint> workstationOffsets;   // nRecipe + 1
+  aw::vector<ItemId> workstationTargets; // source item ids
+
+  [[nodiscard]]
+  std::span<const ItemId> workstationsOf(uint recipe) const noexcept {
+    return {workstationTargets.data() + workstationOffsets[recipe],
+            workstationOffsets[recipe + 1] - workstationOffsets[recipe]};
+  }
+
   // The flash probe's answer, when `reachableSubgraph` found one: a greedy
   // plan for exactly this subgraph, one count per recipe, in `PlanResult::exec`
   // form. `planCrafting` hands it back instead of deriving a plan of its own.

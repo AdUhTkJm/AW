@@ -92,6 +92,16 @@ struct PlanRecipeUse {
   // Inputs, ascending handles, parallel to `inputAmounts`.
   aw::vector<Handle> inputHandles;
   aw::vector<Amount> inputAmounts;
+  // Workstations the recipe may be executed on, ascending handles. Empty when
+  // the recipe needs no machine at all, which is the case for the synthetic
+  // tag edges a query-time inliner makes.
+  //
+  // This is the whole of how the response names a recipe: the plan deliberately
+  // does not carry a recipe id (see the header comment on Protocol.h), so a
+  // caller that wants to run a step has to go on the resources it consumes and
+  // produces plus this set of machines. That is exactly what executing a step
+  // needs -- pick one of these, feed it the inputs, take the outputs.
+  aw::vector<Handle> workstationHandles;
   // Number of times the recipe is executed. Always >= 1: zero-use recipes are
   // left out of the response.
   Amount count = 0;

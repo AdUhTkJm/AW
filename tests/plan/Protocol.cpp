@@ -152,6 +152,7 @@ struct DecodedUse {
   aw::vector<aw::Amount> byproductAmounts;
   aw::vector<aw::Handle> inputs;
   aw::vector<aw::Amount> inputAmounts;
+  aw::vector<aw::Handle> workstations;
 };
 
 struct DecodedResponse {
@@ -193,6 +194,12 @@ DecodedResponse decodePlanResponse(const aw::vector<std::byte>& blob) {
       use.inputs.push_back(handle);
       use.inputAmounts.push_back((aw::Amount) in.var());
     }
+    const std::uint64_t stations = in.var();
+    std::uint32_t station = 0;
+    for (std::uint64_t k = 0; k < stations && in.ok; k++) {
+      station += (std::uint32_t) in.var();
+      use.workstations.push_back(station);
+    }
     out.uses.push_back(std::move(use));
   }
   out.ok = in.ok && in.pos == blob.size();
@@ -228,12 +235,16 @@ AW_TEST(testPlanProtocol) {
     expect(decoded.uses[0].inputs.size() == 1 && decoded.uses[0].inputs[0] == 2 &&
                decoded.uses[0].inputAmounts[0] == 1,
            "r0 consumes item 2");
+    expect(decoded.uses[0].workstations.size() == 1 && decoded.uses[0].workstations[0] == 1,
+           "r0 names its machine");
     expect(decoded.uses[1].count == 4 && decoded.uses[1].output == 2 &&
                decoded.uses[1].outputAmount == 2,
            "r1 produces item 2 four times");
     expect(decoded.uses[1].inputs.size() == 1 && decoded.uses[1].inputs[0] == 1 &&
                decoded.uses[1].inputAmounts[0] == 1,
            "r1 consumes item 1");
+    expect(decoded.uses[1].workstations.size() == 1 && decoded.uses[1].workstations[0] == 2,
+           "r1 names its machine");
   }
 
   // 100 spare item 2 units cover the cycle losses, so r0 alone suffices.

@@ -127,12 +127,26 @@ varint       nUses
   varint     nInputs
     varint   inputHandleDelta    ascending
     varlong  inputAmount         units consumed per execution
+  varint     nWorkstations
+    varint   workstationDelta    ascending
 ```
 
 Only recipes the plan actually executes appear: the solver returns one value per
 subgraph recipe and most are zero. Entries come in subgraph recipe order.
 `byproductHandleDelta` is relative to the previous byproduct, exactly like the
-input list; the anchor is never repeated in it.
+input list; the anchor is never repeated in it. `workstationDelta` is relative
+to the previous workstation and the first delta is absolute, exactly like the
+request's own workstation list; a recipe that needs no machine -- a synthetic
+tag edge -- writes a count of zero.
+
+The response deliberately carries **no recipe id**. Registration-time
+canonicalization renumbers recipes and query-time tag inlining synthesizes ones
+that never had a blob counterpart, so there is no stable recipe index to name.
+What a caller that wants to execute a step needs is instead the resources it
+consumes and produces plus the machines it may run on, and `nWorkstations` is
+the last of those: it is the recipe's own workstation set, in the same handle
+space as the item lists, and the planner has no further use for it after the
+reachability walk that filtered by the caller's station set.
 `provenOptimal` is false when the solver stopped on its gap or time budget rather
 than proving optimality; the plan is still a real plan, just not certified
 cheapest. It is also false for `cycle unfulfilled`.

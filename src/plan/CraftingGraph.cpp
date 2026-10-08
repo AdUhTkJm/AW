@@ -1389,6 +1389,21 @@ Subgraph assembleSubgraph(const aw::vector<uint8_t> &itemSeen,
   for (uint i = 0; i < subRecipes; i++)
     result.recipeOrigin[i] = built[i].origin;
 
+  // Recipe -> workstations, in source item ids. Ascending and duplicate-free
+  // by construction: `canonicalizeRecipes` sorts and de-duplicates each row
+  // when it rebuilds them, and every rewrite of the recipe list copies a row
+  // verbatim. The plan response depends on that order to delta-code the list.
+  result.workstationOffsets.assign(subRecipes + 1, 0);
+  for (uint i = 0; i < subRecipes; i++)
+    result.workstationOffsets[i + 1] =
+        result.workstationOffsets[i] + (uint) built[i].ws.size();
+  result.workstationTargets.resize(result.workstationOffsets.back());
+  for (uint i = 0; i < subRecipes; i++) {
+    uint slot = result.workstationOffsets[i];
+    for (ItemId station : built[i].ws)
+      result.workstationTargets[slot++] = station;
+  }
+
   BaseCraftingGraph &sub = result.graph;
   sub.nReal = subreal;
   sub.nItem = subItems;
