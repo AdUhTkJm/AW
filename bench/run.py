@@ -32,6 +32,23 @@ AE2VM is split in two on purpose: its warm path replays a memoized plan and can
 return a DIFFERENT ANSWER than the cold path (see bench/README.md section 7.3).
 Its warm and cold rows are not two timings of one result.
 
+Resuming an interrupted cell
+----------------------------
+`--resume` restarts a sweep that was cut short (Ctrl-C, a crash, a reboot) and
+pays only for the points that are still missing. Each AW child is handed the
+canonical cell file as its inventory of completed points, skips exactly those,
+and writes the rest into a fresh file that is then appended to the canonical
+one. The header and registration rows of the original run are carried over, so
+`pre_ms` keeps the value that was actually measured; a cell whose file already
+holds every point exits before registration, which is the expensive half of an
+AW cell. Settings that differ from the ones the existing rows were produced
+with (time limit, workers, gap, stages, ...) are reported on stderr rather than
+silently mixed in. AW configs only: the Java baselines have no such support.
+
+```
+python3 bench/run.py --datasets recipes-nast --configs aw-optimal --resume
+```
+
 Each dataset/config pair is one child process, so a crash or a hang only loses
 that cell. Everything is logged to `bench/results/<dataset>.<config>.log`.
 
@@ -54,6 +71,9 @@ Typical use
 
   # refresh the preprocessing half of one cell without re-running its queries
   python3 bench/run.py --datasets recipes-atm --configs tb-v2 --preprocess-only
+
+  # pick up where an interrupted sweep stopped, instead of starting it over
+  python3 bench/run.py --datasets recipes-nast --configs aw-optimal --resume
 
 Then `python3 bench/summarize.py`.
 """
@@ -199,6 +219,132 @@ def merge_stage_output(out_path, fresh_path, stages):
     os.remove(fresh_path)
 
 
+def read_jsonl(path):
+    """Parse a JSONL file, dropping the lines that do not parse.
+
+    The file a resume reads may end in a torn line when the process that wrote it
+    was killed mid-write, and that must not abort the merge.
+    """
+    rows = []
+    with open(path, encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as error:
+                print("[warn] %s:%d is not valid JSON (%s); dropped" % (path, number, error),
+                      flush=True)
+    return rows
+
+
+def row_key(row):
+    """The point a query row measures: (stage, target, amount, stock, repeat).
+
+    Returns None for a row that does not carry all five, which is how every
+    non-AW row looks; those are never deduplicated.
+    """
+    parts = tuple(row.get(field) for field in
+                  ("stage", "target", "amount", "stock", "repeat"))
+    return parts if all(part is not None for part in parts) else None
+
+
+def discard(paths):
+    """Remove a merge's staging files; a missing one is fine.
+
+    A staging file is left behind when a merge is interrupted between the child
+    exiting and the merge starting, and the next resume reads it again.
+    """
+    for path in paths:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def merge_resume_output(out_path, fresh_paths):
+    """Append the rows of a resumed run to the canonical cell file.
+
+    `fresh_paths` are the files the children just wrote (one per shard, and some
+    may not exist at all). A resumed child skips every point the canonical file
+    already holds and copies its header and registration rows, so the two row sets
+    are disjoint and this is a plain concatenation: the old query rows first, then
+    the fresh ones. A child whose cell is already complete writes nothing, which is
+    not an error.
+    """
+    old, old_header, old_registration = [], None, None
+    if os.path.exists(out_path):
+        for row in read_jsonl(out_path):
+            kind = row.get("type")
+            if kind == "config":
+                old_header = row
+            elif kind == "registration":
+                old_registration = row
+            else:
+                old.append(row)
+
+    fresh, fresh_header, fresh_registration = [], None, None
+    for path in fresh_paths:
+        if not os.path.exists(path):
+            continue
+        for row in read_jsonl(path):
+            kind = row.get("type")
+            if kind == "config":
+                if fresh_header is None:
+                    fresh_header = row
+            elif kind == "registration":
+                if fresh_registration is None:
+                    fresh_registration = row
+            else:
+                fresh.append(row)
+
+    # One row per point is what makes a resumed file readable by the summarizer and
+    # resumable again. A leftover process from the run being resumed can still write
+    # into the canonical file after the child read it, so the invariant is checked
+    # rather than assumed; the older measurement wins, as it would have without a
+    # resume at all.
+    seen = set(key for key in map(row_key, old) if key is not None)
+    kept = []
+    for row in fresh:
+        key = row_key(row)
+        if key is not None and key in seen:
+            print("[warn] %s already holds %s; the fresh duplicate is dropped"
+                  % (out_path, key), flush=True)
+            continue
+        if key is not None:
+            seen.add(key)
+        kept.append(row)
+    fresh = kept
+
+    if not fresh:
+        print("[skip] %s already holds every point of this cell" % out_path, flush=True)
+        discard(fresh_paths)
+        return
+
+    header = fresh_header if fresh_header is not None else old_header
+    registration = (fresh_registration if fresh_registration is not None else old_registration)
+    # Keep the header's stage list describing the file, not the subset this invocation
+    # happened to extend: a resumed `--stages tag` must not relabel a file that still
+    # carries the other seven stages.
+    if header is not None and "stages" in header:
+        present = set(row.get("stage") for row in old + fresh if row.get("stage"))
+        header = dict(header)
+        header["stages"] = ",".join([stage for stage in AW_STAGES if stage in present]
+                                     + sorted(present - set(AW_STAGES)))
+
+    ordered = ([header] if header is not None else [])
+    if registration is not None:
+        ordered.append(registration)
+    ordered += old
+    ordered += fresh
+
+    tmp_path = out_path + ".merge.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        for row in ordered:
+            handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+    os.replace(tmp_path, out_path)
+    discard(fresh_paths)
+
+
 def merge_preprocess_output(out_path, fresh_path):
     """Replace the header rows of `out_path` with the fresh ones, keeping every query row.
 
@@ -324,13 +470,20 @@ def combine_shard_output(paths, out_path):
         os.remove(path)
 
 
-def build_aw_command(args, dataset, awr, plan_prefix, config, names, out_path, stages):
+def build_aw_command(args, cell, stages):
+    """The `aw_bench` command for one cell.
+
+    `cell` is one entry of the job list built below: the dataset, the config, the
+    resolved input paths, the file this child writes (`target`) and the canonical
+    `<dataset>.<config>.jsonl` it belongs to (`out`).
+    """
+    config = cell["config"]
     plan = AW_CONFIG_PLAN[config]
     specs = plan["stages"] if plan["stages"] is not None else stages
     command = [
         os.path.join(ROOT, "build", "aw_bench"),
-        "--dataset", dataset, "--awr", awr, "--plan", plan_prefix,
-        "--config", config, "--out", out_path, "--names", names,
+        "--dataset", cell["dataset"], "--awr", cell["awr"], "--plan", cell["plan_prefix"],
+        "--config", config, "--out", cell["target"], "--names", cell["names"],
         "--nonoptimal", "1" if plan["nonoptimal"] else "0",
         "--warmup", "0", "--repeats", args.repeats,
         "--time-limit", args.time_limit,
@@ -347,19 +500,24 @@ def build_aw_command(args, dataset, awr, plan_prefix, config, names, out_path, s
         command += ["--trace-attempts"]
     if args.preprocess_only:
         command += ["--preprocess-only"]
+    if args.resume:
+        # The canonical cell file is the inventory of completed points; the child
+        # appends only what is missing to its own `--out`.
+        command += ["--resume", "1", "--resume-from", cell["out"]]
     return command
 
 
-def build_baseline_command(args, dataset, awr, plan_prefix, config, names, out_path):
+def build_baseline_command(args, cell):
     """The historical command for the two non-AW engine families."""
+    config = cell["config"]
     repo = os.path.join(ROOT, "compare",
                         "thunderboltcore" if config.startswith("tb-") else "ae2vm")
     warmup = "0" if config == "ae2vm-cold" else args.warmup
     common_limit_ms = str(int(float(args.time_limit) * 1000))
     bound_ms = (common_limit_ms if args.tb_deadline_ms == "same"
                 else str(int(float(args.tb_deadline_ms))))
-    child = ["--dataset", dataset, "--awr", awr, "--plan", plan_prefix,
-             "--config", config, "--out", out_path, "--names", names,
+    child = ["--dataset", cell["dataset"], "--awr", cell["awr"], "--plan", cell["plan_prefix"],
+             "--config", config, "--out", cell["target"], "--names", cell["names"],
              "--warmup", warmup, "--repeats", args.repeats,
              "--deadline-ms", common_limit_ms]
     if config == "tb-cpsat":
@@ -430,6 +588,12 @@ def main():
                              "--other-targets this is the mixed adversarial/typical panel")
     parser.add_argument("--other-targets", default="0",
                         help="draw this many targets from outside the largest SCC")
+    parser.add_argument("--resume", action="store_true",
+                        help="restart an interrupted sweep: skip the query points already "
+                             "recorded in each cell's JSONL, keep its header and "
+                             "registration row, and append only what is missing. AW configs "
+                             "only. A cell whose file is already complete is left untouched "
+                             "instead of paying for its registration again.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -452,6 +616,13 @@ def main():
         raise SystemExit("--jobs must be >= 1")
     if args.preprocess_only and args.shards > 1:
         raise SystemExit("--preprocess-only cannot be combined with --shards > 1")
+    if args.resume:
+        unsupported = sorted(configs - set(AW_CONFIG_PLAN))
+        if unsupported:
+            raise SystemExit("--resume is only implemented for the AW configs (%s), not %s"
+                             % (", ".join(sorted(AW_CONFIG_PLAN)), ", ".join(unsupported)))
+        if args.preprocess_only:
+            raise SystemExit("--resume cannot be combined with --preprocess-only")
 
     os.makedirs(rooted(args.out_dir), exist_ok=True)
     os.makedirs(rooted(args.plan_dir), exist_ok=True)
@@ -486,22 +657,23 @@ def main():
                     target = out + ".preprocess"
                 elif single:
                     log = out + ".log"
-                    if config in AW_CONFIG_PLAN and AW_CONFIG_PLAN[config]["by_stage"]:
+                    # A resumed or per-stage run must not truncate the canonical file
+                    # before it has read what is already in it.
+                    if args.resume or (config in AW_CONFIG_PLAN
+                                       and AW_CONFIG_PLAN[config]["by_stage"]):
                         target = out + ".fresh"
                     else:
                         target = out
                 else:
                     log = out + ".shard%d.log" % k
                     target = out + ".shard%d.fresh" % k
-                if config in AW_CONFIG_PLAN:
-                    command = build_aw_command(args, dataset, awr, plan_prefix, config,
-                                               names, target, stages)
-                else:
-                    command = build_baseline_command(args, dataset, awr, plan_prefix,
-                                                     config, names, target)
-                jobs.append(dict(dataset=dataset, config=config, shard=k,
-                                 name="%s/%s#%d" % (dataset, config, k),
-                                 command=command, log=log, target=target, out=out))
+                cell = dict(dataset=dataset, config=config, awr=awr, names=names,
+                            plan_prefix=plan_prefix, target=target, out=out, shard=k,
+                            name="%s/%s#%d" % (dataset, config, k), log=log)
+                cell["command"] = (build_aw_command(args, cell, stages)
+                                   if config in AW_CONFIG_PLAN
+                                   else build_baseline_command(args, cell))
+                jobs.append(cell)
 
     # ---- run ------------------------------------------------------------
     if args.dry_run:
@@ -536,6 +708,8 @@ def main():
         plan = AW_CONFIG_PLAN.get(config)
         if args.preprocess_only:
             merge_preprocess_output(out, group[0]["target"])
+        elif args.resume:
+            merge_resume_output(out, [job["target"] for job in group])
         elif len(group) == 1:
             if plan is not None and plan["by_stage"]:
                 merge_stage_output(out, group[0]["target"], stages)

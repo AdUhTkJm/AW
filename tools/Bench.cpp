@@ -22,6 +22,12 @@
 // then one object per query. `--preprocess-only` stops after the registration row,
 // which is what lets the preprocessing half of an existing file be refreshed
 // without re-running the queries. See bench/README.md.
+//
+// `--resume` restarts an interrupted sweep: the points already present in the file
+// named by `--resume-from` are skipped, the header and registration rows are carried
+// over verbatim, and only the missing rows are appended to `--out`. Every query row
+// is flushed as it is written so that whatever a killed process left behind is a
+// complete, resumable prefix.
 
 #include <climits>
 
@@ -37,6 +43,8 @@
 #include <cmath>
 #include <fstream>
 #include <map>
+#include <set>
+#include <tuple>
 
 namespace {
 
@@ -181,6 +189,170 @@ bool splitCommas(const std::string &text, aw::vector<std::string> &out) {
     start = comma + 1;
   }
   return !out.empty();
+}
+
+// ---------------------------------------------------------- resume bookkeeping
+
+// One point of the sweep. Together the five fields identify a point of the
+// (stage x group x target x amount x repeat) product, which is the granularity
+// `--resume` skips at: a query that was interrupted mid-solve is not recorded,
+// and one that completed is never re-measured.
+using QueryKey = std::tuple<std::string, long long, long long, std::string, long long>;
+
+// The value text of the top-level `"key":` field of one JSONL row, exactly as
+// written. The rows this tool emits are flat objects with unique keys, and a
+// value that contains a colon (`["name",1]` inside `missing`) is never of the
+// form `"key":`, so a substring search is a correct reader and much cheaper
+// than a JSON parse for a file that can hold thousands of rows.
+bool jsonValue(const std::string &line, const std::string &key, std::string &out) {
+  const std::string needle = "\"" + key + "\":";
+  const size_t at = line.find(needle);
+  if (at == std::string::npos) return false;
+  size_t start = at + needle.size();
+  if (start >= line.size()) return false;
+  if (line[start] == '"') {
+    std::string text;
+    for (size_t i = start + 1; i < line.size(); i++) {
+      if (line[i] == '\\' && i + 1 < line.size()) {
+        text += line[i + 1];
+        i++;
+        continue;
+      }
+      if (line[i] == '"') break;
+      text += line[i];
+    }
+    out = std::move(text);
+    return true;
+  }
+  size_t end = start;
+  while (end < line.size() && line[end] != ',' && line[end] != '}') end++;
+  out = line.substr(start, end - start);
+  return true;
+}
+
+// Top-level `key -> raw value text` view of one row. Nested values are returned
+// whole, brackets included, which is all the header comparison below needs.
+std::map<std::string, std::string> jsonFields(const std::string &line) {
+  std::map<std::string, std::string> fields;
+  size_t i = 0;
+  while (i < line.size()) {
+    const size_t keyStart = line.find('"', i);
+    if (keyStart == std::string::npos) break;
+    const size_t keyEnd = line.find('"', keyStart + 1);
+    if (keyEnd == std::string::npos) break;
+    const std::string key = line.substr(keyStart + 1, keyEnd - keyStart - 1);
+    size_t valueStart = keyEnd + 1;
+    if (valueStart >= line.size() || line[valueStart] != ':') {
+      i = keyEnd + 1;
+      continue;
+    }
+    valueStart++;
+    size_t end = valueStart;
+    if (valueStart < line.size() && (line[valueStart] == '[' || line[valueStart] == '{')) {
+      const char open = line[valueStart];
+      const char close = open == '[' ? ']' : '}';
+      bool inString = false;
+      int depth = 0;
+      for (; end < line.size(); end++) {
+        const char c = line[end];
+        if (inString) {
+          if (c == '\\') end++;
+          else if (c == '"') inString = false;
+          continue;
+        }
+        if (c == '"') inString = true;
+        else if (c == open) depth++;
+        else if (c == close && --depth == 0) { end++; break; }
+      }
+    } else if (valueStart < line.size() && line[valueStart] == '"') {
+      for (end = valueStart + 1; end < line.size() && line[end] != '"'; end++)
+        if (line[end] == '\\') end++;
+      if (end < line.size()) end++;
+    } else {
+      while (end < line.size() && line[end] != ',' && line[end] != '}') end++;
+    }
+    fields[key] = line.substr(valueStart, end - valueStart);
+    i = end;
+  }
+  return fields;
+}
+
+// What a file already holds: the header and registration rows to carry over, and
+// the set of completed points to skip.
+struct ResumeState {
+  bool haveHeader = false;
+  bool haveRegistration = false;
+  std::string header;
+  std::string registration;
+  std::set<QueryKey> done;
+};
+
+// Read `path` as a previous output of this tool. A torn last line (a hard kill
+// mid-write) simply fails its `type` lookup and is ignored, which is the point of
+// matching on `type` rather than trusting every line to parse.
+bool loadResume(const std::string &path, ResumeState &state) {
+  std::ifstream in(path);
+  if (!in) return false;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.empty()) continue;
+    std::string type;
+    if (!jsonValue(line, "type", type)) continue;
+    if (type == "config") {
+      state.header = line;
+      state.haveHeader = true;
+    } else if (type == "registration") {
+      state.registration = line;
+      state.haveRegistration = true;
+    } else if (type == "query") {
+      std::string stage, stock, target, amount, repeat;
+      if (!jsonValue(line, "stage", stage) || !jsonValue(line, "target", target) ||
+          !jsonValue(line, "amount", amount) || !jsonValue(line, "stock", stock) ||
+          !jsonValue(line, "repeat", repeat)) {
+        continue;
+      }
+      long long targetValue = 0, amountValue = 0, repeatValue = 0;
+      if (!parseI64(target, targetValue) || !parseI64(amount, amountValue) ||
+          !parseI64(repeat, repeatValue)) {
+        continue;
+      }
+      state.done.insert({stage, targetValue, amountValue, stock, repeatValue});
+    }
+  }
+  return true;
+}
+
+// Are two raw JSON values the same setting? They are compared numerically when
+// both parse as numbers, because the Python-side merges of this repo re-serialize
+// rows and turn `2.000000` into `2.0`, which is the same setting spelled shorter.
+bool sameValue(const std::string &left, const std::string &right) {
+  if (left == right) return true;
+  double leftNumber = 0.0, rightNumber = 0.0;
+  if (parseDouble(left, leftNumber) && parseDouble(right, rightNumber))
+    return leftNumber == rightNumber;
+  return false;
+}
+
+// Report the header settings that changed since the file being resumed was
+// started. Every row already in the file was measured under the old values, so a
+// difference means the resumed sweep mixes two regimes. The parse timing is
+// excluded: it is a measurement, not a setting, and it changes every run.
+void warnHeaderDrift(const std::string &oldLine, const std::string &newLine) {
+  const std::map<std::string, std::string> oldFields = jsonFields(oldLine);
+  const std::map<std::string, std::string> newFields = jsonFields(newLine);
+  std::string drift;
+  for (const auto &entry : newFields) {
+    if (entry.first == "parse_ms") continue;
+    const auto it = oldFields.find(entry.first);
+    if (it == oldFields.end() || sameValue(it->second, entry.second)) continue;
+    if (!drift.empty()) drift += ", ";
+    drift += entry.first + " " + it->second + " -> " + entry.second;
+  }
+  if (!drift.empty()) {
+    std::fprintf(stderr, "resume: settings differ from the rows already in the file: %s\n",
+                 drift.c_str());
+  }
 }
 
 // ---------------------------------------------------------------------- stages
@@ -366,12 +538,18 @@ void usage() {
                "                [--pack-seconds 60] [--satellite-seconds 2] [--variant-seconds 0.05]\n"
                "                [--tag-exclusive-seconds 0.05]\n"
                "                [--names <path>] [--quiet] [--preprocess-only]\n"
-               "                [--trace-attempts]\n"
+               "                [--trace-attempts] [--resume 0|1] [--resume-from <jsonl>]\n"
                "                [--ws-percent 0..100] [--ws-seed <n>]\n"
                "\n"
                "--preprocess-only registers the graph and writes the config header and the\n"
                "registration row, then exits without running a single query. Use it to refresh\n"
                "the preprocessing half of an existing JSONL without paying for plan_ms again.\n"
+               "\n"
+               "--resume skips every point already recorded in --resume-from (default: --out)\n"
+               "and appends only the missing ones to --out. The header and registration rows are\n"
+               "copied from that file, so the original preprocessing measurement survives; a\n"
+               "file that is already complete exits before registration. Pass a fresh --out in\n"
+               "a different file than --resume-from to keep the old rows intact.\n"
                "\n"
                "--ws-percent samples that percentage of the non-vanilla workstation pool; every\n"
                "`minecraft:` station stays on, so the total slightly exceeds the percentage.\n"
@@ -416,6 +594,10 @@ int main(int argc, char **argv) {
   // Emit the per-attempt objective-cap trajectory on every query row. Off by
   // default: it is small but not free, and only the ablation needs it.
   bool traceAttempts = false;
+  // Restart an interrupted sweep: skip the points already recorded in
+  // `resumeFrom` and append only what is missing to `out`.
+  bool resume = false;
+  std::string resumeFrom;
   bool sampleWorkstations = false;
   aw::TagInlineMode inlineMode = aw::TagInlineMode::OFF;
   bool singleMemberInline = true;
@@ -531,12 +713,28 @@ int main(int argc, char **argv) {
     else if (arg == "--quiet") quiet = true;
     else if (arg == "--preprocess-only") preprocessOnly = true;
     else if (arg == "--trace-attempts") traceAttempts = true;
+    else if (arg == "--resume") {
+      std::string value; next(value);
+      resume = value != "0";
+    } else if (arg == "--resume-from") next(resumeFrom);
     else if (arg == "-h" || arg == "--help") { usage(); return EXIT_SUCCESS; }
     else { std::fprintf(stderr, "unknown argument: %s\n", arg.c_str()); usage(); return EXIT_FAILURE; }
   }
 
   if (dataset.empty() || awrPath.empty() || planPrefix.empty() || config.empty() || outPath.empty()) {
     usage();
+    return EXIT_FAILURE;
+  }
+  if (!resumeFrom.empty() && !resume) {
+    std::fprintf(stderr, "--resume-from needs --resume 1\n");
+    return EXIT_FAILURE;
+  }
+  if (resumeFrom.empty()) resumeFrom = outPath;
+  // Both paths are the same file, so the rows are appended in place and the
+  // header and registration rows already in it must not be written twice.
+  const bool appendInPlace = resume && resumeFrom == outPath;
+  if (resume && preprocessOnly) {
+    std::fprintf(stderr, "--resume does not apply to --preprocess-only\n");
     return EXIT_FAILURE;
   }
 
@@ -630,6 +828,42 @@ int main(int argc, char **argv) {
     }
   }
 
+  // ---- resume inventory -------------------------------------------------
+  // Reading the completed points is graph-independent, so it happens before the
+  // .awr is parsed. That is what lets an already-complete file bail out before
+  // registration, which is the expensive half of an AW cell.
+  ResumeState resumeState;
+  if (resume) {
+    const bool readable = loadResume(resumeFrom, resumeState);
+    if (!readable && !quiet)
+      std::fprintf(stderr, "resume: %s does not exist yet; running the full sweep\n",
+                   resumeFrom.c_str());
+    else if (readable && !quiet)
+      std::fprintf(stderr, "resume: %s holds %zu completed points\n", resumeFrom.c_str(),
+                   resumeState.done.size());
+  }
+  if (resume && resumeState.haveHeader && resumeState.haveRegistration) {
+    size_t expected = 0, remaining = 0;
+    for (const auto &stageEntry : stages)
+      for (const std::string &group : groups)
+        for (const Target &target : targets)
+          for (aw::Amount amount : target.amounts)
+            for (int repeat = 0; repeat < repeats; repeat++) {
+              expected++;
+              if (resumeState.done.count({stageEntry.second, (long long) target.handle,
+                                          (long long) amount, group, repeat}) == 0)
+                remaining++;
+            }
+    if (remaining == 0) {
+      std::printf("resume: all %zu points are already in %s; nothing to do\n", expected,
+                  resumeFrom.c_str());
+      return EXIT_SUCCESS;
+    }
+    if (!quiet)
+      std::fprintf(stderr, "resume: %zu of %zu points done, %zu to run\n",
+                   expected - remaining, expected, remaining);
+  }
+
   // ---- graph ------------------------------------------------------------
   std::ifstream in(awrPath, std::ios::binary);
   if (!in) {
@@ -688,13 +922,18 @@ int main(int argc, char **argv) {
   // installed once here and every stage/group query below sees it.
   aw::options.reprune.enabled = reprune;
   aw::options.reprune.exact = repruneExact;
-  std::ofstream out(outPath);
+  // In-place resume appends to the file it is reading, so nothing that is already
+  // in it may be written a second time.
+  std::ofstream out(outPath, appendInPlace ? (std::ios::out | std::ios::app) : std::ios::out);
   if (!out) {
     std::fprintf(stderr, "cannot write %s\n", outPath.c_str());
     return EXIT_FAILURE;
   }
 
-  // Config header, so a JSONL file is self-describing.
+  // Config header, so a JSONL file is self-describing. A resumed run keeps the
+  // header of the file it continues: the settings and the preprocessing measurement
+  // describe the run that produced the rows around them. Settings that changed are
+  // reported, because the old rows were measured under the old ones.
   {
     Json json;
     json.str("type", "config")
@@ -745,7 +984,14 @@ int main(int argc, char **argv) {
       groupNames += groups[k];
     }
     json.str("groups", groupNames);
-    out << json.text() << "\n";
+    const std::string fresh = json.text();
+    if (resume && resumeState.haveHeader) {
+      warnHeaderDrift(resumeState.header, fresh);
+      if (!appendInPlace) out << resumeState.header << "\n";
+    } else {
+      out << fresh << "\n";
+    }
+    out.flush();
   }
 
   // Registration row: the preprocessing half of the measurement, plus the
@@ -786,7 +1032,14 @@ int main(int argc, char **argv) {
         .num("substituted", (long long) substituted)
         .num("pack_dominated", (long long) packDominated)
         .num("items_multi_recipe", (long long) multiRecipe);
-    out << json.text() << "\n";
+    // The registration row of the resumed file is the one that was actually paid
+    // for, so it is carried over rather than re-measured into the new rows.
+    if (resume && resumeState.haveRegistration) {
+      if (!appendInPlace) out << resumeState.registration << "\n";
+    } else {
+      out << json.text() << "\n";
+    }
+    out.flush();
     if (!quiet) {
       std::printf("registration: %.1f ms  items=%u recipes=%u tag=%zu dominated(tag/recipe/direct/subs/pack)=%zu/%zu/%zu/%zu/%zu\n",
                   registerMs, graph.nItem, graph.nRecipe, tagEdges, tagDominated,
@@ -817,6 +1070,7 @@ int main(int argc, char **argv) {
 
   const size_t missingCap = 12;
   long long rows = 0;
+  long long resumed = 0;
   long long timeouts = 0;
   long long noAnswerCount = 0;
   long long unprovenCount = 0;
@@ -838,6 +1092,15 @@ int main(int argc, char **argv) {
         for (aw::Amount amount : target.amounts) {
           for (int repeat = 0; repeat < repeats + warmup; repeat++) {
             const bool measured = repeat >= warmup;
+            // Skip a point that the file being resumed already holds. Only measured
+            // rounds are recorded, so only they can be skipped; the warmup pass of a
+            // fresh point still runs, and the skip costs nothing before the solve.
+            if (resume && measured &&
+                resumeState.done.count({stageLabel, (long long) target.handle,
+                                        (long long) amount, group, repeat - warmup}) != 0) {
+              resumed++;
+              continue;
+            }
 
             const auto reachStart = Clock::now();
             const aw::Subgraph sub =
@@ -1011,6 +1274,10 @@ int main(int argc, char **argv) {
             missingJson += "]";
             json.raw("missing", missingJson);
             out << json.text() << "\n";
+            // Flush every row: a Ctrl-C or a kill then leaves a complete prefix of
+            // the sweep, which is exactly what `--resume` picks up. The write is
+            // outside every timed region, so this cannot bias a measurement.
+            out.flush();
           }
         }
       }
@@ -1023,6 +1290,7 @@ int main(int argc, char **argv) {
                 "infeasible=%lld stage(s)=%zu\n",
                 rows, rows - unprovenCount - noAnswerCount - infeasible, unprovenCount,
                 noAnswerCount, timeouts, infeasible, stages.size());
+    if (resume) std::printf("resumed: %lld points skipped as already recorded\n", resumed);
     std::printf("wrote %s\n", outPath.c_str());
   }
   return EXIT_SUCCESS;

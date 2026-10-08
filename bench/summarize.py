@@ -331,8 +331,7 @@ def main():
             "missing": statuses.get("missing", 0),
             "plans": sum(1 for r in items if r.get("has_plan") or r.get("status") in ("ok", "missing")),
             "proven": claims.get("proven", 0),
-            "unproven": claims.get("unproven", 0),
-            "unclaimed": claims.get("unclaimed", 0),
+            "unproven": claims.get("unproven", 0) + claims.get("unclaimed", 0),
             "no_answer": sum(1 for r in items if no_answer_of(r)),
             "timeout": sum(1 for r in items if r.get("timeout")),
             "gap_%s" % tag: aggregate(gaps, mode),
@@ -370,7 +369,7 @@ def main():
 
     render(summary_rows, tag, args.group_inventory)
     print()
-    print("wrote %s.cells.csv, %s.csv, %s.md" % (prefix, prefix, prefix))
+    print("wrote %s.cells.csv, %s.csv" % (prefix, prefix))
     for path, number, error in malformed:
         print("WARNING malformed: %s:%d %s" % (path, number, error), file=sys.stderr)
 
@@ -399,14 +398,14 @@ def render(summary_rows, tag, group_inventory):
             if stock is not None:
                 print()
                 print("  -- inventory: %s --" % stock)
-            print("%-11s %-12s %4s %5s %6s %6s %6s %5s %4s %11s %5s %4s %8s %9s %7s %8s %7s %8s"
-                  % ("config", "stage", "n", "feas", "prov", "unprov", "uncl", "noans", "tout",
+            print("%-11s %-12s %4s %5s %6s %6s %5s %4s %11s %5s %4s %8s %9s %7s %8s %7s %8s"
+                  % ("config", "stage", "n", "feas", "prov", "unprov", "noans", "tout",
                      "opt_agree", "fp", "more", "gap", "cost_rat", "pre_ms", "plan_ms", "items",
                      "recipes"))
             for row in sorted(rows, key=summary_sort_key):
-                print("%-11s %-12s %4d %5d %6d %6d %6d %5d %4d %11s %5d %4d %8s %9s %7s %8s %7s %8s"
+                print("%-11s %-12s %4d %5d %6d %6d %5d %4d %11s %5d %4d %8s %9s %7s %8s %7s %8s"
                       % (row["config"], row["stage"], row["queries"], row["feasible"],
-                         row["proven"], row["unproven"], row["unclaimed"], row["no_answer"],
+                         row["proven"], row["unproven"], row["no_answer"],
                          row["timeout"],
                          "%d/%d" % (row["vs_truth_agree"], row["vs_truth_compared"]),
                          row["false_positive"], row["better"],

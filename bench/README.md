@@ -308,7 +308,8 @@ python3 bench/summarize.py
 ```
 
 Cells are child processes, so an interrupt or a crash only loses that cell; rerun with
-`--datasets X --configs Y` to fill a gap. Progress and the exact command line of every cell
+`--datasets X --configs Y` to fill a gap, or with `--resume` to fill it without paying for
+the points that already ran (§4.4). Progress and the exact command line of every cell
 are in `bench/results/<dataset>.<config>.log`.
 
 Rough cost model for the full run, per dataset: AW is 3 registrations (dominated by the
@@ -355,6 +356,51 @@ python3 bench/run.py --datasets recipes-small --configs tb-cpsat --tb-deadline-m
 # refresh only the preprocessing half of a cell; every query row (and its plan_ms) is kept
 python3 bench/run.py --datasets recipes-atm --configs tb-cpsat --preprocess-only
 ```
+
+### 4.4 Resuming an interrupted cell
+
+A long sweep is usually killed by something outside the harness: an SSH drop, a reboot, a
+Ctrl-C to free the machine. `--resume` picks it up where it stopped instead of starting the
+cell over.
+
+```bash
+# an overnight run died at query ~800 of 1536
+python3 bench/run.py --datasets recipes-nast,recipes-atm --time-limit 40 --warmup 1 --resume
+python3 bench/summarize.py
+```
+
+How it works, and what a resumed file is worth:
+
+* The unit of resume is the **point**: `(stage, target, amount, stock, repeat)`. A point that
+  completed is never re-measured, and a query that was interrupted mid-solve is not recorded
+  at all, so `--resume` re-runs it. There is nothing to clean up by hand: a torn last line
+  left by a hard kill is dropped when the file is read, and the point it belonged to is
+  measured again.
+* The `config` header and the `registration` row of the file being continued are copied
+  into the new one, so `pre_ms`/`register_ms` keep the value that was actually measured and
+  the old `plan_ms` rows stay comparable. The child re-registers in memory (it cannot query
+  without a graph) but does not record the new timing.
+* A cell whose file already holds every point of the requested sweep exits **before**
+  registering, which is the expensive half of an AW cell (the pack pass alone is minutes on
+  `recipes-atm`). Re-running a complete sweep with `--resume` is therefore nearly free.
+* Settings that changed since the file was started are reported on stderr rather than
+  silently mixed in:
+  `resume: settings differ from the rows already in the file: time_limit_s 40.000000 -> 20.000000`.
+  A file that mixes a 40 s and a 20 s cutoff is not a data set, so pass the same flags as
+  the original run. Timings (`parse_ms`) are exempt: they are measurements, not settings.
+* Ordering inside the file is not canonical after a resume (old rows first, then the new
+  ones, in shard order). `summarize.py` does not care, and neither does another resume.
+* Works with `--shards`: each shard reads the same canonical file as its inventory of
+  completed points, so a shard with nothing left to do exits without writing anything.
+* AW configs only. `tb-v2`, `tb-cpsat`, `ae2vm` and `ae2vm-cold` are rejected with a clear
+  message; their harnesses have no equivalent mode. `--resume` cannot be combined with
+  `--preprocess-only` (that mode already keeps every query row and refreshes only the
+  header).
+
+`aw_bench --resume 1 --resume-from <file>` is the same mechanism one level down, for a
+hand-run cell. The default `--resume-from` is `--out`, which appends in place; passing a
+fresh `--out` keeps the old rows untouched until `run.py` merges them, which is what makes
+an interrupted merge recoverable.
 
 ---
 
@@ -487,7 +533,8 @@ without the later prunings AW stops answering rather than answering slowly.
 ## 6. Output files
 
 * `bench/results/<dataset>.<config>.jsonl` — one `config` header, then either one
-  `registration` row (AW) or nothing, then one `query` row per measured query. The header
+  `registration` row (AW) or nothing, then one `query` row per measured query. Exactly one
+  row per point, which is what a resume relies on. The header
   carries `parse_ms`, `preprocess_ms`, `preprocess_scope` (`engine`) and `preprocess_only`;
   a header without `preprocess_scope` predates the split (see §5.2).
 * `bench/results/<dataset>.<config>.log` — the child's stdout/stderr.
