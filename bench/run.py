@@ -507,11 +507,23 @@ def build_aw_command(args, cell, stages):
     return command
 
 
+def baseline_repo(config):
+    """The Gradle project the baseline `config` belongs to.
+
+    Gradle resolves its build from the working directory (or `-p`), not from the
+    path the wrapper was invoked through, so a baseline child must be started in
+    its own repository directory. `run.py` itself lives one level up, and the
+    historical `cwd=ROOT` made every Gradle cell fail with "does not contain a
+    Gradle build".
+    """
+    return os.path.join(ROOT, "compare",
+                        "thunderboltcore" if config.startswith("tb-") else "ae2vm")
+
+
 def build_baseline_command(args, cell):
     """The historical command for the two non-AW engine families."""
     config = cell["config"]
-    repo = os.path.join(ROOT, "compare",
-                        "thunderboltcore" if config.startswith("tb-") else "ae2vm")
+    repo = baseline_repo(config)
     warmup = "0" if config == "ae2vm-cold" else args.warmup
     common_limit_ms = str(int(float(args.time_limit) * 1000))
     bound_ms = (common_limit_ms if args.tb_deadline_ms == "same"
@@ -669,7 +681,12 @@ def main():
                     target = out + ".shard%d.fresh" % k
                 cell = dict(dataset=dataset, config=config, awr=awr, names=names,
                             plan_prefix=plan_prefix, target=target, out=out, shard=k,
-                            name="%s/%s#%d" % (dataset, config, k), log=log)
+                            name="%s/%s#%d" % (dataset, config, k), log=log,
+                            # AW's native tool does not care about the cwd (every input
+                            # is absolute); a Gradle cell does, and only works in its
+                            # own repository. See baseline_repo.
+                            cwd=(ROOT if config in AW_CONFIG_PLAN
+                                 else baseline_repo(config)))
                 cell["command"] = (build_aw_command(args, cell, stages)
                                    if config in AW_CONFIG_PLAN
                                    else build_baseline_command(args, cell))
@@ -678,16 +695,16 @@ def main():
     # ---- run ------------------------------------------------------------
     if args.dry_run:
         for job in jobs:
-            run_logged(job["name"], job["command"], job["log"], ROOT, True)
+            run_logged(job["name"], job["command"], job["log"], job["cwd"], True)
         return 0
 
     if args.jobs <= 1:
         for job in jobs:
-            job["code"] = run_logged(job["name"], job["command"], job["log"], ROOT, False)
+            job["code"] = run_logged(job["name"], job["command"], job["log"], job["cwd"], False)
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
             futures = {pool.submit(run_logged, job["name"], job["command"], job["log"],
-                                   ROOT, False): job for job in jobs}
+                                   job["cwd"], False): job for job in jobs}
             for future in concurrent.futures.as_completed(futures):
                 futures[future]["code"] = future.result()
 
