@@ -1,257 +1,257 @@
 # handle	name	amounts	n_recipes	in_big_scc
-23	16384B Fluid Storage Part	1,100000	1	1
+23	16384B Fluid Storage Part	1,100000	1	0
 64	4096k Storage Block	1,100000	2	0
-225	Advanced Compressing Factory	1,100000	1	0
-243	Advanced Dissolving Factory	1,100000	1	0
-328	Advanced Sawing Factory	1,100000	1	0
-358	Air Essence	1,100000	3	1
-457	Aluminum Sign	1,100000	1	0
-462	Amethyst Bronze Essence	1,100000	2	0
-466	Amethyst Seeds	1,100000	1	1
-510	Ancient Stone Brick Wall	1,100000	2	0
-570	Addon: Apple Tier 4	1,100000	1	0
-622	Attack AOE III Augment	1,100000	1	0
-675	Awakened Supremium Helmet	1,100000	1	1
-681	Awakened Supremium Paxel	1,100000	1	1
-696	Azalea	1,100000	3	1
-697	Azalea Leaves	1,100000	3	1
-718	Bamboo Slab	1,100000	3	1
-790	Basic Item Filter	1,100000	1	0
-851	Turbine Rotor Shaft (Basic)	1,100000	1	0
-949	Black Concrete Waxed Botany Pot	1,100000	1	0
-952	Black Controller	1,100000	1	0
-1068	Blast Upgrade	1,100000	1	0
-1073	Blasting Upgrade	1,100000	3	0
-1093	Blazegold Shovel	1,100000	2	1
-1113	Block Filter	1,100000	1	0
-1135	Salt Block	1,100000	1	1
-1185	Blue External Storage	1,100000	1	0
-1197	Blue Lumen Paint Ball	1,100000	2	1
-1246	Blutonium Ingot	1,100000	4	1
-1247	Bogged Spawn Egg	1,100000	1	1
-1278	Ferricore Bow	1,100000	1	0
-1326	Bricks	1,100000	1	1
-1332	Bronze Axe	1,100000	1	1
-1373	Brown ME Dense Covered Cable	1,100000	2	1
-1402	Brown Kitchen Floor	1,100000	2	0
-1429	Brown Stained Glass Pane	1,100000	6	1
-1446	Brush	1,100000	1	0
-1483	Bumble Bee Chestplate	1,100000	8	1
-1753	Chiseled Black Quartz Slab	1,100000	2	0
-1861	Light Blue Dark Clear Glass	1,100000	2	1
-1960	Cyan Enlightened Clear Glass	1,100000	2	1
-1994	Cyan Enlightened Clear Glass	1,100000	2	1
-2052	Orange Enlightened Clear Glass	1,100000	2	1
-2074	Yellow Enlightened Clear Glass	1,100000	2	1
-2093	Purple Clear Glass	1,100000	2	1
-2141	Lime Clear Glass	1,100000	2	1
-2198	CNC Rolling Mill	1,100000	1	0
-2199	CNC Stamper	1,100000	1	0
-2267	Compass	1,100000	1	1
-2364	Conductive Alloy Essence	1,100000	3	1
-2373	Conduit Facade	1,100000	1	0
-2443	Splitting Conveyor Belt	1,100000	1	0
-2445	Vertical Conveyor Belt	1,100000	1	0
-2448	Cooked Cod	1,100000	1	1
-2501	Copper to Iron Tier Upgrade	1,100000	1	0
-2511	16k ME Energy Storage Component	1,100000	1	1
-2583	Crafter Tier 2	1,100000	1	0
-2677	Crimson Drawer (1x2)	1,100000	1	1
-2735	Copper Crystal	1,100000	1	1
-2774	Crystalline Alloy Nugget	1,100000	3	1
-2789	Crystallized Canola Seeds	1,100000	1	0
-2816	Cut Calcite Brick Stairs	1,100000	2	1
-2917	Cut Veridium Bricks	1,100000	2	1
-2989	Cyan Security Manager	1,100000	1	0
-2992	Cyan ME Smart Cable	1,100000	2	1
-3035	Dark Oak Fence	1,100000	2	1
-3129	Data Teleport Anchor	1,100000	1	0
-3163	Decay Upgrade	1,100000	1	0
-3235	Demonic Leaves	1,100000	2	0
-3325	Dimensional Tank	1,100000	1	0
-3349	Dirty Lead Dust	1,100000	1	1
-3360	Dirty Osmium Dust	1,100000	1	1
-3427	Dragon Heart	1,100000	2	1
-3430	Dragon Star	1,100000	2	1
-3451	Green Drill	1,100000	1	0
-3471	Yellow Drill	1,100000	1	0
-3481	Dropper	1,100000	1	1
-3536	Dye Agglomeratio	1,100000	1	1
-3608	Eclipse Alloy Wrench	1,100000	1	1
-3610	16M ECO Storage Component	1,100000	1	1
-3611	256M ECO Storage Component	1,100000	1	1
-3641	插件：效率T1 	1,100000	1	0
-3671	Elementium Essence	1,100000	2	0
-3689	White Elevator	1,100000	3	0
-3707	Elite Fluid Tank	1,100000	1	1
-3714	Elite Interface	1,100000	1	0
-3737	Elite Washing Factory	1,100000	1	0
-3891	Ender Star	1,100000	1	0
-3956	Addon: Energy Tier 2	1,100000	1	0
-3960	Addon: Energy Tier 6	1,100000	1	0
-4102	Essence Vessel	1,100000	1	1
-4111	Ethetic Quartz Slab	1,100000	2	0
-4112	Ethetic Quartz Stairs	1,100000	2	0
-4124	ME Extended IO Port	1,100000	1	1
-4235	Ex ME Ender Interface	1,100000	1	0
-4304	256M ME Portable Cell	1,100000	4	0
-4446	Fluid Screen Module	1,100000	1	0
-4451	Fluid Pipe	1,100000	1	1
-4452	Fluid Pipe	1,100000	1	0
-4471	Fluid Tank	1,100000	1	0
-4527	Fluix Upgrade	1,100000	1	1
-4567	Flux Adjustment Bookshelf (Tier 2)	1,100000	1	0
-4590	Framed Fluid Drawer (2x2)	1,100000	1	0
-4664	White Dark Fused Quartz	1,100000	2	1
-4665	Yellow Dark Fused Quartz	1,100000	2	1
-4717	Dark Fused Quartz	1,100000	2	1
-4734	Dark Fused Quartz	1,100000	2	1
-4754	Brown Dark Fused Quartz	1,100000	2	1
-4836	Enlightened Fused Quartz	1,100000	2	1
-4870	Enlightened Fused Quartz	1,100000	3	1
-4929	Blue Fused Quartz	1,100000	2	1
-4959	White Fused Quartz	1,100000	2	1
-4964	Blue Fused Quartz	1,100000	2	1
-4967	Gray Fused Quartz	1,100000	2	1
-5061	GM Chicken Feed Cursed	1,100000	1	0
-5079	Gold Gear	1,100000	2	1
-5112	Goo Upgrader T4	1,100000	1	0
-5139	Gray Autocrafting Monitor	1,100000	1	0
-5143	Gray Candle	1,100000	24	1
-5255	Green Importer	1,100000	1	0
-5260	Green Mega Constructor	1,100000	1	0
-5283	Green Table Cloth	1,100000	2	0
-5317	Gunpowder	1,100000	12	1
-5343	Hazmat Gown	1,100000	1	1
-5358	Health Boost II Augment	1,100000	1	0
-5409	Honey Seeds	1,100000	1	1
-5487	Import Card	1,100000	1	0
-5612	Infinity Launcher	1,100000	1	0
-5630	Draconium Infused Obsidian	1,100000	1	0
-5671	Insanium Block	1,100000	2	1
-5721	Iridium Gear	1,100000	2	1
-5729	Iron AIOT	1,100000	1	1
-5747	Iron Furnace	1,100000	2	0
-5761	Iron Pickaxe	1,100000	2	1
-5833	Item Frame	1,100000	2	1
-5891	Jumbo Tank	1,100000	1	0
-5922	Knightmetal Essence	1,100000	2	0
-5951	Lapis Lazuli Axe	1,100000	1	1
-6097	Light Blue ME Glass Cable	1,100000	2	1
-6124	Light Blue Botany Pot	1,100000	1	0
-6148	Light Gray Concrete Botany Pot	1,100000	1	0
-6156	Light Gray Kitchen Counter	1,100000	2	0
-6187	Light Gray Kitchen Floor	1,100000	2	0
-6196	Light Gray Network Receiver	1,100000	1	0
-6256	Lime Bed	1,100000	4	1
-6271	Lime ME Covered Cable	1,100000	2	1
-6288	Lime Elite Disk Interface	1,100000	1	0
-6336	Lime Ultra Destructor	1,100000	1	0
-6575	Maintenance Kit	1,100000	1	0
-6732	ME Chemical Oxidizer	1,100000	1	0
-6747	ME Cosmic Enriching Factory	1,100000	1	0
-6835	ME Infinite Replicating Factory	1,100000	1	0
-6871	ME Supreme Combining Factory	1,100000	1	0
-6943	Mega Autocrafter	1,100000	2	0
-7028	Meteorite Pattern Provider	1,100000	1	0
-7085	Dash Module	1,100000	1	0
-7099	Hydraulic Propulsion Unit	1,100000	1	0
-7160	Bucket of Molten Osmium	1,100000	1	0
-7202	Mud Brick Stairs	1,100000	2	0
-7265	Meatallurgic Mycelial Generator	1,100000	1	0
-7266	Netherstar Mycelial Generator	1,100000	1	0
-7273	Mysterious Cell	1,100000	1	1
-7412	Niard	1,100000	1	0
-7426	Night Vision Augment	1,100000	1	0
-7435	Nitro Crystal Seeds	1,100000	1	1
-7495	Oblivion Singularity	1,100000	1	1
-7563	Orange Concrete Botany Pot	1,100000	1	0
-7594	Orange Fridge	1,100000	2	0
-7636	Orange Ultra Autocrafter	1,100000	1	0
-7724	Overload Device Workbench	1,100000	1	0
-7768	Oxidized Copper Door	1,100000	3	0
-7772	Oxidized Copper Shingles	1,100000	1	0
-7817	Panda Spawn Egg	1,100000	1	1
-7961	Pigment Mixer	1,100000	1	0
-7972	Pink Candle	1,100000	24	1
-7996	Pink Disk Interface	1,100000	1	0
-8097	Platinum Crystal	1,100000	1	1
-8114	Player Interface	1,100000	1	0
-8125	Player Accessor	1,100000	1	0
-8130	Poison Module	1,100000	1	0
-8146	Polished Blackstone Button	1,100000	1	1
-8165	Polished Cut Crimsite Stairs	1,100000	2	1
-8181	Polished Cut Granite Stairs	1,100000	2	1
-8256	Portable 1K-ME Data Flow Storage Cell	1,100000	1	0
-8274	256M Portable Fluid Cell	1,100000	1	0
-8281	16k Portable Item Cell	1,100000	3	0
-8362	Precision Sawmill	1,100000	1	1
-8406	Processor Binding	1,100000	1	1
-8416	Prosperity Seed Base	1,100000	1	1
-8506	Purple Concrete Botany Pot	1,100000	1	0
-8527	Purple Disk Interface	1,100000	1	0
-8619	Quantum Chestplate	1,100000	1	1
-8675	Quantum Storage Component	1,100000	1	1
-8721	Rabbit's Foot	1,100000	6	1
-8726	Radial Chassis	1,100000	1	0
-8742	Rain Sensor	1,100000	1	0
-8783	Raw Advanced Processor	1,100000	1	1
-8803	Raw Eclipse Ember	1,100000	2	0
-8936	Red Mega Exporter	1,100000	1	0
-8944	Red Nether Brick Botany Pot	1,100000	1	0
-8973	Red Terracotta	1,100000	5	1
-9091	Reinforced Obsidian	1,100000	1	0
-9104	Reactor Active Forge Energy Power Tap (Reinforced)	1,100000	1	1
-9111	Turbine Forge Energy Charging Port (Reinforced)	1,100000	1	0
-9211	Rose Bush	1,100000	3	1
-9445	Black Sheetmetal	1,100000	2	0
-9456	Pink Sheetmetal	1,100000	2	0
-9467	Nickel Sheetmetal	1,100000	2	0
-9573	1k Singularity Generator	1,100000	1	1
-9672	Treated Wood Slab	1,100000	2	1
-9683	Slime Essence	1,100000	3	1
-9689	Slot Filter	1,100000	1	0
-9728	Small Dripstone Bricks	1,100000	2	1
-9732	Small Granite Brick Stairs	1,100000	2	1
-9799	Smooth Stone	1,100000	2	1
-9806	Snow	1,100000	1	1
-9820	Solar Panel (Nitro)	1,100000	1	0
-9910	Cobbled Soulstone Slab	1,100000	2	0
-10067	Treated Aluminium Scaffolding Stairs	1,100000	1	0
-10125	Steel Wallmount	1,100000	1	0
-10128	Steeleaf Seeds	1,100000	1	1
-10146	Stick	1,100000	51	1
-10182	Stone Seeds	1,100000	1	1
-10333	Supernova Chemical Tank	1,100000	1	0
-10336	Supernova Fluid Tank	1,100000	1	0
-10350	Supreme Crushing Factory	1,100000	1	0
-10426	Steel Sword	1,100000	1	1
-10482	Tertium Gemstone	1,100000	2	1
-10732	Ultimate Dissolving Factory	1,100000	1	0
-10764	Ultimate Simulation Chamber V1	1,100000	1	1
-10792	Unobtainium - Allthemodium Alloy Ingot	1,100000	1	1
-10805	Unobtainium Leggings	1,100000	1	1
-10818	Unobtainium - Vibranium Alloy Ingot	1,100000	1	1
-10875	Copper to Iron Furnace Upgrade	1,100000	1	0
-11106	Washing Factory	1,100000	1	0
-11121	Waterwheel Segment	1,100000	1	0
-11169	Waxed Weathered Chiseled Copper	1,100000	5	0
-11210	Weeping Vines	1,100000	2	1
-11312	Wind Charge	1,100000	5	1
-11335	Wired Charger	1,100000	1	1
-11454	Yellow Autocrafter	1,100000	1	0
-11506	Yellow Lumen Paint Ball	1,100000	2	1
-11522	Yellow Security Manager	1,100000	1	0
-11523	Yellow Shield Template	1,100000	1	0
-11540	Yellow Ultra Destructor	1,100000	1	0
-11556	Zinc Gear	1,100000	2	1
-11566	Zinc Shard	1,100000	4	1
-11569	Zombie Essence	1,100000	3	1
-11686	Voidflame Fuel	1,100000	4	1
-11704	Builder's Tea	1,100000	4	1
-11707	Unrefined Blaze Ember Fuel	1,100000	3	1
-11713	Verderium	1,100000	3	1
-11733	Blue Banded Bee	1,100000	3	1
-11811	Lumium Bee	1,100000	1	1
-11838	Rancher Bee	1,100000	1	1
-11858	Silver Bee	1,100000	1	1
+234	Advanced Canvas Beehive	1,100000	3	0
+252	Advanced Filter Upgrade	1,100000	2	0
+337	Advanced Thermodynamic Conductor	1,100000	1	0
+358	Air Essence	1,100000	1	0
+370	Melodic Alloy Grinding Ball	1,100000	1	0
+474	Ancient Chiseled Stone Brick Wall	1,100000	3	0
+478	Ancient Cracked Stone Brick Wall	1,100000	3	0
+482	Ancient Door	1,100000	2	0
+542	Andesite Slab	1,100000	4	0
+608	Assembler Matrix Frame	1,100000	1	0
+663	Awakened Draconium Nugget	1,100000	3	1
+741	Banner Pattern	1,100000	1	0
+749	Basalt Essence	1,100000	1	0
+763	Basic Coil	1,100000	1	0
+764	Basic Item Collector	1,100000	1	0
+785	Basic Induction Cell	1,100000	1	0
+851	Turbine Rotor Blade (Basic)	1,100000	1	0
+920	Birch Fence	1,100000	2	1
+925	Birch Planks	1,100000	31	1
+1017	Black Seat	1,100000	2	0
+1021	Black ME Smart Cable	1,100000	1	0
+1148	Blue Autocrafting Monitor	1,100000	1	0
+1153	Blue Candle	1,100000	3	1
+1172	Blue Creative Disk Interface	1,100000	1	0
+1191	Blue Glazed Hopper Botany Pot	1,100000	2	0
+1211	Blue Petrified Honey	1,100000	1	0
+1275	Bow	1,100000	1	0
+1290	Brass Door	1,100000	1	0
+1353	Bronze Sword	1,100000	1	1
+1354	Brown Autocrafter	1,100000	1	0
+1376	Brown Creative Autocrafter	1,100000	1	0
+1417	Brown Paint Ball	1,100000	1	0
+1422	Brown Seat	1,100000	2	0
+1464	Flawless Budding Ember	1,100000	2	0
+1500	Cable Anchor	1,100000	2	0
+1530	Basic Capacitor (Tiny)	1,100000	1	0
+1548	Vibranium Capacitor	1,100000	1	0
+1602	Celestigem Block	1,100000	1	0
+1864	Lime Dark Clear Glass	1,100000	1	0
+1968	Orange Enlightened Clear Glass	1,100000	1	0
+2067	Light Gray Enlightened Clear Glass	1,100000	1	0
+2070	Orange Enlightened Clear Glass	1,100000	1	0
+2101	Blue Clear Glass	1,100000	1	0
+2159	Light Gray Clear Glass	1,100000	1	0
+2181	Clock	1,100000	1	0
+2203	Coal Coke	1,100000	2	1
+2268	Compass	1,100000	1	0
+2327	Compression Card	1,100000	1	0
+2328	Compression Upgrade	1,100000	1	0
+2393	HV Wire Relay	1,100000	1	0
+2497	Copper Tile Slab	1,100000	5	0
+2506	Copper Valve Handle	1,100000	2	0
+2581	Crafter	1,100000	1	0
+2583	Crafter Tier 1	1,100000	1	0
+2586	Crafting Table On A Stick	1,100000	1	0
+2668	Creature Catcher	1,100000	1	0
+2682	Crimson Door	1,100000	3	1
+2760	Crystallized Chorus Slab	1,100000	1	0
+2830	Cut Crimsite Bricks	1,100000	3	1
+2869	Cut Limestone Brick Wall	1,100000	3	0
+2883	Cut Certus Quartz Slab	1,100000	3	1
+2922	Cutting Board	1,100000	1	0
+2932	Cyan Concrete	1,100000	8	1
+2958	Cyan Elite Destructor	1,100000	1	0
+3072	Data Center	1,100000	1	0
+3113	Data Reassembler	1,100000	1	0
+3183	Deepslate Copper Ore	1,100000	1	1
+3186	Deepslate Emerald Ore	1,100000	1	1
+3263	Diamatine Crystal	1,100000	2	0
+3364	Dirty Tin Dust	1,100000	1	1
+3371	Factory Manager Program Disk	1,100000	1	0
+3412	Draconium Chest	1,100000	1	0
+3497	Duroplast Block	1,100000	1	0
+3509	Fluorite Dust	1,100000	3	1
+3538	Dye Base	1,100000	1	1
+3562	Echoing Budding Certus	1,100000	1	0
+3606	Eclipse Alloy Pickaxe	1,100000	2	0
+3663	Electrum Essence	1,100000	1	1
+3665	Electrum Ingot	1,100000	9	1
+3690	White Elevator	1,100000	2	0
+3710	Elite Importer	1,100000	2	0
+3720	Elite Mechanical Pipe	1,100000	1	0
+3766	Empowered Enori Crystal Block	1,100000	1	0
+3814	End Rod	1,100000	1	0
+3821	End Steel Block	1,100000	1	1
+3822	End Steel Essence	1,100000	1	1
+3854	Ender Crystal Axe	1,100000	1	1
+3886	Ender Steel Nugget	1,100000	1	1
+3909	Endshelf	1,100000	1	0
+3930	Energized Bimetal Gear	1,100000	1	0
+3938	Energizer	1,100000	1	0
+3962	Energy Battery	1,100000	1	0
+4131	Quarry Exp Collect Module	1,100000	2	0
+4213	Exposed Copper	1,100000	6	1
+4217	Exposed Copper Shingle Slab	1,100000	5	0
+4344	Ferricore Shovel	1,100000	1	0
+4358	List Filter	1,100000	1	0
+4359	Basic Filter	1,100000	1	0
+4370	Filter Upgrade	1,100000	2	0
+4489	Tiny Fluid Input Hatch	1,100000	1	0
+4528	Fluix Upgrade	1,100000	1	1
+4575	Formulaic Assemblicator	1,100000	1	0
+4716	White Dark Fused Quartz	1,100000	1	0
+4720	Blue Dark Fused Quartz	1,100000	1	0
+4721	Brown Dark Fused Quartz	1,100000	1	0
+4740	Gray Dark Fused Quartz	1,100000	1	0
+4781	Pink Enlightened Fused Quartz	1,100000	1	0
+4817	Red Enlightened Fused Quartz	1,100000	1	0
+4838	Black Enlightened Fused Quartz	1,100000	1	0
+4843	Green Enlightened Fused Quartz	1,100000	1	0
+4902	Lime Fused Quartz	1,100000	1	0
+4903	Magenta Fused Quartz	1,100000	1	0
+4942	Red Fused Quartz	1,100000	1	0
+4955	Magenta Fused Quartz	1,100000	1	0
+4972	Lime Fused Quartz	1,100000	1	0
+4994	Copy Paste Gadget	1,100000	1	0
+5097	Golden Axe	1,100000	2	1
+5140	Gray Autocrafting Monitor	1,100000	1	0
+5202	Gray Ultra Autocrafter	1,100000	1	0
+5233	Green Creative Destructor	1,100000	1	0
+5238	Green Detector	1,100000	1	0
+5241	Green Elite Autocrafter	1,100000	1	0
+5341	Haunted Bell	1,100000	1	0
+5355	Addon: Heal Tier 4	1,100000	1	0
+5381	Industrial Hemp Fiber	1,100000	7	1
+5401	Honey Bucket	1,100000	2	1
+5432	Horn Coral Fan	1,100000	2	0
+5444	Hydroponic Bed	1,100000	1	0
+5566	Infinite Energy Cube	1,100000	1	0
+5571	Infinite Fluid Tank	1,100000	1	0
+5594	Infinite Sawing Factory	1,100000	1	0
+5636	Infusion Crystal	1,100000	1	1
+5671	Insanium Apple	1,100000	1	0
+5686	ME Integrated Interface	1,100000	2	0
+5738	Iron Chest	1,100000	1	0
+5818	Draconic Projectile Gravity Compensation Module	1,100000	1	0
+5945	White Lamp	1,100000	1	0
+5958	Lapis Lazuli Leggings	1,100000	1	1
+5993	Energy Laser Relay	1,100000	1	0
+6049	Lectern	1,100000	1	1
+6060	Lever	1,100000	1	0
+6079	Light Blue Kitchen Connector	1,100000	1	0
+6090	Light Blue Dye	1,100000	8	1
+6130	Light Blue Ultra Constructor	1,100000	1	0
+6164	Light Gray Creative Destructor	1,100000	1	0
+6222	Light Gray Ultra Constructor	1,100000	1	0
+6264	Lime Concrete Hopper Botany Pot	1,100000	2	0
+6293	Lime External Storage	1,100000	1	0
+6441	Lumium Gear	1,100000	2	1
+6449	Mace	1,100000	1	0
+6478	Magenta Concrete Powder	1,100000	4	1
+6503	Magenta Elite Exporter	1,100000	1	0
+6511	Magenta Glazed Hopper Botany Pot	1,100000	2	0
+6542	Magenta Terracotta	1,100000	4	1
+6552	Magenta Ultra Exporter	1,100000	1	0
+6622	Marked Draconium Fusion Crafting Injector	1,100000	1	0
+6639	Tianshu Matter Warping Matrix Controller	1,100000	1	0
+6659	ME Absolute Crystallizing Factory	1,100000	1	0
+6707	ME Basic Crushing Factory	1,100000	1	0
+6734	ME Chemical Replicator	1,100000	1	0
+6905	ME Ultimate Liquifying Factory	1,100000	1	0
+6947	MEGA Crafting Co-Processing Unit	1,100000	1	0
+7142	Molecular Assembler	1,100000	1	0
+7189	Mossy Stone Brick Botany Pot	1,100000	1	0
+7306	Yellow Network Cable	1,100000	2	0
+7309	Nether Brick	1,100000	2	1
+7366	Netherite Backpack	1,100000	1	0
+7446	Nozzle	1,100000	1	0
+7484	Oak Planks	1,100000	62	1
+7542	1M OMNI Crafting Storage	1,100000	1	0
+7589	Orange Elite Destructor	1,100000	1	0
+7603	Orange Kitchen Floor	1,100000	1	0
+7677	Osmium Plate	1,100000	2	1
+7750	White ME Overloaded Cable	1,100000	1	0
+7838	Entity Writer	1,100000	1	0
+7839	Energy Exporter	1,100000	1	0
+7846	Extra-Dimensional Reader	1,100000	1	0
+7868	Redstone Reader	1,100000	1	0
+7983	Pink Cooking Table	1,100000	1	0
+7997	Pink Disk Interface	1,100000	1	0
+8006	Pink External Storage	1,100000	1	0
+8059	Pink Ultra Importer	1,100000	1	0
+8142	Polished Blackstone Brick Wall	1,100000	7	0
+8172	Polished Cut Diorite	1,100000	3	1
+8214	Polished Diorite Stairs	1,100000	6	0
+8277	4M Portable Fluid Cell	1,100000	1	0
+8330	Advanced Portal Gun	1,100000	1	0
+8335	Potion Brewer	1,100000	1	0
+8374	Printed Calculation Circuit	1,100000	3	1
+8490	Purified Meteor Crystal	1,100000	1	0
+8518	Purple Crafting Grid	1,100000	1	0
+8529	Purple Dye	1,100000	7	1
+8552	Purple Mega Disk Interface	1,100000	1	0
+8644	Quantum Infused Dust	1,100000	1	1
+8658	64k Quantum Storage Cell	1,100000	2	0
+8669	64M Quantum Storage Component	1,100000	1	0
+8673	ME Quantum Ring	1,100000	1	0
+8688	Certus Quartz Brick Wall	1,100000	3	0
+8709	Certus Quartz Pillar Stairs	1,100000	5	0
+8728	Radiator Block	1,100000	1	0
+8854	Raw Zinc Block	1,100000	1	0
+8868	Reactor Stabilizer Inner Rotor	1,100000	1	1
+8875	ME Recharging Card	1,100000	1	0
+8938	Red Mega Importer	1,100000	1	0
+8984	Red Ultra Disk Interface	1,100000	1	0
+8995	Redstone Alloy Essence	1,100000	1	1
+9097	Reactor Control Rod (Reinforced)	1,100000	1	0
+9121	Turbine Redstone Port (Reinforced)	1,100000	1	0
+9226	Rotten Flesh	1,100000	7	1
+9297	Schematicannon	1,100000	1	0
+9346	Sentry Watcher Spawn Egg	1,100000	3	0
+9352	Sewage Composter	1,100000	1	0
+9430	Copper Shard	1,100000	4	1
+9462	Constantan Sheetmetal	1,100000	2	0
+9476	Shield Projector Tier 1	1,100000	1	0
+9611	Sky Stone Small Brick Wall	1,100000	4	0
+9619	Treated Aluminium Scaffolding Slab	1,100000	1	0
+9648	Red Sheetmetal Slab	1,100000	1	0
+9773	Smithing Upgrade	1,100000	1	0
+9785	Smooth Quartz Slab	1,100000	4	1
+9790	Smooth Red Sandstone Slab	1,100000	3	0
+9905	Soulstone Bricks	1,100000	3	0
+10097	Steel Chestplate	1,100000	1	1
+10111	Steel Paxel	1,100000	1	1
+10123	Steel Structural Arm	1,100000	1	0
+10247	Stripped Acacia Log	1,100000	3	1
+10374	Supreme Replicating Factory	1,100000	1	0
+10384	Supremium Axe	1,100000	1	1
+10390	Supremium Coal Block	1,100000	1	0
+10444	Tank	1,100000	1	0
+10447	Target	1,100000	1	0
+10515	Thermo Generator (Starter)	1,100000	1	0
+10519	Addon: Thread Tier 2	1,100000	1	0
+10537	Tianshu Supercomputing Array Controller	1,100000	1	0
+10646	Travel Anchor	1,100000	1	0
+10693	Tuff Stairs	1,100000	5	0
+10810	Unobtainium Pickaxe	1,100000	1	0
+10870	Upgrade: Homing Arrow	1,100000	1	0
+10873	I/O Capacity Upgrade	1,100000	1	0
+10885	Muffling Upgrade	1,100000	1	0
+10918	Upgrade: Swim Speed	1,100000	1	0
+11069	Warning Sign - Low Temperature	1,100000	1	0
+11071	Warning Sign - Hearing Protection	1,100000	1	0
+11080	Warning Sign - Villager	1,100000	1	0
+11154	Waxed Exposed Cut Copper Stairs	1,100000	7	0
+11203	Weathered Copper Tiles	1,100000	2	0
+11462	Yellow Cake Uranium	1,100000	1	1
+11495	Yellow Exporter	1,100000	1	0
+11522	Yellow Seat	1,100000	2	0
+11536	Yellow Waxed Botany Pot	1,100000	1	0
+11548	Yeta Wrench	1,100000	1	0
+11630	Liquid Malic Acid	1,100000	1	0
+12009	Sodium	1,100000	2	0
+12025	Water Vapor	1,100000	1	0
